@@ -1,43 +1,9 @@
-try {
-  fs.mkdirSync(path.join(__dirname, 'sessions'), { recursive: true });
-} catch (e) {
-  console.error('No se pudo crear carpeta de sesión:', e.message);
-}
-
-// ---- Puppeteer Chrome resolver (instala en runtime si falta) ----
-async function resolveChromeExecutable() {
-  try {
-    const ep = puppeteer.executablePath();
-    if (ep && fs.existsSync(ep)) {
-      console.log('Chromium encontrado en:', ep);
-      return ep;
-    }
-  } catch (e) {
-    console.log('No se pudo resolver executablePath inicial:', e.message);
-  }
-  const cacheDir = process.env.PUPPETEER_CACHE_DIR || '/opt/render/.cache/puppeteer';
-  try {
-    console.log('Intentando instalar Chrome en runtime...');
-    await puppeteer.browsers.install({ browser: 'chrome', cacheDir });
-  } catch (e) {
-    console.error('Fallo al instalar Chrome en runtime:', e.message);
-  }
-  try {
-    const ep2 = puppeteer.executablePath();
-    console.log('Chromium tras instalación en:', ep2);
-    return ep2;
-  } catch (e) {
-    console.error('No se pudo obtener executablePath luego de instalar:', e.message);
-    return undefined;
-  }
-}
-
+const puppeteer = require('puppeteer');
 /*script:app_asisto*/
 /*version:1.06.02   11/07/2025*/
 
 //const chatbot = require("./funciones_asisto.js")
-
-const puppeteer = require('puppeteer');const { Client, MessageMedia, LocalAuth } = require('whatsapp-web.js');
+const { Client, MessageMedia, LocalAuth } = require('whatsapp-web.js');
 const express = require('express');
 const { body, validationResult } = require('express-validator');
 const socketIO = require('socket.io');
@@ -149,12 +115,10 @@ server.listen(port, function() {
 
 });
 
+const client = new Client({
 
-let client;
-(async () => {
-  const chromePath = await resolveChromeExecutable();
-  client = new Client({
-     restartOnAuthFail: true,
+
+  restartOnAuthFail: true,
   puppeteer: {
    headless: headless,
    
@@ -170,44 +134,7 @@ let client;
     ],
   },
   authStrategy: new LocalAuth()
- ,
-    puppeteer: Object.assign({}, ({  restartOnAuthFail: true,
-  puppeteer: {
-   headless: headless,
-   
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--no-first-run',
-      '--no-zygote',
-      '--single-process', // <- this one doesn't works in Windows
-      '--disable-gpu'
-    ],
-  },
-  authStrategy: new LocalAuth()
-  }).puppeteer || {}, {
-      headless: 'new',
-      executablePath: chromePath,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--no-first-run',
-        '--no-zygote',
-        '--single-process',
-        '--disable-gpu',
-        '--disable-extensions',
-        '--disable-features=VizDisplayCompositor',
-        '--js-flags=--jitless'
-      ]
-    })
-  });
-  // Inicializar después de configurar
-  try { // client.initialize() movido al bootstrap } catch(e) { console.error('Error en client.initialize:', e.message); }
-})();
-
+});
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 async function ConsultaApiMensajes(){
@@ -1085,3 +1012,43 @@ function EscribirLog(mensaje,tipo){
 
 
 }
+
+
+// ---- Bootstrap asíncrono para inicializar Client con Puppeteer ----
+(async () => {
+  try {
+    const chromePath = await resolveChromeExecutable();
+
+    const SESSION_PATH = path.join(__dirname, 'sessions');
+    try {
+      fs.mkdirSync(SESSION_PATH, { recursive: true });
+    } catch (e) {
+      console.error('No se pudo crear carpeta de sesión:', e && e.message ? e.message : e);
+    }
+
+    client = new Client({
+      restartOnAuthFail: true,
+      authStrategy: new LocalAuth({ dataPath: SESSION_PATH }),
+      puppeteer: {
+        headless: 'new',
+        executablePath: chromePath,
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--no-first-run',
+          '--no-zygote',
+          '--single-process',
+          '--disable-gpu',
+          '--disable-extensions',
+          '--disable-features=VizDisplayCompositor',
+          '--js-flags=--jitless'
+        ]
+      }
+    });
+
+    await client.initialize();
+  } catch (e) {
+    console.error('Bootstrap error:', e && e.message ? e.message : e);
+  }
+})();
