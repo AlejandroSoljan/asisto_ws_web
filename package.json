@@ -5,7 +5,7 @@
   "main": "app_asisto.js",
   "scripts": {
     "start": "node app_asisto.js",
-    "postinstall": "node -e \"require('puppeteer').executablePath();\""
+    "postinstall": "npx puppeteer browsers install chrome"
   },
   "dependencies": {
     "axios":"^1.4.0",
