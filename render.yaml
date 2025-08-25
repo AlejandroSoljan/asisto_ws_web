@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: asisto-whatsapp
+    env: docker
+    plan: starter
+    autoDeploy: true
+    healthCheckPath: /
+    disks:
+      - name: sess
+        mountPath: /data
+        sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SESSION_PATH
+        value: /data/wwebjs
+      - key: CHROME_PATH
+        value: /usr/bin/chromium
