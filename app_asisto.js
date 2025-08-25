@@ -19,9 +19,6 @@ const utf8 = require('utf8');
 const nodemailer = require('nodemailer');
 const { eventNames } = require('process');
 const fs = require('fs');
-
-const ensureDir = (p)=>{ try{ fs.mkdirSync(p,{recursive:true}); }catch(e){} };
-ensureDir(path.join(__dirname,'sessions'));
 const path = require('path');
 
 
@@ -86,7 +83,10 @@ const logFilePath_error = path.join(__dirname, 'app_asisto_error.log');
 EscribirLog("inicio Script","event");
 
 
+
+try { fs.mkdirSync(path.join(__dirname, 'sessions'), { recursive: true }); } catch (e) { console.error('No se pudo crear ./sessions:', e.message); }
 const app = express();
+app.use(express.static(path.join(__dirname, 'public')));
 const server = http.createServer(app);
 const io = socketIO(server);
 
@@ -100,10 +100,10 @@ app.use(fileUpload({
   debug: false
 }));
 
-app.use(express.static(path.join(__dirname, 'public')));
-
 app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  res.sendFile('index.html', {
+    root: __dirname
+  });
 });
 
 RecuperarJsonConf();
@@ -111,7 +111,7 @@ RecuperarJsonConf();
 
 //const port =  devolver_puerto();
 
-server.listen(port, function() {
+server.listen(process.env.PORT || port, function() {
   console.log('App running on *: ' + port);
   EscribirLog('App running on *: ' + port,"event");
 
@@ -239,16 +239,16 @@ async function ConsultaApiMensajes(){
                  if (contenido != null ){
                   console.log('tipo de dato: '+detectMimeType(contenido));
                   var media = await new MessageMedia(detectMimeType(contenido), contenido, Content_nombre);
-                  await client.sendMessage(Nro_tel_format,media,{caption:  Msj });
+                  //await client.sendMessage(Nro_tel_format,media,{caption:  Msj });
                   await io.emit('message', 'Mensaje: '+Nro_tel_format+': '+ Msj );
-                  //await client.sendMessage('5493462674128@c.us',media,{caption:  Msj });
+                  await client.sendMessage('5493462674128@c.us',media,{caption:  Msj });
                   
                   } else{
                     console.log("msj texto");
                     if (Msj == null){ Msj = ''}
-                    await client.sendMessage(Nro_tel_format,  Msj );
+                    //await client.sendMessage(Nro_tel_format,  Msj );
                     await io.emit('message', 'Mensaje: '+Nro_tel_format+': '+ Msj );
-                   // await client.sendMessage('5493462674128@c.us',  Msj );
+                    await client.sendMessage('5493462674128@c.us',  Msj );
                   }
                   /////////////////////////////////////////
                   let contact = await client.getContactById(Nro_tel_format);
@@ -342,7 +342,7 @@ EscribirLog(message.from +' '+message.to+' '+message.type+' '+message.body ,"eve
   console.log("mensaje "+message.from);
  
   
-if (message.from=='5493462514448@c.us'   ){
+//if (message.from=='5493462514448@c.us'   ){
 
   
     
@@ -355,8 +355,8 @@ if (message.from=='5493462514448@c.us'   ){
    
    var telefonoTo = message.to;
    var telefonoFrom = message.from;
-    var telefonoFrom = '5493425472992@c.us' 
-    var telefonoTo = '5493424293943@c.us'
+    //var telefonoFrom = '5493425472992@c.us' 
+   // var telefonoTo = '5493424293943@c.us'
 
     telefonoTo = telefonoTo.replace('@c.us','');
     telefonoFrom = telefonoFrom.replace('@c.us','');
@@ -505,7 +505,7 @@ if (message.from=='5493462514448@c.us'   ){
       procesar_mensaje(jsonGlobal[indice_telefono][2], message);
 
      }
- }  //
+// }  //
 
 });
 
