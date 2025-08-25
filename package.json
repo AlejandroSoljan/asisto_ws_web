@@ -1,0 +1,17 @@
+{
+  "name": "asisto-whatsapp-free-nodocker",
+  "version": "1.0.0",
+  "description": "WhatsApp Web (whatsapp-web.js) for Render free tier without Docker; Puppeteer downloads Chromium.",
+  "main": "app_asisto.js",
+  "scripts": {
+    "start": "node app_asisto.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.19.2",
+    "qrcode": "^1.5.4",
+    "socket.io": "^4.7.5",
+    "whatsapp-web.js": "^1.24.0",
+    "puppeteer": "^22.13.1"
+  }
+}
