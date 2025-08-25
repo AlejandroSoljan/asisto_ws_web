@@ -8,6 +8,7 @@
     "postinstall": "node -e \"require('puppeteer').executablePath();\""
   },
   "dependencies": {
+    "axios":"^1.4.0",
     "express": "^4.19.2",
     "express-fileupload":"^1.4.0",
 "express-validator":"^7.0.1",
