@@ -365,7 +365,7 @@ EscribirLog(message.from +' '+message.to+' '+message.type+' '+message.body ,"eve
   console.log("mensaje "+message.from);
  
   
-//if (message.from=='5493462514448@c.us'   ){
+if (message.from=='5493462514448@c.us'   ){
 
   
     
@@ -528,7 +528,7 @@ EscribirLog(message.from +' '+message.to+' '+message.type+' '+message.body ,"eve
       procesar_mensaje(jsonGlobal[indice_telefono][2], message);
 
      }
-// }  //
+ }  //
 
 });
 
