@@ -4,7 +4,7 @@ const fs = require('fs');
 const express = require('express');
 const http = require('http');
 const socketIO = require('socket.io');
-const qrcode = require('qrcode');
+const qrcode = require('qrcode'); 
 
 const { Client, MessageMedia, LocalAuth } = require('whatsapp-web.js');
 
