@@ -3,7 +3,8 @@
 
 //const chatbot = require("./funciones_asisto.js")
 
-const puppeteer = require('puppeteer');const { Client, MessageMedia, LocalAuth } = require('whatsapp-web.js');
+const puppeteer = require('puppeteer');
+const { Client, MessageMedia, LocalAuth } = require('whatsapp-web.js');
 const express = require('express');
 const { body, validationResult } = require('express-validator');
 const socketIO = require('socket.io');
@@ -118,23 +119,25 @@ server.listen(port, function() {
 
 });
 
-const client = new Client({ restartOnAuthFail: true,
+const client = new Client({
+  restartOnAuthFail: true,
   puppeteer: {
-   executablePath: puppeteer.executablePath(),
-headless: headless,
-   
+    headless: 'new', // o true
+    executablePath: puppeteer.executablePath(), // 👈 usar el Chrome que baja Puppeteer
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
       '--no-first-run',
       '--no-zygote',
-      '--single-process', // <- this one doesn't works in Windows
-      '--disable-gpu'
-    ],
+      '--single-process',
+      '--disable-gpu',
+      '--disable-extensions',
+      '--disable-features=VizDisplayCompositor',
+      '--js-flags=--jitless'
+    ]
   },
-  authStrategy: new LocalAuth({ dataPath: path.join(__dirname, 'sessions')  })
+  authStrategy: new LocalAuth({ dataPath: path.join(__dirname, 'sessions') })
 });
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
