@@ -6,7 +6,6 @@
   "scripts": {
     "start": "node app_asisto.js"
   },
-  "author": "",
   "license": "MIT",
   "dependencies": {
     "express": "^4.19.2",
