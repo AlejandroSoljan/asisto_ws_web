@@ -22,6 +22,28 @@ const { eventNames } = require('process');
 const fs = require('fs');
 const path = require('path');
 
+const { execSync } = require('child_process');
+
+function getChromePathOrInstall() {
+  try {
+    const p = puppeteer.executablePath();
+    if (p && fs.existsSync(p)) return p;
+  } catch (e) {
+    console.error('puppeteer.executablePath() falló:', e && e.message ? e.message : e);
+  }
+  try {
+    console.log('Instalando Chrome (runtime)...');
+    execSync('npx puppeteer browsers install chrome', { stdio: 'inherit' });
+    const p2 = puppeteer.executablePath();
+    if (p2 && fs.existsSync(p2)) return p2;
+  } catch (e) {
+    console.error('Instalación runtime de Chrome falló:', e && e.message ? e.message : e);
+  }
+  return null;
+}
+
+
+
 
 var a = 0;
 //var port = 8002
@@ -100,9 +122,7 @@ app.use(fileUpload({
 }));
 
 app.get('/', (req, res) => {
-  res.sendFile('index.html', {
-    root: __dirname
-  });
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 RecuperarJsonConf();
@@ -110,7 +130,7 @@ RecuperarJsonConf();
 
 //const port =  devolver_puerto();
 
-server.listen(port, function() {
+server.listen(process.env.PORT || port, function() {
   console.log('App running on *: ' + port);
   EscribirLog('App running on *: ' + port,"event");
 
@@ -123,20 +143,21 @@ const client = new Client({
 
   restartOnAuthFail: true,
   puppeteer: {
-   executablePath: puppeteer.executablePath(),
-headless: headless,
-   
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--no-first-run',
-      '--no-zygote',
-      '--single-process', // <- this one doesn't works in Windows
-      '--disable-gpu'
-    ],
-  },
+   headless: 'new',
+   executablePath: (getChromePathOrInstall() || puppeteer.executablePath()),
+   args: [
+     '--no-sandbox',
+     '--disable-setuid-sandbox',
+     '--disable-dev-shm-usage',
+     '--no-first-run',
+     '--no-zygote',
+     '--single-process',
+     '--disable-gpu',
+     '--disable-extensions',
+     '--disable-features=VizDisplayCompositor',
+     '--js-flags=--jitless'
+   ]
+ },
   authStrategy: new LocalAuth({ dataPath: path.join(__dirname, 'sessions') })
 });
 
@@ -978,7 +999,7 @@ function RecuperarJsonConf(){
     headless = false
   }
 
-   // server.listen(port, function() {
+   // server.listen(process.env.PORT || port, function() {
   //console.log('App running on *: ' + port);
 //});
 
