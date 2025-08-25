@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>Vincular WhatsApp</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, sans-serif; padding: 24px; max-width: 720px; margin: auto; }
+    #qr { width: 320px; height: 320px; border: 1px solid #ddd; display: block; }
+    .log { background: #f7f7f7; border: 1px solid #eee; padding: 12px; height: 240px; overflow:auto; }
+    .muted { color: #666; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <h1>Vincular WhatsApp</h1>
+  <p>Escaneá este QR con la app de WhatsApp en tu teléfono: <b>Menú &gt; Dispositivos vinculados</b>.</p>
+  <img id="qr" src="" alt="QR" />
+  <p class="muted">Si no aparece el QR, actualizá la página en unos segundos.</p>
+  <h2>Eventos</h2>
+  <div class="log" id="log"></div>
+
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js" crossorigin="anonymous"></script>
+  <script>
+    const socket = io();
+    const $qr = document.getElementById('qr');
+    const $log = document.getElementById('log');
+
+    function push(msg){
+      const p = document.createElement('div');
+      p.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      $log.appendChild(p);
+      $log.scrollTop = $log.scrollHeight;
+    }
+
+    socket.on('message', msg => push(msg));
+    socket.on('authenticated', msg => push(msg));
+    socket.on('qr', dataUrl => {
+      $qr.src = dataUrl;
+      push('QR actualizado');
+    });
+  </script>
+</body>
+</html>
