@@ -1,9 +1,9 @@
-const puppeteer = require('puppeteer');
 /*script:app_asisto*/
 /*version:1.06.02   11/07/2025*/
 
 //const chatbot = require("./funciones_asisto.js")
-const { Client, MessageMedia, LocalAuth } = require('whatsapp-web.js');
+
+const puppeteer = require('puppeteer');const { Client, MessageMedia, LocalAuth } = require('whatsapp-web.js');
 const express = require('express');
 const { body, validationResult } = require('express-validator');
 const socketIO = require('socket.io');
@@ -85,6 +85,7 @@ EscribirLog("inicio Script","event");
 
 
 const app = express();
+app.use(express.static(path.join(__dirname, 'public')));
 const server = http.createServer(app);
 const io = socketIO(server);
 
@@ -115,12 +116,15 @@ server.listen(port, function() {
 
 });
 
+
+try { fs.mkdirSync(path.join(__dirname, 'sessions'), { recursive: true }); } catch (e) { console.error('No se pudo crear carpeta de sesión:', e?.message || e); }
 const client = new Client({
 
 
   restartOnAuthFail: true,
   puppeteer: {
-   headless: headless,
+   executablePath: puppeteer.executablePath(),
+headless: headless,
    
     args: [
       '--no-sandbox',
@@ -133,7 +137,7 @@ const client = new Client({
       '--disable-gpu'
     ],
   },
-  authStrategy: new LocalAuth()
+  authStrategy: new LocalAuth({ dataPath: path.join(__dirname, 'sessions') })
 });
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -567,7 +571,8 @@ client.initialize();
     socket.emit('message', 'Whatsapp Desconectado!');
     chatbot.EnviarEmail('Chatbot Desconectado ','Desconectando...'+client);
     client.destroy();
-    client.initialize();
+    // client.initialize() duplicado eliminado
+
   });
 });
 
@@ -615,8 +620,8 @@ client.on('auth_failure', function(session) {
 client.on('disconnected', (reason) => {
   io.emit('message', 'Whatsapp Desconectado!');
   EnviarEmail('Chatbot Desconectado ','Desconectando...'+client);
-  EscribirLog('Chatbot Desconectado ','Desconectando...',"event");
-  client.destroy();
+  EscribirLog('Chatbot Desconectado ','Desconectando...',"event");// client.initialize() duplicado eliminado
+
   client.initialize();
 });
 
@@ -1012,43 +1017,3 @@ function EscribirLog(mensaje,tipo){
 
 
 }
-
-
-// ---- Bootstrap asíncrono para inicializar Client con Puppeteer ----
-(async () => {
-  try {
-    const chromePath = await resolveChromeExecutable();
-
-    const SESSION_PATH = path.join(__dirname, 'sessions');
-    try {
-      fs.mkdirSync(SESSION_PATH, { recursive: true });
-    } catch (e) {
-      console.error('No se pudo crear carpeta de sesión:', e && e.message ? e.message : e);
-    }
-
-    client = new Client({
-      restartOnAuthFail: true,
-      authStrategy: new LocalAuth({ dataPath: SESSION_PATH }),
-      puppeteer: {
-        headless: 'new',
-        executablePath: chromePath,
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--no-first-run',
-          '--no-zygote',
-          '--single-process',
-          '--disable-gpu',
-          '--disable-extensions',
-          '--disable-features=VizDisplayCompositor',
-          '--js-flags=--jitless'
-        ]
-      }
-    });
-
-    await client.initialize();
-  } catch (e) {
-    console.error('Bootstrap error:', e && e.message ? e.message : e);
-  }
-})();
