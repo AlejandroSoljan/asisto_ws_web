@@ -1,4 +1,8 @@
-try { fs.mkdirSync(path.join(__dirname, 'sessions'), { recursive: true }); } catch {}
+try {
+  fs.mkdirSync(path.join(__dirname, 'sessions'), { recursive: true });
+} catch (e) {
+  console.error('No se pudo crear carpeta de sesión:', e.message);
+}
 
 // ---- Puppeteer Chrome resolver (instala en runtime si falta) ----
 async function resolveChromeExecutable() {
