@@ -8,9 +8,10 @@ const qrcode = require('qrcode');
 
 const { Client, MessageMedia, LocalAuth } = require('whatsapp-web.js');
 
-// --- Config Render / General ---
+// --- Config general (FREE TIER) ---
+// Guardamos la sesión en ./sessions (carpeta local del contenedor)
 const PORT = process.env.PORT || 3000;
-const SESSION_PATH = process.env.SESSION_PATH || '/data/wwebjs';
+const SESSION_PATH = path.join(__dirname, 'sessions');
 const CHROME_PATH = process.env.CHROME_PATH || '/usr/bin/chromium';
 
 // --- Asegurar carpeta de sesión ---
@@ -41,8 +42,7 @@ app.get('/', (req, res) => {
 function log(msg) {
   console.log(msg);
   try {
-    fs.appendFileSync(path.join(__dirname, 'server.log'), `[${new Date().toISOString()}] ${msg}
-`);
+    fs.appendFileSync(path.join(__dirname, 'server.log'), `[${new Date().toISOString()}] ${msg}\n`);
   } catch (e) {}
 }
 
