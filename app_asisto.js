@@ -13,6 +13,14 @@ const PORT = process.env.PORT || 3000;
 const SESSION_PATH = process.env.SESSION_PATH || '/data/wwebjs';
 const CHROME_PATH = process.env.CHROME_PATH || '/usr/bin/chromium';
 
+// --- Asegurar carpeta de sesión ---
+try {
+  fs.mkdirSync(SESSION_PATH, { recursive: true });
+  console.log(`✅ Carpeta de sesión lista en: ${SESSION_PATH}`);
+} catch (e) {
+  console.error('❌ Error creando carpeta de sesión:', e.message);
+}
+
 // --- App & Server ---
 const app = express();
 const server = http.createServer(app);
@@ -86,7 +94,7 @@ client.on('ready', () => {
 client.on('disconnected', (reason) => {
   io.emit('message', `WhatsApp desconectado: ${reason}`);
   log('WhatsApp disconnected: ' + reason);
-  // Recomendar reintentos leves
+  // Reintento automático
   setTimeout(() => client.initialize(), 5000);
 });
 
@@ -102,14 +110,11 @@ client.on('message', async (msg) => {
 });
 
 // --- Simple REST endpoint to send a test message ---
-// Body JSON: { "to": "549351XXXXXXX", "message": "Hola!" }
-// Nota: añadir el sufijo @c.us si solo envías el número
 app.post('/send', async (req, res) => {
   try {
     let { to, message } = req.body;
     if (!to || !message) return res.status(400).json({ ok: false, error: 'Faltan campos to/message' });
 
-    // normalizar número
     if (!to.endsWith('@c.us')) to = `${to}@c.us`;
 
     await client.sendMessage(to, message);
