@@ -20,6 +20,7 @@ const nodemailer = require('nodemailer');
 const { eventNames } = require('process');
 const fs = require('fs');
 const path = require('path');
+const puppeteer = require('puppeteer');
 
 
 var a = 0;
@@ -123,7 +124,7 @@ const client = new Client({
   restartOnAuthFail: true,
   puppeteer: {
    headless: headless,
-   
+    executablePath: puppeteer.executablePath(),
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
