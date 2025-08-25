@@ -2,7 +2,8 @@
 /*version:1.06.02   11/07/2025*/
 
 //const chatbot = require("./funciones_asisto.js")
-const { Client, MessageMedia, LocalAuth } = require('whatsapp-web.js');
+
+const puppeteer = require('puppeteer');const { Client, MessageMedia, LocalAuth } = require('whatsapp-web.js');
 const express = require('express');
 const { body, validationResult } = require('express-validator');
 const socketIO = require('socket.io');
@@ -20,7 +21,6 @@ const nodemailer = require('nodemailer');
 const { eventNames } = require('process');
 const fs = require('fs');
 const path = require('path');
-const puppeteer = require('puppeteer');
 
 
 var a = 0;
@@ -112,19 +112,17 @@ RecuperarJsonConf();
 
 //const port =  devolver_puerto();
 
-server.listen(process.env.PORT || port, function() {
+server.listen(port, function() {
   console.log('App running on *: ' + port);
   EscribirLog('App running on *: ' + port,"event");
 
 });
 
-const client = new Client({
-
-
-  restartOnAuthFail: true,
+const client = new Client({ restartOnAuthFail: true,
   puppeteer: {
-   headless: headless,
-    executablePath: puppeteer.executablePath(),
+   executablePath: puppeteer.executablePath(),
+headless: headless,
+   
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -136,7 +134,7 @@ const client = new Client({
       '--disable-gpu'
     ],
   },
-  authStrategy: new LocalAuth({ dataPath: path.join(__dirname, 'sessions') })
+  authStrategy: new LocalAuth({ dataPath: path.join(__dirname, 'sessions')  })
 });
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
