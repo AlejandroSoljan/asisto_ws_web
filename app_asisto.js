@@ -19,6 +19,7 @@ const utf8 = require('utf8');
 //const { OdbcError } = require('odbc');
 const nodemailer = require('nodemailer');
 const { eventNames } = require('process');
+const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
@@ -27,6 +28,15 @@ const path = require('path');
 // Configura en el Dashboard un Disk con Mount Path /var/data.
 const WA_CLIENT_ID = process.env.WA_CLIENT_ID || 'default';
 const SESSIONS_DIR = process.env.SESSIONS_DIR || '/var/data/wwebjs';
+
+
+// ========= CONFIG CACHÉ PUPPETEER (persistente) =========
+// Guarda Chromium en el Disk para no re-descargar en cada deploy.
+process.env.PUPPETEER_CACHE_DIR = process.env.PUPPETEER_CACHE_DIR || '/var/data/.cache/puppeteer';
+process.env.PUPPETEER_DOWNLOAD_PATH = process.env.PUPPETEER_DOWNLOAD_PATH || '/var/data/.cache/puppeteer';
+// Evita headless "nuevo" inestable
+process.env.PUPPETEER_PRODUCT = process.env.PUPPETEER_PRODUCT || 'chrome';
+
 
 // Verifica que el directorio exista y sea escribible (si falla, corta el proceso).
 function ensureWritableDir(dir) {
@@ -42,11 +52,61 @@ function ensureWritableDir(dir) {
 }
 ensureWritableDir(SESSIONS_DIR);
 
+ensureWritableDir(process.env.PUPPETEER_CACHE_DIR);
 
+// ========= RESOLVER/INSTALAR CHROME EN RUNTIME (fallback seguro) =========
+function fileExists(p) {
+  try { return p && fs.existsSync(p); } catch { return false; }
+}
 
+function tryPuppeteerExecutablePath() {
+  try {
+    const p = puppeteer.executablePath();
+    return fileExists(p) ? p : null;
+  } catch { return null; }
+}
 
+function tryCommonSystemPaths() {
+  const candidates = [
+    process.env.CHROME_PATH,
+    process.env.PUPPETEER_EXECUTABLE_PATH,
+    '/usr/bin/google-chrome',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/chromium',
+  ].filter(Boolean);
+  for (const c of candidates) if (fileExists(c)) return c;
+  return null;
+}
+
+function installChromeIfNeeded() {
+  // Descarga Chrome/Chromium dentro de /var/data/.cache/puppeteer
+  // Nota: requiere que 'puppeteer' esté en dependencias.
+  try {
+    console.log('[CHROME] Instalando Chrome con puppeteer (una sola vez)…');
+    execSync('npx puppeteer browsers install chrome', {
+      stdio: 'inherit',
+      env: { ...process.env, PUPPETEER_CACHE_DIR: process.env.PUPPETEER_CACHE_DIR }
+    });
+  } catch (e) {
+    console.error('[CHROME] Falló la instalación automática:', e?.message || e);
+  }
+}
 
 function getChromePathOrInstall() {
+  // 1) env / system
+  let found = tryCommonSystemPaths() || tryPuppeteerExecutablePath();
+  if (found) return found;
+  // 2) instalar y reintentar
+  installChromeIfNeeded();
+  found = tryPuppeteerExecutablePath();
+ if (found) return found;
+  console.warn('[CHROME] No se encontró Chrome tras instalación; Puppeteer usará su resolución interna.');
+  return undefined;
+}
+
+
+///////////////////
+/*function getChromePathOrInstall() {
   try {
     const p = puppeteer.executablePath();
     if (p && fs.existsSync(p)) return p;
@@ -62,7 +122,7 @@ function getChromePathOrInstall() {
     console.error('Instalación runtime de Chrome falló:', e && e.message ? e.message : e);
   }
   return null;
-}
+}*/
 
 
 
@@ -169,15 +229,9 @@ const client = new Client({
    executablePath: (getChromePathOrInstall() || puppeteer.executablePath()),
    args: [
      '--no-sandbox',
-     '--disable-setuid-sandbox',
-     '--disable-dev-shm-usage',
-     '--no-first-run',
-     '--no-zygote',
-     '--single-process',
-     '--disable-gpu',
-     '--disable-extensions',
-     '--disable-features=VizDisplayCompositor',
-     '--js-flags=--jitless'
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--window-size=1920,1080'
    ]
  },
   authStrategy: new LocalAuth({
