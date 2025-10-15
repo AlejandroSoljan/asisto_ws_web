@@ -466,7 +466,7 @@ EscribirLog(message.from +' '+message.to+' '+message.type+' '+message.body ,"eve
  await io.emit('message', 'Mensaje: '+message.from+': '+ message.body );
 
 
-if(telefonoFrom == 'status@broadcast'){
+if(message.from == 'status@broadcast'){
       console.log("mensaje de estado");
       return
     }
