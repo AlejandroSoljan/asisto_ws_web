@@ -1,27 +1,31 @@
 /*script:app_asisto*/
 /*version:1.06.02   11/07/2025*/
 
-//const chatbot = require("./funciones_asisto.js")
+// ====== VARIABLES DE ENTORNO (deben declararse ANTES de requerir puppeteer) ======
+process.env.PUPPETEER_PRODUCT = process.env.PUPPETEER_PRODUCT || 'chrome';
+// Cache/carpeta de descarga en el Disk persistente:
+process.env.PUPPETEER_CACHE_DIR = process.env.PUPPETEER_CACHE_DIR || '/var/data/.cache/puppeteer';
+process.env.PUPPETEER_DOWNLOAD_PATH = process.env.PUPPETEER_DOWNLOAD_PATH || '/var/data/.cache/puppeteer';
 
-const puppeteer = require('puppeteer');const { Client, MessageMedia, LocalAuth } = require('whatsapp-web.js');
+// ====== IMPORTS ======
+const fs = require('fs');
+const path = require('path');
+const { execSync } = require('child_process');
+const puppeteer = require('puppeteer');
+const { Client, MessageMedia, LocalAuth } = require('whatsapp-web.js');
 const express = require('express');
 const { body, validationResult } = require('express-validator');
 const socketIO = require('socket.io');
 const qrcode = require('qrcode');
 const http = require('http');
-//var odbc = require("odbc");
 const fetch = require('node-fetch');
 const fileUpload = require('express-fileupload');
 const axios = require('axios');
 const mime = require('mime-types');
 const { ClientInfo } = require('whatsapp-web.js/src/structures');
 const utf8 = require('utf8');
-//const { OdbcError } = require('odbc');
 const nodemailer = require('nodemailer');
 const { eventNames } = require('process');
-const { execSync } = require('child_process');
-const fs = require('fs');
-const path = require('path');
 
 // === Persistencia de sesión en Render ===
 // Usa EXACTAMENTE el mount path del Disk. Por defecto Render recomienda /var/data.
@@ -29,13 +33,6 @@ const path = require('path');
 const WA_CLIENT_ID = process.env.WA_CLIENT_ID || 'default';
 const SESSIONS_DIR = process.env.SESSIONS_DIR || '/var/data/wwebjs';
 
-
-// ========= CONFIG CACHÉ PUPPETEER (persistente) =========
-// Guarda Chromium en el Disk para no re-descargar en cada deploy.
-process.env.PUPPETEER_CACHE_DIR = process.env.PUPPETEER_CACHE_DIR || '/var/data/.cache/puppeteer';
-process.env.PUPPETEER_DOWNLOAD_PATH = process.env.PUPPETEER_DOWNLOAD_PATH || '/var/data/.cache/puppeteer';
-// Evita headless "nuevo" inestable
-process.env.PUPPETEER_PRODUCT = process.env.PUPPETEER_PRODUCT || 'chrome';
 
 
 // Verifica que el directorio exista y sea escribible (si falla, corta el proceso).
@@ -92,15 +89,37 @@ function installChromeIfNeeded() {
   }
 }
 
+// Devuelve el binario instalado bajo el caché persistente (/var/data/.cache/puppeteer)
+function resolveInstalledChromePath() {
+  try {
+    const base = process.env.PUPPETEER_CACHE_DIR || '/var/data/.cache/puppeteer';
+    const root = path.join(base, 'chrome');
+    const versions = fs.readdirSync(root).filter(Boolean);
+    for (const v of versions) {
+      const candidate = path.join(root, v, 'chrome-linux64', 'chrome');
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  } catch (_) {}
+  return null;
+}
+
+
+
 function getChromePathOrInstall() {
   // 1) env / system
   let found = tryCommonSystemPaths() || tryPuppeteerExecutablePath();
   if (found) return found;
   // 2) instalar y reintentar
   installChromeIfNeeded();
-  found = tryPuppeteerExecutablePath();
- if (found) return found;
-  console.warn('[CHROME] No se encontró Chrome tras instalación; Puppeteer usará su resolución interna.');
+   // Priorizar el binario instalado en el caché persistente
+  found = resolveInstalledChromePath() || tryPuppeteerExecutablePath();
+  if (found) {
+    // Exportar también para que puppeteer-core lo tome
+    process.env.PUPPETEER_EXECUTABLE_PATH = found;
+    console.log('[CHROME] Usando ejecutable instalado →', found);
+    return found;
+  }
+  console.warn('[CHROME] No se encontró Chrome tras instalación; Puppeteer intentará su resolución interna.');
   return undefined;
 }
 
@@ -226,7 +245,7 @@ const client = new Client({
   restartOnAuthFail: true,
   puppeteer: {
    headless: true,
-   executablePath: (getChromePathOrInstall() || puppeteer.executablePath()),
+   executablePath: (getChromePathOrInstall() || process.env.PUPPETEER_EXECUTABLE_PATH || puppeteer.executablePath()),
    args: [
      '--no-sandbox',
       '--disable-setuid-sandbox',
