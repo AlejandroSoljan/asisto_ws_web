@@ -308,25 +308,41 @@ if (process.env.SKIP_HTTP_SERVER !== '1') {
 
 //try { fs.mkdirSync(path.join(__dirname, 'sessions'), { recursive: true }); } catch (e) { console.error('No se pudo crear carpeta de sesión:', e?.message || e); }
 const client = new Client({
-
-
   restartOnAuthFail: true,
+
+  // 👇 Evita roturas de inyección si WA Web cambia el DOM
+  webVersionCache: {
+    type: 'remote',
+    remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html'
+  },
+
   puppeteer: {
-   headless: true,
-   executablePath: (getChromePathOrInstall() || process.env.PUPPETEER_EXECUTABLE_PATH || puppeteer.executablePath()),
-   args: [
-     '--no-sandbox',
+    headless: true,
+    // No cortes nunca operaciones del protocolo (navegaciones largas/recargas)
+    protocolTimeout: 0,
+    waitForInitialPage: true,
+    executablePath: (getChromePathOrInstall() || process.env.PUPPETEER_EXECUTABLE_PATH || puppeteer.executablePath()),
+    // Flags estables en contenedores (Render)
+    args: [
+      '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
-      '--window-size=1920,1080'
-   ]
- },
+      '--no-zygote',
+      '--disable-gpu',
+      '--window-size=1920,1080',
+      '--disable-background-timer-throttling',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-renderer-backgrounding',
+      '--no-first-run',
+      '--no-default-browser-check'
+    ]
+  },
+
   authStrategy: new LocalAuth({
     clientId: WA_CLIENT_ID,
     dataPath: SESSIONS_DIR // 👈 en el Disk persistente (/var/data/wwebjs)
   })
 });
-
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 async function ConsultaApiMensajes(){
   console.log("Consultando a API ");
