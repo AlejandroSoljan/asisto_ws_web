@@ -15,13 +15,27 @@ function spawnAdditionalClientsIfNeeded() {
   const list = (process.env.WA_CLIENT_IDS || process.env.WA_CLIENT_ID || 'default')
     .split(',').map(s => s.trim()).filter(Boolean);
   if (list.length <= 1) return;
+  // === LIMITE DE SESIONES Y SPAWN ESCALONADO PARA BAJA RAM ===
+  const MAX = Math.max(1, parseInt(process.env.MAX_WA_CLIENTS || '1', 10)); // por defecto 1
+  const DELAY = Math.max(0, parseInt(process.env.WORKER_SPAWN_DELAY_MS || '20000', 10)); // 20s
   // El principal conserva el primero y levanta HTTP/Socket.IO.
-  for (const id of list.slice(1)) {
-    const child = fork(process.argv[1], [], {
-      env: { ...process.env, WA_CLIENT_ID: id, CHILD_WORKER: '1', SKIP_HTTP_SERVER: '1' }
-    });
-    child.on('message', (msg) => { try { global.__io && global.__io.emit(msg.type, msg.payload); } catch(_) {} });
-  }
+  const idsToSpawn = list.slice(1, 1 + (MAX - 1));
+  idsToSpawn.forEach((id, idx) => {
+    setTimeout(() => {
+      const child = fork(process.argv[1], [], {
+        env: {
+          ...process.env,
+          WA_CLIENT_ID: id,
+          CHILD_WORKER: '1',
+          SKIP_HTTP_SERVER: '1',
+          // Limita heap de Node en workers para no exceder 512MB totales
+          NODE_OPTIONS: process.env.NODE_OPTIONS || '--max-old-space-size=256'
+        }
+      });
+      child.on('message', (msg) => { try { global.__io && global.__io.emit(msg.type, msg.payload); } catch(_) {} });
+      console.log('[MASTER] Spawned worker for', id);
+    }, DELAY * (idx + 1));
+  });
 }
 spawnAdditionalClientsIfNeeded();
 // ====== VARIABLES DE ENTORNO (deben declararse ANTES de requerir puppeteer) ======
@@ -322,14 +336,22 @@ const client = new Client({
     protocolTimeout: 0,
     waitForInitialPage: true,
     executablePath: (getChromePathOrInstall() || process.env.PUPPETEER_EXECUTABLE_PATH || puppeteer.executablePath()),
-    // Flags estables en contenedores (Render)
+   
+    // Flags estables + "LOW-RAM" para 512MB
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--no-zygote',
+      '--single-process',                 // ↓ RAM (si vieras inestabilidad, quitarlo)
+      '--renderer-process-limit=1',       // fuerza 1 renderer
       '--disable-gpu',
-      '--window-size=1920,1080',
+      '--disable-extensions',
+      '--disable-features=TranslateUI,BlinkGenPropertyTrees',
+      '--media-cache-size=0',
+      '--disk-cache-size=0',
+      '--mute-audio',
+      '--window-size=1280,800',           // ventana más chica = menos consumo
       '--disable-background-timer-throttling',
       '--disable-backgrounding-occluded-windows',
       '--disable-renderer-backgrounding',
