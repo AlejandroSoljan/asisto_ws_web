@@ -22,14 +22,25 @@ const { eventNames } = require('process');
 const fs = require('fs');
 const path = require('path');
 
-const { execSync } = require('child_process');
 // === Persistencia de sesión en Render ===
-// Usamos un Disk montado en /data para que sobreviva a reinicios/deploys
-const SESSIONS_DIR = process.env.SESSIONS_DIR || '/data/wwebjs';
+// Usa EXACTAMENTE el mount path del Disk. Por defecto Render recomienda /var/data.
+// Configura en el Dashboard un Disk con Mount Path /var/data.
 const WA_CLIENT_ID = process.env.WA_CLIENT_ID || 'default';
-// aseguramos que exista el directorio
-try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch (_) {}
+const SESSIONS_DIR = process.env.SESSIONS_DIR || '/var/data/wwebjs';
 
+// Verifica que el directorio exista y sea escribible (si falla, corta el proceso).
+function ensureWritableDir(dir) {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.accessSync(dir, fs.constants.W_OK);
+    console.log('[BOOT] Usando dataPath para LocalAuth →', dir);
+  } catch (err) {
+    console.error('[BOOT] No puedo escribir en', dir, '→', err.message);
+    console.error('[BOOT] Verificá en Render > Disks que el Mount Path sea /var/data (o ajustá SESSIONS_DIR).');
+    process.exit(1);
+  }
+}
+ensureWritableDir(SESSIONS_DIR);
 
 
 
@@ -148,7 +159,7 @@ server.listen(process.env.PORT || port, function() {
 });
 
 
-try { fs.mkdirSync(path.join(__dirname, 'sessions'), { recursive: true }); } catch (e) { console.error('No se pudo crear carpeta de sesión:', e?.message || e); }
+//try { fs.mkdirSync(path.join(__dirname, 'sessions'), { recursive: true }); } catch (e) { console.error('No se pudo crear carpeta de sesión:', e?.message || e); }
 const client = new Client({
 
 
@@ -171,7 +182,7 @@ const client = new Client({
  },
   authStrategy: new LocalAuth({
     clientId: WA_CLIENT_ID,
-    dataPath: SESSIONS_DIR
+    dataPath: SESSIONS_DIR // 👈 en el Disk persistente (/var/data/wwebjs)
   })
 });
 
