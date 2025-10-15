@@ -324,14 +324,13 @@ if (process.env.SKIP_HTTP_SERVER !== '1') {
 const client = new Client({
   restartOnAuthFail: true,
 
-  // 👇 Evita roturas de inyección si WA Web cambia el DOM
-  webVersionCache: {
-    type: 'remote',
-    remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html'
-  },
+  // 👇 USAR SIEMPRE LA VERSIÓN LIVE DE WA WEB
+  // (si hay loop de QR con una versión fijada, esto lo corta)
+  webVersionCache: { type: 'none' },
 
   puppeteer: {
-    headless: true,
+    // respetar tu config.json
+    headless: (typeof headless === 'boolean' ? headless : true),
     // No cortes nunca operaciones del protocolo (navegaciones largas/recargas)
     protocolTimeout: 0,
     waitForInitialPage: true,
@@ -365,6 +364,35 @@ const client = new Client({
     dataPath: SESSIONS_DIR // 👈 en el Disk persistente (/var/data/wwebjs)
   })
 });
+// ====== LOGS DE ESTADO PARA DIAGNÓSTICO FINO ======
+try {
+  client.on('loading_screen', (percent, message) => {
+    console.log(`[LOAD] ${percent}% - ${message || ''}`);
+  });
+  client.on('change_state', (state) => {
+    console.log('[STATE]', state);
+  });
+  client.on('ready_state', (state) => {
+    console.log('[READY_STATE]', state);
+  });
+} catch(_) {}
+
+// ====== EVITAR QUE SE PISEN QRs MIENTRAS EMPAREJÁS ======
+// Si no hay sesión activa aún, y tenés WA_CLIENT_IDS definidos,
+// desactiva el spawn de workers hasta que este proceso quede autenticado.
+let __pairingDone = false;
+client.on('authenticated', () => { __pairingDone = true; });
+client.on('qr', () => {
+  if (process.env.CHILD_WORKER !== '1' && !__pairingDone) {
+    // Señal mínima: durante pairing, no crear nuevos workers
+    // (en tu código el spawn ocurre al inicio; si usás varios IDs, seteá MAX_WA_CLIENTS=1)
+    process.env.MAX_WA_CLIENTS = '1';
+  }
+});
+
+
+
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 async function ConsultaApiMensajes(){
   console.log("Consultando a API ");
