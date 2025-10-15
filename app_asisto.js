@@ -868,7 +868,7 @@ client.on('ready', async () => {
    await io.emit('message', 'Whatsapp Listo!');
    EscribirLog('Whatsapp Listo!',"event");
 
-  //ConsultaApiMensajes();
+  ConsultaApiMensajes();
 
 
 });
