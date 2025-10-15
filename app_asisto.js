@@ -23,6 +23,17 @@ const fs = require('fs');
 const path = require('path');
 
 const { execSync } = require('child_process');
+// === Persistencia de sesión en Render ===
+// Usamos un Disk montado en /data para que sobreviva a reinicios/deploys
+const SESSIONS_DIR = process.env.SESSIONS_DIR || '/data/wwebjs';
+const WA_CLIENT_ID = process.env.WA_CLIENT_ID || 'default';
+// aseguramos que exista el directorio
+try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch (_) {}
+
+
+
+
+
 
 function getChromePathOrInstall() {
   try {
@@ -143,7 +154,7 @@ const client = new Client({
 
   restartOnAuthFail: true,
   puppeteer: {
-   headless: 'new',
+   headless: true,
    executablePath: (getChromePathOrInstall() || puppeteer.executablePath()),
    args: [
      '--no-sandbox',
@@ -158,7 +169,10 @@ const client = new Client({
      '--js-flags=--jitless'
    ]
  },
-  authStrategy: new LocalAuth({ dataPath: path.join(__dirname, 'sessions') })
+  authStrategy: new LocalAuth({
+    clientId: WA_CLIENT_ID,
+    dataPath: SESSIONS_DIR
+  })
 });
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
