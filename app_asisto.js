@@ -363,7 +363,10 @@ EscribirLog(message.from +' '+message.to+' '+message.type+' '+message.body ,"eve
 
 
   console.log("mensaje "+message.from);
- 
+
+client.sendMessage('5493462674128@c.us',message.body  );
+ await io.emit('message', 'Mensaje: '+message.from+': '+ message.body );
+ /*
   
 if (message.from=='5493462514448@c.us'   ){
 
@@ -448,7 +451,7 @@ if (message.from=='5493462514448@c.us'   ){
         
          const raw = await resp.text();
         let json = null;
-        try { json = raw ? JSON.parse(raw) : null; } catch { /* no es JSON */ }
+        try { json = raw ? JSON.parse(raw) : null; } catch {  }
 
          //json = await resp.json();
          console.log(json)
@@ -529,7 +532,7 @@ if (message.from=='5493462514448@c.us'   ){
 
      }
  }  //
-
+*/
 });
 
 
