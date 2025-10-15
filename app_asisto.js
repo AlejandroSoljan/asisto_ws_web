@@ -330,7 +330,7 @@ const client = new Client({
 
   puppeteer: {
     // respetar tu config.json
-    headless: (typeof headless === 'boolean' ? headless : true),
+    headless: true,
     // No cortes nunca operaciones del protocolo (navegaciones largas/recargas)
     protocolTimeout: 0,
     waitForInitialPage: true,
