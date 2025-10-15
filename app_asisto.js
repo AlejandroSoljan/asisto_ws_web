@@ -1,6 +1,29 @@
 /*script:app_asisto*/
 /*version:1.06.02   11/07/2025*/
-
+// ──────────────────────────────────────────────────────────────────────────────
+// MULTI-SESIÓN + PÁGINAS QR POR CUENTA
+// - Principal: sirve /qr/:id para ver cada QR.
+// - Workers: reenvían io.emit(...) por IPC al principal.
+// Uso:
+//   WA_CLIENT_IDS="cliente1,cliente2"   (el principal usa la 1ª; los demás se forkean)
+//   /qr/cliente1  /qr/cliente2  → para escanear cada QR en páginas separadas.
+// ──────────────────────────────────────────────────────────────────────────────
+const { fork } = require('child_process');
+const IS_WORKER = process.env.CHILD_WORKER === '1';
+function spawnAdditionalClientsIfNeeded() {
+  if (IS_WORKER) return;
+  const list = (process.env.WA_CLIENT_IDS || process.env.WA_CLIENT_ID || 'default')
+    .split(',').map(s => s.trim()).filter(Boolean);
+  if (list.length <= 1) return;
+  // El principal conserva el primero y levanta HTTP/Socket.IO.
+  for (const id of list.slice(1)) {
+    const child = fork(process.argv[1], [], {
+      env: { ...process.env, WA_CLIENT_ID: id, CHILD_WORKER: '1', SKIP_HTTP_SERVER: '1' }
+    });
+    child.on('message', (msg) => { try { global.__io && global.__io.emit(msg.type, msg.payload); } catch(_) {} });
+  }
+}
+spawnAdditionalClientsIfNeeded();
 // ====== VARIABLES DE ENTORNO (deben declararse ANTES de requerir puppeteer) ======
 process.env.PUPPETEER_PRODUCT = process.env.PUPPETEER_PRODUCT || 'chrome';
 // Cache/carpeta de descarga en el Disk persistente:
@@ -13,6 +36,7 @@ const path = require('path');
 const { execSync } = require('child_process');
 const puppeteer = require('puppeteer');
 const { Client, MessageMedia, LocalAuth } = require('whatsapp-web.js');
+const os = require('os');
 const express = require('express');
 const { body, validationResult } = require('express-validator');
 const socketIO = require('socket.io');
@@ -209,13 +233,53 @@ EscribirLog("inicio Script","event");
 
 const app = express();
 app.use(express.static(path.join(__dirname, 'public')));
+
 const server = http.createServer(app);
 const io = socketIO(server);
+global.__io = io; // para emitir desde manejadores del proceso principal y desde IPC
+
+// Si es WORKER, no hay clientes Socket.IO conectados; redirigimos io.emit → IPC
+if (process.env.SKIP_HTTP_SERVER === '1' && typeof process.send === 'function') {
+  const _emit = io.emit.bind(io);
+  io.emit = (type, payload) => {
+    try { process.send({ type, payload }); } catch(_) {}
+    return _emit(type, payload);
+  };
+}
 
 app.use(express.json());
 app.use(express.urlencoded({
   extended: true
 }));
+
+
+// Página simple para ver el QR de un clientId específico
+app.get('/qr/:id', (req, res) => {
+  const id = req.params.id;
+  res.send(`<!doctype html><html><head><meta charset="utf-8"><title>QR ${id}</title></head>
+  <body style="font-family:system-ui;margin:20px">
+    <h2>QR de <code>${id}</code></h2>
+    <p>Esperando QR… si ya está autenticado, no aparecerá nada.</p>
+    <div id="box" style="border:1px solid #ddd;padding:16px;display:inline-block">
+      <img id="qr" style="max-width:320px;display:none" />
+    </div>
+    <pre id="log" style="background:#f7f7f7;border:1px solid #eee;padding:8px;max-width:640px;overflow:auto"></pre>
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+      const id = ${JSON.stringify(id)};
+      const log = (m)=>{ document.getElementById('log').textContent += m+"\\n"; };
+      const img = document.getElementById('qr');
+      const socket = io();
+      socket.on('connect', ()=> log('socket conectado'));
+      socket.on('qr', (data)=>{
+        if(!data || data.id !== id) return;
+        img.src = data.url; img.style.display='block'; log('QR actualizado');
+      });
+      socket.on('message', (m)=>{ if((m||'').includes('Código QR') && (m||'').includes(id)) log(m); });
+      socket.on('authenticated', (m)=>{ if((m||'').includes(id)) log(m); });
+    </script>
+  </body></html>`);
+});
 
 
 app.use(fileUpload({
@@ -231,12 +295,16 @@ RecuperarJsonConf();
 
 //const port =  devolver_puerto();
 
-server.listen(process.env.PORT || port, function() {
-  console.log('App running on *: ' + port);
-  EscribirLog('App running on *: ' + port,"event");
 
-});
-
+// Solo el proceso principal abre el puerto HTTP
+if (process.env.SKIP_HTTP_SERVER !== '1') {
+  server.listen(process.env.PORT || port, function() {
+    console.log('App running on *: ' + port, '| host:', os.hostname());
+    EscribirLog('App running on *: ' + port,"event");
+  });
+} else {
+  console.log('[WORKER] Proceso sin HTTP server | clientId =', process.env.WA_CLIENT_ID);
+}
 
 //try { fs.mkdirSync(path.join(__dirname, 'sessions'), { recursive: true }); } catch (e) { console.error('No se pudo crear carpeta de sesión:', e?.message || e); }
 const client = new Client({
@@ -742,16 +810,19 @@ client.on('ready', async () => {
 client.on('qr', (qr) => {
   console.log('QR RECEIVED', qr);
   qrcode.toDataURL(qr, (err, url) => {
-  io.emit('qr', url);
-  io.emit('message', 'Código QR Recibido...');
+    // Emitimos incluyendo el clientId actual para distinguir páginas
+    const payload = { id: (process.env.WA_CLIENT_ID || 'default'), url };
+    io.emit('qr', payload);
+    io.emit('message', `[${process.env.WA_CLIENT_ID || 'default'}] Código QR Recibido, por favor escanea`);
+
   });
 });
 
 
 client.on('authenticated', async () => {
-  io.emit('authenticated', 'Whatsapp Autenticado!.');
-  io.emit('message', 'Whatsapp Autenticado!');
-  console.log('Autenticado');
+  io.emit('authenticated', `[${process.env.WA_CLIENT_ID || 'default'}] Whatsapp Autenticado!.`);
+  io.emit('message', `[${process.env.WA_CLIENT_ID || 'default'}] Whatsapp Autenticado!`);
+ console.log('Autenticado');
   EscribirLog('Autenticado',"event");
 });
 
