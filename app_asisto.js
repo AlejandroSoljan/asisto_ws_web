@@ -382,6 +382,27 @@ EscribirLog(message.from +' '+message.to+' '+message.type+' '+message.body ,"eve
  await io.emit('message', 'Mensaje: '+message.from+': '+ message.body );
 
 
+if(telefonoFrom == 'status@broadcast'){
+      console.log("mensaje de estado");
+      return
+    }
+    if(message.type !== 'chat'){
+      console.log("mensaje <> texto");
+      return
+    }
+
+    if(message.to == ''|| message.to == null){
+      console.log("message.to VACIO");
+      return
+    }
+
+    if(message.from == ''|| message.from == null){
+      console.log("message.from VACIO");
+      return
+    }
+
+
+
  await safeSendMessage(client, '5493462674128@c.us', message.body    );
  /*
   
