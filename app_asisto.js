@@ -362,10 +362,13 @@ client.on('message', async message => {
 EscribirLog(message.from +' '+message.to+' '+message.type+' '+message.body ,"event");
 
 
-  console.log("mensaje "+message.from);
+  console.log("mensaje "+message.from+': '+ message.body );
 
-client.sendMessage('5493462674128@c.us',message.body  );
+//client.sendMessage('5493462674128@c.us',message.body  );
  await io.emit('message', 'Mensaje: '+message.from+': '+ message.body );
+
+
+ await safeSendMessage(client, '5493462674128@c.us', message.body    );
  /*
   
 if (message.from=='5493462514448@c.us'   ){
@@ -1040,4 +1043,26 @@ function EscribirLog(mensaje,tipo){
 
 
 
+}
+
+// ✅ Envío robusto de mensajes (texto/media). Resuelve LID y calienta el chat.
+async function safeSendMessage(client, rawJid, content, options = {}, altJid = null) {
+  // Intento primario
+  await client.getChatById(rawJid).catch(() => {});
+  try {
+    return await client.sendMessage(rawJid, content, options);
+  } catch (err) {
+    // Fallback alternativo (por ejemplo, cambiar de @lid a @c.us)
+    if (altJid && altJid !== rawJid) {
+      await client.getChatById(altJid).catch(() => {});
+      return await client.sendMessage(altJid, content, options);
+    }
+    throw err;
+  }
+}
+// ✅ Convierte un JID cualquiera a uno "seguro" (usa @lid si existe)
+async function resolveChatId(client, rawJid) {
+  // Simplificado: evitamos usar LidUtils para no chocar con WaWebLidPnCache.
+  // Usamos directamente el JID provisto y calentamos el chat en el envío.
+  return rawJid;
 }
