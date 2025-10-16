@@ -87,6 +87,30 @@ function ensureWritableDir(dir) {
 }
 ensureWritableDir(SESSIONS_DIR);
 
+// === CONFIG PERSISTENTE EN DISK ===
+const CONFIG_DIR = process.env.CONFIG_DIR || path.join('/var/data', 'config');
+ensureWritableDir(CONFIG_DIR);
+const CONFIG_MAIN = path.join(CONFIG_DIR, 'configuracion.json');
+const CONFIG_ERRS = path.join(CONFIG_DIR, 'configuracion_errores.json');
+
+// Copia inicial desde el repo a /var/data/config si no existen
+function seedConfigIfMissing() {
+  try {
+    const repoMain = path.join(__dirname, 'configuracion.json');
+    const repoErrs = path.join(__dirname, 'configuracion_errores.json');
+    if (!fs.existsSync(CONFIG_MAIN) && fs.existsSync(repoMain)) {
+      fs.copyFileSync(repoMain, CONFIG_MAIN);
+    }
+    if (!fs.existsSync(CONFIG_ERRS) && fs.existsSync(repoErrs)) {
+      fs.copyFileSync(repoErrs, CONFIG_ERRS);
+    }
+  } catch(e) {
+    console.error('[CONFIG] Error al inicializar config persistente:', e.message);
+  }
+}
+seedConfigIfMissing();
+
+
 ensureWritableDir(process.env.PUPPETEER_CACHE_DIR);
 
 // ========= RESOLVER/INSTALAR CHROME EN RUNTIME (fallback seguro) =========
@@ -265,6 +289,88 @@ app.use(express.json());
 app.use(express.urlencoded({
   extended: true
 }));
+
+// === AUTH ADMIN SIMPLE ===
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
+function requireAdmin(req, res, next) {
+  const header = req.headers['x-admin-token'] || req.query.token;
+  if (!ADMIN_TOKEN) return res.status(500).json({ error: 'ADMIN_TOKEN no configurado' });
+  if (header !== ADMIN_TOKEN) return res.status(401).json({ error: 'No autorizado' });
+  next();
+}
+
+// === API de configuración ===
+app.get('/api/config', requireAdmin, (req, res) => {
+  try {
+    const main = JSON.parse(fs.readFileSync(CONFIG_MAIN, 'utf-8'));
+    const errs = JSON.parse(fs.readFileSync(CONFIG_ERRS, 'utf-8'));
+    res.json({ main, errs });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.put('/api/config', requireAdmin, express.json({ limit: '1mb' }), (req, res) => {
+  try {
+    const { main, errs } = req.body || {};
+    if (!main || !errs) return res.status(400).json({ error: 'Body debe incluir { main, errs }' });
+    fs.writeFileSync(CONFIG_MAIN, JSON.stringify(main, null, 2));
+    fs.writeFileSync(CONFIG_ERRS, JSON.stringify(errs, null, 2));
+    // Opcional: refrescar variables en caliente
+    try { RecuperarJsonConf(); } catch(_) {}
+    try { RecuperarJsonConfMensajes(); } catch(_) {}
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// === Página simple de administración ===
+app.get('/admin', (req, res) => {
+  res.send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Admin Config</title>
+  <style>body{font-family:system-ui,Segoe UI,Roboto,sans-serif;margin:24px}
+  .row{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  textarea{width:100%;height:60vh;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px}
+  .bar{display:flex;gap:8px;align-items:center;margin:8px 0}.ok{color:green}.err{color:#b00020}.hint{color:#666;font-size:12px}</style>
+  </head><body>
+  <h2>Panel de Configuración</h2>
+  <div class="bar">
+    <input id="token" type="password" placeholder="ADMIN_TOKEN">
+    <button id="load">Cargar</button>
+    <button id="save">Guardar</button>
+    <span id="status" class="hint"></span>
+  </div>
+  <div class="row">
+    <div><h3>configuracion.json</h3><textarea id="main"></textarea></div>
+    <div><h3>configuracion_errores.json</h3><textarea id="errs"></textarea></div>
+  </div>
+  <script>
+    const $=id=>document.getElementById(id);
+    const status=(m,c='hint')=>{const s=$('status');s.textContent=m;s.className=c;};
+    document.getElementById('load').onclick=async()=>{
+      status('Cargando…');
+      try{
+        const r=await fetch('/api/config',{headers:{'x-admin-token':$('token').value}});
+        const j=await r.json(); if(!r.ok) throw new Error(j.error||'Error');
+        $('main').value=JSON.stringify(j.main,null,2);
+        $('errs').value=JSON.stringify(j.errs,null,2);
+        status('Listo ✔','ok');
+      }catch(e){ status(e.message,'err'); }
+    };
+    document.getElementById('save').onclick=async()=>{
+      status('Guardando…');
+      try{
+        const main=JSON.parse($('main').value);
+        const errs=JSON.parse($('errs').value);
+        const r=await fetch('/api/config',{method:'PUT',headers:{'content-type':'application/json','x-admin-token':$('token').value},body:JSON.stringify({main,errs})});
+        const j=await r.json(); if(!r.ok) throw new Error(j.error||'Error');
+        status('Guardado ✔','ok');
+      }catch(e){ status(e.message,'err'); }
+    };
+  </script></body></html>`);
+});
+
 
 
 // Página simple para ver el QR de un clientId específico
@@ -1044,8 +1150,8 @@ async function controlar_hora_msg(){
  
 function RecuperarJsonConfMensajes(){
 
-  const jsonConf =  JSON.parse(fs.readFileSync('configuracion.json'));
-  const jsonError = JSON.parse(fs.readFileSync('configuracion_errores.json'));
+  const jsonConf =  JSON.parse(fs.readFileSync(CONFIG_MAIN));
+  const jsonError = JSON.parse(fs.readFileSync(CONFIG_ERRS));
  // console.log("configuracion.json "+jsonConf);
 
    
@@ -1182,7 +1288,7 @@ return headless;
 
 function RecuperarJsonConf(){
   
-  const jsonConf =  JSON.parse(fs.readFileSync('configuracion.json'));
+  const jsonConf =  JSON.parse(fs.readFileSync(CONFIG_MAIN));
   console.log("configuracion.json "+jsonConf.configuracion);
 
    port = jsonConf.configuracion.puerto;
