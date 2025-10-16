@@ -551,8 +551,8 @@ async function ConsultaApiMensajes(){
 
        }
        else{
-        console.log("ApiWhatsapp - Response ERROR "+JSON.stringify(json));
-        EscribirLog("ApiWhatsapp - Response ERROR "+JSON.stringify(json),"error");
+        //console.log("ApiWhatsapp - Response ERROR "+JSON.stringify(json));
+       // EscribirLog("ApiWhatsapp - Response ERROR "+JSON.stringify(json),"error");
        
        }
       // return 'error'
@@ -808,55 +808,7 @@ if (message.from=='5493462514448@c.us'   ){
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 client.initialize();
 
-//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-/////////////////////////////////////////////////////////////
-/// ENVIO DE LOG A APLICACION CLIENTE
-//////////////////////////////////////////////////////////////
-// Socket IO
-/*io.on('connection', async function(socket) {
- 
-  socket.emit('message', 'Conectando...');
 
-  client.on('qr', (qr) => {
-    console.log('QR RECEIVED', qr);
-    qrcode.toDataURL(qr, (err, url) => {
-    socket.emit('qr', url);
-    socket.emit('message', 'Código QR Recibido...');
-    });
-  });
-
-  client.on('ready', async () => {
-   // console.log("listo...");
-    //controlar_hora_msg();
-  //  socket.emit('ready', 'Whatsapp Listo!');
-    socket.emit('message', 'Whatsapp listo!');
-    
-  });
-
-  client.on('authenticated', async () => {
-    socket.emit('authenticated', 'Whatsapp Autenticado!.');
-    socket.emit('message', 'Whatsapp Autenticado!');
-    console.log('Autenticado');
-
-  });
-
-
-
-  client.on('auth_failure', function(session) {
-    socket.emit('message', 'Auth failure, restarting...');
-    chatbot.EnviarEmail('Chatbot error Auth failure','Auth failure, restarting...'+client);
-  });
-
-  client.on('disconnected', (reason) => {
-    socket.emit('message', 'Whatsapp Desconectado!');
-    chatbot.EnviarEmail('Chatbot Desconectado ','Desconectando...'+client);
-    client.destroy();
-    // client.initialize() duplicado eliminado
-
-  });
-});
-
-*/
 
 
 client.on('ready', async () => {
