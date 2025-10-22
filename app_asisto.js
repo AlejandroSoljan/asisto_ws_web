@@ -525,14 +525,17 @@ async function ConsultaApiMensajes(){
          try{
      
 
-        resp = await fetch(url, {
+        let resp = await fetch(url, {
             method: "GET"
         })
 
-        .catch(err =>   EscribirLog(err,"error"))
+        .catch(err => { 
+          EscribirLog(err,"error"); 
+          return null; 
+        })
       //  console.log('resp '+JSON.stringify(resp));
       //  await io.emit('message', JSON.stringify(resp) );
-        if (resp.ok  ) {
+        if (resp && resp.ok) {
      
           tam_json = 0;
           json = await resp.json()
