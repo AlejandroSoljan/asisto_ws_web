@@ -87,30 +87,6 @@ function ensureWritableDir(dir) {
 }
 ensureWritableDir(SESSIONS_DIR);
 
-// === CONFIG PERSISTENTE EN DISK ===
-const CONFIG_DIR = process.env.CONFIG_DIR || path.join('/var/data', 'config');
-ensureWritableDir(CONFIG_DIR);
-const CONFIG_MAIN = path.join(CONFIG_DIR, 'configuracion.json');
-const CONFIG_ERRS = path.join(CONFIG_DIR, 'configuracion_errores.json');
-
-// Copia inicial desde el repo a /var/data/config si no existen
-function seedConfigIfMissing() {
-  try {
-    const repoMain = path.join(__dirname, 'configuracion.json');
-    const repoErrs = path.join(__dirname, 'configuracion_errores.json');
-    if (!fs.existsSync(CONFIG_MAIN) && fs.existsSync(repoMain)) {
-      fs.copyFileSync(repoMain, CONFIG_MAIN);
-    }
-    if (!fs.existsSync(CONFIG_ERRS) && fs.existsSync(repoErrs)) {
-      fs.copyFileSync(repoErrs, CONFIG_ERRS);
-    }
-  } catch(e) {
-    console.error('[CONFIG] Error al inicializar config persistente:', e.message);
-  }
-}
-seedConfigIfMissing();
-
-
 ensureWritableDir(process.env.PUPPETEER_CACHE_DIR);
 
 // ========= RESOLVER/INSTALAR CHROME EN RUNTIME (fallback seguro) =========
@@ -290,88 +266,6 @@ app.use(express.urlencoded({
   extended: true
 }));
 
-// === AUTH ADMIN SIMPLE ===
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
-function requireAdmin(req, res, next) {
-  const header = req.headers['x-admin-token'] || req.query.token;
-  if (!ADMIN_TOKEN) return res.status(500).json({ error: 'ADMIN_TOKEN no configurado' });
-  if (header !== ADMIN_TOKEN) return res.status(401).json({ error: 'No autorizado' });
-  next();
-}
-
-// === API de configuración ===
-app.get('/api/config', requireAdmin, (req, res) => {
-  try {
-    const main = JSON.parse(fs.readFileSync(CONFIG_MAIN, 'utf-8'));
-    const errs = JSON.parse(fs.readFileSync(CONFIG_ERRS, 'utf-8'));
-    res.json({ main, errs });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.put('/api/config', requireAdmin, express.json({ limit: '1mb' }), (req, res) => {
-  try {
-    const { main, errs } = req.body || {};
-    if (!main || !errs) return res.status(400).json({ error: 'Body debe incluir { main, errs }' });
-    fs.writeFileSync(CONFIG_MAIN, JSON.stringify(main, null, 2));
-    fs.writeFileSync(CONFIG_ERRS, JSON.stringify(errs, null, 2));
-    // Opcional: refrescar variables en caliente
-    try { RecuperarJsonConf(); } catch(_) {}
-    try { RecuperarJsonConfMensajes(); } catch(_) {}
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// === Página simple de administración ===
-app.get('/admin', (req, res) => {
-  res.send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Admin Config</title>
-  <style>body{font-family:system-ui,Segoe UI,Roboto,sans-serif;margin:24px}
-  .row{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-  textarea{width:100%;height:60vh;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px}
-  .bar{display:flex;gap:8px;align-items:center;margin:8px 0}.ok{color:green}.err{color:#b00020}.hint{color:#666;font-size:12px}</style>
-  </head><body>
-  <h2>Panel de Configuración</h2>
-  <div class="bar">
-    <input id="token" type="password" placeholder="ADMIN_TOKEN">
-    <button id="load">Cargar</button>
-    <button id="save">Guardar</button>
-    <span id="status" class="hint"></span>
-  </div>
-  <div class="row">
-    <div><h3>configuracion.json</h3><textarea id="main"></textarea></div>
-    <div><h3>configuracion_errores.json</h3><textarea id="errs"></textarea></div>
-  </div>
-  <script>
-    const $=id=>document.getElementById(id);
-    const status=(m,c='hint')=>{const s=$('status');s.textContent=m;s.className=c;};
-    document.getElementById('load').onclick=async()=>{
-      status('Cargando…');
-      try{
-        const r=await fetch('/api/config',{headers:{'x-admin-token':$('token').value}});
-        const j=await r.json(); if(!r.ok) throw new Error(j.error||'Error');
-        $('main').value=JSON.stringify(j.main,null,2);
-        $('errs').value=JSON.stringify(j.errs,null,2);
-        status('Listo ✔','ok');
-      }catch(e){ status(e.message,'err'); }
-    };
-    document.getElementById('save').onclick=async()=>{
-      status('Guardando…');
-      try{
-        const main=JSON.parse($('main').value);
-        const errs=JSON.parse($('errs').value);
-        const r=await fetch('/api/config',{method:'PUT',headers:{'content-type':'application/json','x-admin-token':$('token').value},body:JSON.stringify({main,errs})});
-        const j=await r.json(); if(!r.ok) throw new Error(j.error||'Error');
-        status('Guardado ✔','ok');
-      }catch(e){ status(e.message,'err'); }
-    };
-  </script></body></html>`);
-});
-
-
 
 // Página simple para ver el QR de un clientId específico
 app.get('/qr/:id', (req, res) => {
@@ -436,8 +330,7 @@ const client = new Client({
 
   puppeteer: {
     // respetar tu config.json
-    //headless: true,
-    headless: 'new',
+    headless: true,
     // No cortes nunca operaciones del protocolo (navegaciones largas/recargas)
     protocolTimeout: 0,
     waitForInitialPage: true,
@@ -449,8 +342,8 @@ const client = new Client({
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--no-zygote',
-      //'--single-process',                 // ↓ RAM (si vieras inestabilidad, quitarlo)
-      //'--renderer-process-limit=1',       // fuerza 1 renderer
+      '--single-process',                 // ↓ RAM (si vieras inestabilidad, quitarlo)
+      '--renderer-process-limit=1',       // fuerza 1 renderer
       '--disable-gpu',
       '--disable-extensions',
       '--disable-features=TranslateUI,BlinkGenPropertyTrees',
@@ -463,8 +356,7 @@ const client = new Client({
       '--disable-renderer-backgrounding',
       '--no-first-run',
       '--no-default-browser-check'
-    ],
-    protocolTimeout: 60000,
+    ]
   },
 
   authStrategy: new LocalAuth({
@@ -498,43 +390,7 @@ client.on('qr', () => {
   }
 });
 
-// ====== Mitigación de "Execution context was destroyed" ======
-let __lastStateChange = Date.now();
-let __waMutex = Promise.resolve(); // serializa llamadas a wwebjs
-client.on('change_state', () => { __lastStateChange = Date.now(); });
-client.on('ready_state', () => { __lastStateChange = Date.now(); });
 
-function isProtocolDestroyed(err) {
-  const msg = (err && (err.message || err.toString())) || '';
-  const orig = err && err.originalMessage ? String(err.originalMessage) : '';
-  return msg.includes('Execution context was destroyed') || orig.includes('Execution context was destroyed');
-}
-
-// Ejecuta fn() serializado, con backoff si el contexto se destruye al evaluar.
-async function waCall(fn, { retries = 3 } = {}) {
-  // Esperar breve si hubo un cambio de estado muy reciente
-  const since = Date.now() - __lastStateChange;
-  if (since < 1500) await sleep(1500 - since);
-  // Serializar todas las llamadas a wwebjs para no pisarnos entre recargas
-  __waMutex = __waMutex.then(async () => {
-    let attempt = 0;
-    let delay = 400;
-    while (true) {
-      try {
-        return await fn();
-      } catch (e) {
-        if (isProtocolDestroyed(e) && attempt < retries) {
-          await sleep(delay);
-          attempt++;
-          delay = Math.min(delay * 2, 2000);
-          continue;
-        }
-        throw e;
-      }
-    }
-  });
-  return __waMutex;
-}
 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -554,15 +410,6 @@ async function ConsultaApiMensajes(){
   await sleep(1000);
 
      while(a < 10){
-      // Evitar llamadas a la API de WA si no está conectado (previene context destroyed)
-      try {
-        const st = await waCall(() => client.getState().catch(() => null)).catch(() => null);
-        if (st !== 'CONNECTED') {
-          console.log('[WA] state =', st, '→ pauso ciclo de envío');
-          await sleep(3000);
-          continue;
-        }
-      } catch(_) {}
 
       RecuperarJsonConfMensajes();
    
@@ -572,17 +419,14 @@ async function ConsultaApiMensajes(){
          try{
      
 
-        let resp = await fetch(url, {
+        resp = await fetch(url, {
             method: "GET"
         })
 
-        .catch(err => { 
-          EscribirLog(err,"error"); 
-          return null; 
-        })
+        .catch(err =>   EscribirLog(err,"error"))
       //  console.log('resp '+JSON.stringify(resp));
       //  await io.emit('message', JSON.stringify(resp) );
-        if (resp && resp.ok) {
+        if (resp.ok  ) {
      
           tam_json = 0;
           json = await resp.json()
@@ -634,14 +478,7 @@ async function ConsultaApiMensajes(){
               console.log('--------------------------------------------------')
               //console.log('IS REGISTER '+Nro_tel)  ;
               if (!isNaN(Number(Nro_tel))) {
-              let registrado = false;
-              try {
-                registrado = await waCall(() => client.isRegisteredUser(Nro_tel_format));
-              } catch (e) {
-                if (isProtocolDestroyed(e)) { console.log('[WA] retry isRegisteredUser saltado por recarga'); continue; }
-                throw e;
-              }
-              if (!registrado) {
+              if (!await client.isRegisteredUser(Nro_tel_format)) {
                  EscribirLog('Mensaje: '+Nro_tel_format+': Número no Registrado',"event");
                 console.log("numero no registrado");
                 await io.emit('message', 'Mensaje: '+Nro_tel_format+': Número no Registrado' );
@@ -659,14 +496,14 @@ async function ConsultaApiMensajes(){
                   var media = await new MessageMedia(detectMimeType(contenido), contenido, Content_nombre);
                   //await client.sendMessage(Nro_tel_format,media,{caption:  Msj });
                   await io.emit('message', 'Mensaje: '+Nro_tel_format+': '+ Msj );
-                  await waCall(() => client.sendMessage('5493462674128@c.us', media, { caption: Msj }));
+                  await client.sendMessage('5493462674128@c.us',media,{caption:  Msj });
                   
                   } else{
                     console.log("msj texto");
                     if (Msj == null){ Msj = ''}
                     //await client.sendMessage(Nro_tel_format,  Msj );
                     await io.emit('message', 'Mensaje: '+Nro_tel_format+': '+ Msj );
-                    await waCall(() => client.sendMessage('5493462674128@c.us', Msj));
+                    await client.sendMessage('5493462674128@c.us',  Msj );
                   }
                   /////////////////////////////////////////
                   let contact = await client.getContactById(Nro_tel_format);
@@ -784,23 +621,7 @@ if(message.from == 'status@broadcast'){
 
 
 
- //await safeSendMessage(client, '5493462674128@c.us', message.body    );
- try {
-   const st = await waCall(() => client.getState().catch(() => null)).catch(() => null);
-   if (st === 'CONNECTED') {
-     await waCall(() => safeSendMessage(client, '5493462674128@c.us', message.body));
-   } else {
-     console.log('[WA] state =', st, '→ omito eco de mensaje');
-   }
- } catch(e) {
-   console.log('[WA] error en safeSendMessage:', e?.message || e);
- }
-//////////////////////////////////////////////////////////////////////////////
-
-
-
-
-
+ await safeSendMessage(client, '5493462674128@c.us', message.body    );
  /*
   
 if (message.from=='5493462514448@c.us'   ){
@@ -1033,11 +854,9 @@ client.on('auth_failure', function(session) {
 
 client.on('disconnected', (reason) => {
   io.emit('message', 'Whatsapp Desconectado!');
-  //EnviarEmail('Chatbot Desconectado ','Desconectando...'+client);
- // EscribirLog('Chatbot Desconectado ','Desconectando...',"event");// client.initialize() duplicado eliminado
-  // Reinicio limpio: deja que el orquestador (Render) relance el contenedor
-  console.log('[WA] disconnected → exit(1) para reinicio limpio');
-  process.exit(1);
+  EnviarEmail('Chatbot Desconectado ','Desconectando...'+client);
+  EscribirLog('Chatbot Desconectado ','Desconectando...',"event");// client.initialize() duplicado eliminado
+
   client.initialize();
 });
 
@@ -1225,8 +1044,8 @@ async function controlar_hora_msg(){
  
 function RecuperarJsonConfMensajes(){
 
-  const jsonConf =  JSON.parse(fs.readFileSync(CONFIG_MAIN));
-  const jsonError = JSON.parse(fs.readFileSync(CONFIG_ERRS));
+  const jsonConf =  JSON.parse(fs.readFileSync('configuracion.json'));
+  const jsonError = JSON.parse(fs.readFileSync('configuracion_errores.json'));
  // console.log("configuracion.json "+jsonConf);
 
    
@@ -1363,7 +1182,7 @@ return headless;
 
 function RecuperarJsonConf(){
   
-  const jsonConf =  JSON.parse(fs.readFileSync(CONFIG_MAIN));
+  const jsonConf =  JSON.parse(fs.readFileSync('configuracion.json'));
   console.log("configuracion.json "+jsonConf.configuracion);
 
    port = jsonConf.configuracion.puerto;
