@@ -496,7 +496,43 @@ client.on('qr', () => {
   }
 });
 
+// ====== Mitigación de "Execution context was destroyed" ======
+let __lastStateChange = Date.now();
+let __waMutex = Promise.resolve(); // serializa llamadas a wwebjs
+client.on('change_state', () => { __lastStateChange = Date.now(); });
+client.on('ready_state', () => { __lastStateChange = Date.now(); });
 
+function isProtocolDestroyed(err) {
+  const msg = (err && (err.message || err.toString())) || '';
+  const orig = err && err.originalMessage ? String(err.originalMessage) : '';
+  return msg.includes('Execution context was destroyed') || orig.includes('Execution context was destroyed');
+}
+
+// Ejecuta fn() serializado, con backoff si el contexto se destruye al evaluar.
+async function waCall(fn, { retries = 3 } = {}) {
+  // Esperar breve si hubo un cambio de estado muy reciente
+  const since = Date.now() - __lastStateChange;
+  if (since < 1500) await sleep(1500 - since);
+  // Serializar todas las llamadas a wwebjs para no pisarnos entre recargas
+  __waMutex = __waMutex.then(async () => {
+    let attempt = 0;
+    let delay = 400;
+    while (true) {
+      try {
+        return await fn();
+      } catch (e) {
+        if (isProtocolDestroyed(e) && attempt < retries) {
+          await sleep(delay);
+          attempt++;
+          delay = Math.min(delay * 2, 2000);
+          continue;
+        }
+        throw e;
+      }
+    }
+  });
+  return __waMutex;
+}
 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -518,7 +554,7 @@ async function ConsultaApiMensajes(){
      while(a < 10){
       // Evitar llamadas a la API de WA si no está conectado (previene context destroyed)
       try {
-        const st = await client.getState().catch(() => null);
+        const st = await waCall(() => client.getState().catch(() => null)).catch(() => null);
         if (st !== 'CONNECTED') {
           console.log('[WA] state =', st, '→ pauso ciclo de envío');
           await sleep(3000);
@@ -596,7 +632,14 @@ async function ConsultaApiMensajes(){
               console.log('--------------------------------------------------')
               //console.log('IS REGISTER '+Nro_tel)  ;
               if (!isNaN(Number(Nro_tel))) {
-              if (!await client.isRegisteredUser(Nro_tel_format)) {
+              let registrado = false;
+              try {
+                registrado = await waCall(() => client.isRegisteredUser(Nro_tel_format));
+              } catch (e) {
+                if (isProtocolDestroyed(e)) { console.log('[WA] retry isRegisteredUser saltado por recarga'); continue; }
+                throw e;
+              }
+              if (!registrado) {
                  EscribirLog('Mensaje: '+Nro_tel_format+': Número no Registrado',"event");
                 console.log("numero no registrado");
                 await io.emit('message', 'Mensaje: '+Nro_tel_format+': Número no Registrado' );
@@ -614,14 +657,14 @@ async function ConsultaApiMensajes(){
                   var media = await new MessageMedia(detectMimeType(contenido), contenido, Content_nombre);
                   //await client.sendMessage(Nro_tel_format,media,{caption:  Msj });
                   await io.emit('message', 'Mensaje: '+Nro_tel_format+': '+ Msj );
-                  await client.sendMessage('5493462674128@c.us',media,{caption:  Msj });
+                  await waCall(() => client.sendMessage('5493462674128@c.us', media, { caption: Msj }));
                   
                   } else{
                     console.log("msj texto");
                     if (Msj == null){ Msj = ''}
                     //await client.sendMessage(Nro_tel_format,  Msj );
                     await io.emit('message', 'Mensaje: '+Nro_tel_format+': '+ Msj );
-                    await client.sendMessage('5493462674128@c.us',  Msj );
+                    await waCall(() => client.sendMessage('5493462674128@c.us', Msj));
                   }
                   /////////////////////////////////////////
                   let contact = await client.getContactById(Nro_tel_format);
@@ -741,9 +784,9 @@ if(message.from == 'status@broadcast'){
 
  //await safeSendMessage(client, '5493462674128@c.us', message.body    );
  try {
-   const st = await client.getState().catch(() => null);
+   const st = await waCall(() => client.getState().catch(() => null)).catch(() => null);
    if (st === 'CONNECTED') {
-     await safeSendMessage(client, '5493462674128@c.us', message.body);
+     await waCall(() => safeSendMessage(client, '5493462674128@c.us', message.body));
    } else {
      console.log('[WA] state =', st, '→ omito eco de mensaje');
    }
