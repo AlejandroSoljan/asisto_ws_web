@@ -436,7 +436,8 @@ const client = new Client({
 
   puppeteer: {
     // respetar tu config.json
-    headless: true,
+    //headless: true,
+    headless: 'new',
     // No cortes nunca operaciones del protocolo (navegaciones largas/recargas)
     protocolTimeout: 0,
     waitForInitialPage: true,
@@ -462,7 +463,8 @@ const client = new Client({
       '--disable-renderer-backgrounding',
       '--no-first-run',
       '--no-default-browser-check'
-    ]
+    ],
+    protocolTimeout: 60000,
   },
 
   authStrategy: new LocalAuth({
