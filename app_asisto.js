@@ -448,8 +448,8 @@ const client = new Client({
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--no-zygote',
-      '--single-process',                 // ↓ RAM (si vieras inestabilidad, quitarlo)
-      '--renderer-process-limit=1',       // fuerza 1 renderer
+      //'--single-process',                 // ↓ RAM (si vieras inestabilidad, quitarlo)
+      //'--renderer-process-limit=1',       // fuerza 1 renderer
       '--disable-gpu',
       '--disable-extensions',
       '--disable-features=TranslateUI,BlinkGenPropertyTrees',
@@ -516,6 +516,15 @@ async function ConsultaApiMensajes(){
   await sleep(1000);
 
      while(a < 10){
+      // Evitar llamadas a la API de WA si no está conectado (previene context destroyed)
+      try {
+        const st = await client.getState().catch(() => null);
+        if (st !== 'CONNECTED') {
+          console.log('[WA] state =', st, '→ pauso ciclo de envío');
+          await sleep(3000);
+          continue;
+        }
+      } catch(_) {}
 
       RecuperarJsonConfMensajes();
    
@@ -730,7 +739,23 @@ if(message.from == 'status@broadcast'){
 
 
 
- await safeSendMessage(client, '5493462674128@c.us', message.body    );
+ //await safeSendMessage(client, '5493462674128@c.us', message.body    );
+ try {
+   const st = await client.getState().catch(() => null);
+   if (st === 'CONNECTED') {
+     await safeSendMessage(client, '5493462674128@c.us', message.body);
+   } else {
+     console.log('[WA] state =', st, '→ omito eco de mensaje');
+   }
+ } catch(e) {
+   console.log('[WA] error en safeSendMessage:', e?.message || e);
+ }
+//////////////////////////////////////////////////////////////////////////////
+
+
+
+
+
  /*
   
 if (message.from=='5493462514448@c.us'   ){
@@ -963,9 +988,11 @@ client.on('auth_failure', function(session) {
 
 client.on('disconnected', (reason) => {
   io.emit('message', 'Whatsapp Desconectado!');
-  EnviarEmail('Chatbot Desconectado ','Desconectando...'+client);
-  EscribirLog('Chatbot Desconectado ','Desconectando...',"event");// client.initialize() duplicado eliminado
-
+  //EnviarEmail('Chatbot Desconectado ','Desconectando...'+client);
+ // EscribirLog('Chatbot Desconectado ','Desconectando...',"event");// client.initialize() duplicado eliminado
+  // Reinicio limpio: deja que el orquestador (Render) relance el contenedor
+  console.log('[WA] disconnected → exit(1) para reinicio limpio');
+  process.exit(1);
   client.initialize();
 });
 
