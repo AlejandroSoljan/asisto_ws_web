@@ -608,8 +608,22 @@ client.on('message', async (message) => {
 
   // 2) caso precio / otro / fallback -> vamos a tu API como siempre
   RecuperarJsonConfMensajes();
-  const telefonoTo = message.to.replace('@c.us', '');
-  const telefonoFrom = from.replace('@c.us', '');
+
+const contact = await client.getContactById(message.from); // ej: '1203...@lid'
+      console.log(contact.id._serialized); // '1203...@lid'
+      console.log(contact.number); 
+//tel_from = contact.number;
+      var telefonoFrom = contact.number;  
+    //var telefonoFrom = '5493425472992@c.us' 
+   // var telefonoTo = '5493424293943@c.us'
+
+    telefonoTo = telefonoTo.replace('@c.us','');
+
+
+
+
+  //const telefonoTo = message.to.replace('@c.us', '');
+  //const telefonoFrom = from.replace('@c.us', '');
 
   const jsonTexto = {
     Tel_Origen: telefonoFrom ?? "",
