@@ -662,7 +662,7 @@ client.on('ready', async () => {
   console.log("TEL QR: " + client.info.me.user);
   await io.emit('message', 'Whatsapp Listo!');
   EscribirLog('Whatsapp Listo!', "event");
-  ConsultaApiMensajes();
+ // ConsultaApiMensajes();
 });
 
 client.on('qr', (qr) => {
