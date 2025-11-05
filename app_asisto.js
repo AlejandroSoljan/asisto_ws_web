@@ -559,6 +559,9 @@ async function procesar_mensaje(json, message) {
 // AQUÍ VA AHORA UN SOLO client.on('message')
 // ─────────────────────────────────────────────────────────────────────────────-
 client.on('message', async (message) => {
+
+
+
   const from = message.from;
   const bodyOrig = (message.body || '').trim();
   console.log("mensaje " + from + ': ' + bodyOrig);
@@ -568,6 +571,8 @@ client.on('message', async (message) => {
   if (from === 'status@broadcast') return;
   if (message.type !== 'chat') return;
   if (!message.to || !message.from) return;
+
+  if (message.from=='5493462514448@c.us'   ){
 
   // control de flujo por teléfono
   let indice_telefono = indexOf2d(from);
@@ -662,6 +667,9 @@ const contact = await client.getContactById(message.from); // ej: '1203...@lid'
     const detalle = "Error 03 Chatbot Error " + (err?.message || err) + " " + JSON.stringify(jsonTexto);
     console.log(detalle);
     EscribirLog(detalle, "error");
+  }
+
+
   }
 });
 
