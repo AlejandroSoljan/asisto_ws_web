@@ -497,6 +497,8 @@ client.on('message', async (message) => {
     // Tel_Destino del propio mensaje
     const telefonoTo = extraerNumeroWhatsapp(message.to);
 
+    telefonoTo = '5493462616000'
+
     // mensaje que va al API
     let mensajeParaApi = bodyOrig;
     if (analisis.intent === 'precio' && analisis.producto) {
