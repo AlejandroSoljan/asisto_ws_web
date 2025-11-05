@@ -306,8 +306,8 @@ Debes devolver SIEMPRE JSON puro con este formato:
 }
 
 Reglas:
-- intent = "basica": horarios, dirección, medios de pago, envío, saludo, quiénes son → completá respuesta_sugerida.
-- intent = "precio": cuando pide precio, cuánto sale, valor, “tenés precio de ...”, “cuánto cuesta la de 1HP”, etc.
+- intent = "basica": horarios, dirección, medios de pago, envío, saludo, quiénes son, marcas, que venden,  → completá respuesta_sugerida.
+- intent = "precio": solo cuando pide precio, cuánto sale, valor, “tenés precio de ...”, “cuánto cuesta la de 1HP”, etc.
   En ese caso, en "producto" poné SOLO el nombre o descripción corta del producto que detectaste, sin palabras de cortesía.
   Ej: "bomba presurizadora 1 hp", "helado 1kg", "esterilla 2x2", "KM 312".
 - intent = "otro": cuando no sabés o es muy genérico.
