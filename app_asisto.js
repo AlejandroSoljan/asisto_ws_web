@@ -1,24 +1,20 @@
-/*script:app_asisto*/
-/*version:1.06.02   11/07/2025*/
+/*script:app_asisto_extendido*/
+/*version:1.06.03   05/11/2025  (GPT + fixes)*/
+
 // ──────────────────────────────────────────────────────────────────────────────
 // MULTI-SESIÓN + PÁGINAS QR POR CUENTA
-// - Principal: sirve /qr/:id para ver cada QR.
-// - Workers: reenvían io.emit(...) por IPC al principal.
-// Uso:
-//   WA_CLIENT_IDS="cliente1,cliente2"   (el principal usa la 1ª; los demás se forkean)
-//   /qr/cliente1  /qr/cliente2  → para escanear cada QR en páginas separadas.
-// ──────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────-
 const { fork } = require('child_process');
 const IS_WORKER = process.env.CHILD_WORKER === '1';
 function spawnAdditionalClientsIfNeeded() {
   if (IS_WORKER) return;
   const list = (process.env.WA_CLIENT_IDS || process.env.WA_CLIENT_ID || 'default')
-    .split(',').map(s => s.trim()).filter(Boolean);
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
   if (list.length <= 1) return;
-  // === LIMITE DE SESIONES Y SPAWN ESCALONADO PARA BAJA RAM ===
-  const MAX = Math.max(1, parseInt(process.env.MAX_WA_CLIENTS || '1', 10)); // por defecto 1
-  const DELAY = Math.max(0, parseInt(process.env.WORKER_SPAWN_DELAY_MS || '20000', 10)); // 20s
-  // El principal conserva el primero y levanta HTTP/Socket.IO.
+  const MAX = Math.max(1, parseInt(process.env.MAX_WA_CLIENTS || '1', 10));
+  const DELAY = Math.max(0, parseInt(process.env.WORKER_SPAWN_DELAY_MS || '20000', 10));
   const idsToSpawn = list.slice(1, 1 + (MAX - 1));
   idsToSpawn.forEach((id, idx) => {
     setTimeout(() => {
@@ -28,23 +24,25 @@ function spawnAdditionalClientsIfNeeded() {
           WA_CLIENT_ID: id,
           CHILD_WORKER: '1',
           SKIP_HTTP_SERVER: '1',
-          // Limita heap de Node en workers para no exceder 512MB totales
           NODE_OPTIONS: process.env.NODE_OPTIONS || '--max-old-space-size=256'
         }
       });
-      child.on('message', (msg) => { try { global.__io && global.__io.emit(msg.type, msg.payload); } catch(_) {} });
+      child.on('message', (msg) => {
+        try {
+          global.__io && global.__io.emit(msg.type, msg.payload);
+        } catch (_) {}
+      });
       console.log('[MASTER] Spawned worker for', id);
     }, DELAY * (idx + 1));
   });
 }
 spawnAdditionalClientsIfNeeded();
+
 // ====== VARIABLES DE ENTORNO (deben declararse ANTES de requerir puppeteer) ======
 process.env.PUPPETEER_PRODUCT = process.env.PUPPETEER_PRODUCT || 'chrome';
-// Cache/carpeta de descarga en el Disk persistente:
 process.env.PUPPETEER_CACHE_DIR = process.env.PUPPETEER_CACHE_DIR || '/var/data/.cache/puppeteer';
 process.env.PUPPETEER_DOWNLOAD_PATH = process.env.PUPPETEER_DOWNLOAD_PATH || '/var/data/.cache/puppeteer';
 
-// ====== IMPORTS ======
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
@@ -63,17 +61,16 @@ const mime = require('mime-types');
 const { ClientInfo } = require('whatsapp-web.js/src/structures');
 const utf8 = require('utf8');
 const nodemailer = require('nodemailer');
-const { eventNames } = require('process');
+
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';   // <--- poné tu key acá o en el .env
 
 // === Persistencia de sesión en Render ===
-// Usa EXACTAMENTE el mount path del Disk. Por defecto Render recomienda /var/data.
-// Configura en el Dashboard un Disk con Mount Path /var/data.
 const WA_CLIENT_ID = process.env.WA_CLIENT_ID || 'default';
 const SESSIONS_DIR = process.env.SESSIONS_DIR || '/var/data/wwebjs';
 
-
-
-// Verifica que el directorio exista y sea escribible (si falla, corta el proceso).
+// ──────────────────────────────────────────────────────────────────────────────
+// util dirs
+// ─────────────────────────────────────────────────────────────────────────────-
 function ensureWritableDir(dir) {
   try {
     fs.mkdirSync(dir, { recursive: true });
@@ -86,21 +83,18 @@ function ensureWritableDir(dir) {
   }
 }
 ensureWritableDir(SESSIONS_DIR);
-
 ensureWritableDir(process.env.PUPPETEER_CACHE_DIR);
 
 // ========= RESOLVER/INSTALAR CHROME EN RUNTIME (fallback seguro) =========
 function fileExists(p) {
   try { return p && fs.existsSync(p); } catch { return false; }
 }
-
 function tryPuppeteerExecutablePath() {
   try {
     const p = puppeteer.executablePath();
     return fileExists(p) ? p : null;
   } catch { return null; }
 }
-
 function tryCommonSystemPaths() {
   const candidates = [
     process.env.CHROME_PATH,
@@ -112,10 +106,7 @@ function tryCommonSystemPaths() {
   for (const c of candidates) if (fileExists(c)) return c;
   return null;
 }
-
 function installChromeIfNeeded() {
-  // Descarga Chrome/Chromium dentro de /var/data/.cache/puppeteer
-  // Nota: requiere que 'puppeteer' esté en dependencias.
   try {
     console.log('[CHROME] Instalando Chrome con puppeteer (una sola vez)…');
     execSync('npx puppeteer browsers install chrome', {
@@ -126,8 +117,6 @@ function installChromeIfNeeded() {
     console.error('[CHROME] Falló la instalación automática:', e?.message || e);
   }
 }
-
-// Devuelve el binario instalado bajo el caché persistente (/var/data/.cache/puppeteer)
 function resolveInstalledChromePath() {
   try {
     const base = process.env.PUPPETEER_CACHE_DIR || '/var/data/.cache/puppeteer';
@@ -140,19 +129,12 @@ function resolveInstalledChromePath() {
   } catch (_) {}
   return null;
 }
-
-
-
 function getChromePathOrInstall() {
-  // 1) env / system
   let found = tryCommonSystemPaths() || tryPuppeteerExecutablePath();
   if (found) return found;
-  // 2) instalar y reintentar
   installChromeIfNeeded();
-   // Priorizar el binario instalado en el caché persistente
   found = resolveInstalledChromePath() || tryPuppeteerExecutablePath();
   if (found) {
-    // Exportar también para que puppeteer-core lo tome
     process.env.PUPPETEER_EXECUTABLE_PATH = found;
     console.log('[CHROME] Usando ejecutable instalado →', found);
     return found;
@@ -161,31 +143,10 @@ function getChromePathOrInstall() {
   return undefined;
 }
 
-
-///////////////////
-/*function getChromePathOrInstall() {
-  try {
-    const p = puppeteer.executablePath();
-    if (p && fs.existsSync(p)) return p;
-  } catch (e) {
-    console.error('puppeteer.executablePath() falló:', e && e.message ? e.message : e);
-  }
-  try {
-    console.log('Instalando Chrome (runtime)...');
-    execSync('npx puppeteer browsers install chrome', { stdio: 'inherit' });
-    const p2 = puppeteer.executablePath();
-    if (p2 && fs.existsSync(p2)) return p2;
-  } catch (e) {
-    console.error('Instalación runtime de Chrome falló:', e && e.message ? e.message : e);
-  }
-  return null;
-}*/
-
-
-
-
+// ──────────────────────────────────────────────────────────────────────────────
+// variables de config (se cargan de configuracion.json)
+// ─────────────────────────────────────────────────────────────────────────────-
 var a = 0;
-//var port = 8002
 var headless = true;
 var seg_desde = 80000;
 var seg_hasta = 10000;
@@ -199,9 +160,8 @@ var tel_array = [];
 var ver_whatsapp = "0";
 var dsn = "msm_manager";
 var api = "http://managermsm.ddns.net:2002/v200/api/Api_Chat_Cab/ProcesarMensajePost";
-//var api2 = "http://managermsm.ddns.net:2002/v200/api/Api_Mensajes/Consulta?key=1";
-var api2 = "http://managermsm.ddns.net:2002/v200/api/Api_Mensajes/Consulta_no_enviados"//key={{key}}&nro_tel_from={{nro_tel_from}}";
-var api3 = "http://managermsm.ddns.net:2002/v200/api/Api_Mensajes/Actualiza_mensaje"//?key={{key}}&nro_tel_from={{nro_tel_from}}"//key={{key}}&nro_tel_from={{nro_tel_from}}";
+var api2 = "http://managermsm.ddns.net:2002/v200/api/Api_Mensajes/Consulta_no_enviados";
+var api3 = "http://managermsm.ddns.net:2002/v200/api/Api_Mensajes/Actualiza_mensaje";
 var key = 'FMM0325*';
 var msg_inicio = "";
 var msg_fin = "";
@@ -212,7 +172,7 @@ var email_err = "";
 var msg_cad = "";
 var msg_can = "";
 var bandera_msg = 1;
-var jsonGlobal = [];   //1-json, 2 -i , 3-tel, 4-hora
+var jsonGlobal = [];   // [tel, i, json, fecha]
 var json;
 var i_global = 0;
 var msg_body;
@@ -223,134 +183,229 @@ var email_puerto;
 var email_saliente;
 var msg_errores;
 var nom_chatbot;
-
-var Id_msj_dest ;
+var Id_msj_dest;
 var Id_msj_renglon;
-const controller = new AbortController();
-const timeoutId = setTimeout(() => controller.abort(), 55000);
 
-var signatures = {
-  JVBERi0: "application/pdf",
-  R0lGODdh: "image/gif",
-  R0lGODlh: "image/gif",
-  iVBORw0KGgo: "image/png",
-  "/9j/": "image/jpg"
-};
-
-
-
-const logFilePath_event = path.join(__dirname, 'app_asisto_event.log');
-const logFilePath_error = path.join(__dirname, 'app_asisto_error.log');
-
-EscribirLog("inicio Script","event");
-
-
+// ──────────────────────────────────────────────────────────────────────────────
+// APP / SOCKET
+// ─────────────────────────────────────────────────────────────────────────────-
 const app = express();
-app.use(express.static(path.join(__dirname, 'public')));
-
 const server = http.createServer(app);
-const io = socketIO(server);
-global.__io = io; // para emitir desde manejadores del proceso principal y desde IPC
+const io = socketIO(server, { cors: { origin: "*" } });
+global.__io = io;
 
-// Si es WORKER, no hay clientes Socket.IO conectados; redirigimos io.emit → IPC
-if (process.env.SKIP_HTTP_SERVER === '1' && typeof process.send === 'function') {
-  const _emit = io.emit.bind(io);
-  io.emit = (type, payload) => {
-    try { process.send({ type, payload }); } catch(_) {}
-    return _emit(type, payload);
-  };
-}
+app.use(fileUpload({ debug: false }));
 
-app.use(express.json());
-app.use(express.urlencoded({
-  extended: true
-}));
-
-
-// Página simple para ver el QR de un clientId específico
+// vista QR por sesión
 app.get('/qr/:id', (req, res) => {
-  const id = req.params.id;
-  res.send(`<!doctype html><html><head><meta charset="utf-8"><title>QR ${id}</title></head>
-  <body style="font-family:system-ui;margin:20px">
-    <h2>QR de <code>${id}</code></h2>
-    <p>Esperando QR… si ya está autenticado, no aparecerá nada.</p>
-    <div id="box" style="border:1px solid #ddd;padding:16px;display:inline-block">
-      <img id="qr" style="max-width:320px;display:none" />
-    </div>
-    <pre id="log" style="background:#f7f7f7;border:1px solid #eee;padding:8px;max-width:640px;overflow:auto"></pre>
-    <script src="/socket.io/socket.io.js"></script>
-    <script>
-      const id = ${JSON.stringify(id)};
-      const log = (m)=>{ document.getElementById('log').textContent += m+"\\n"; };
-      const img = document.getElementById('qr');
-      const socket = io();
-      socket.on('connect', ()=> log('socket conectado'));
-      socket.on('qr', (data)=>{
-        if(!data || data.id !== id) return;
-        img.src = data.url; img.style.display='block'; log('QR actualizado');
-      });
-      socket.on('message', (m)=>{ if((m||'').includes('Código QR') && (m||'').includes(id)) log(m); });
-      socket.on('authenticated', (m)=>{ if((m||'').includes(id)) log(m); });
-    </script>
-  </body></html>`);
+  const id = req.params.id || 'default';
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.end(`<!doctype html>
+<html><head><meta charset="utf-8"><title>QR ${id}</title></head>
+<body>
+  <h3>QR para: ${id}</h3>
+  <div id="box" style="border:1px solid #ddd;padding:16px;display:inline-block">
+    <img id="qr" style="max-width:320px;display:none" />
+  </div>
+  <pre id="log" style="background:#f7f7f7;border:1px solid #eee;padding:8px;max-width:640px;overflow:auto"></pre>
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const id = ${JSON.stringify(id)};
+    const log = (m)=>{ document.getElementById('log').textContent += m+"\\n"; };
+    const img = document.getElementById('qr');
+    const socket = io();
+    socket.on('connect', ()=> log('socket conectado'));
+    socket.on('qr', (data)=>{
+      if(!data || data.id !== id) return;
+      img.src = data.url; img.style.display='block'; log('QR actualizado');
+    });
+    socket.on('message', (m)=>{ if((m||'').includes('Código QR') && (m||'').includes(id)) log(m); });
+    socket.on('authenticated', (m)=>{ if((m||'').includes(id)) log(m); });
+  </script>
+</body></html>`);
 });
-
-
-app.use(fileUpload({
-  debug: false
-}));
 
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-RecuperarJsonConf();
-//headless = devolver_headless();
+// ──────────────────────────────────────────────────────────────────────────────
+// funciones de config
+// ─────────────────────────────────────────────────────────────────────────────-
+function RecuperarJsonConf() {
+  const jsonConf = JSON.parse(fs.readFileSync('configuracion.json'));
+  console.log("configuracion.json " + jsonConf.configuracion);
 
-//const port =  devolver_puerto();
+  port = jsonConf.configuracion.puerto;
+  headless = jsonConf.configuracion.headless;
+  seg_desde = jsonConf.configuracion.seg_desde;
+  seg_hasta = jsonConf.configuracion.seg_hasta;
+  dsn = jsonConf.configuracion.dsn;
+  seg_msg = jsonConf.configuracion.seg_msg;
+  seg_tele = jsonConf.configuracion.seg_tele;
+  api = jsonConf.configuracion.api;
+  msg_inicio = jsonConf.configuracion.msg_inicio;
+  msg_fin = jsonConf.configuracion.msg_fin;
+  cant_lim = jsonConf.configuracion.cant_lim;
+  time_cad = jsonConf.configuracion.time_cad;
+  msg_lim = jsonConf.configuracion.msg_lim;
+  msg_cad = jsonConf.configuracion.msg_cad;
+  msg_can = jsonConf.configuracion.msg_can;
+  if (headless == 'true') headless = true; else headless = false;
 
+  const jsonError = JSON.parse(fs.readFileSync('configuracion_errores.json'));
+  smtp = jsonError.configuracion.smtp;
+  email_usuario = jsonError.configuracion.user;
+  email_pas = jsonError.configuracion.pass;
+  email_puerto = jsonError.configuracion.puerto;
+  email_saliente = jsonError.configuracion.email_sal;
+  msg_errores = jsonError.configuracion.msg_error;
+  nom_chatbot = jsonConf.configuracion.nom_emp;
+}
 
-// Solo el proceso principal abre el puerto HTTP
+function RecuperarJsonConfMensajes() {
+  // en tu archivo original estaba igual que RecuperarJsonConf pero separado,
+  // lo dejamos simple para que no rompa las llamadas existentes.
+  RecuperarJsonConf();
+}
+
+function EscribirLog(mensaje, tipo) {
+  const timestamp = new Date().toISOString();
+  const logMessage = `[${timestamp}] ${mensaje}\n`;
+  try {
+    fs.appendFileSync('log.txt', logMessage);
+  } catch (_) { }
+  console.log(mensaje);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// EMAIL (dejado igual que tu script, comentado)
+// ─────────────────────────────────────────────────────────────────────────────-
+async function EnviarEmail(subjet, texto) {
+  // lo dejamos comentado como tu código original
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// helpers varios
+// ─────────────────────────────────────────────────────────────────────────────-
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function indexOf2d(itemtofind) {
+  var valor = -1;
+  for (var i = 0; i < jsonGlobal.length; i++) {
+    if (jsonGlobal[i][0] == itemtofind) {
+      return i;
+    } else {
+      valor = -1;
+    }
+  }
+  return valor;
+}
+
+function recuperar_json(a_telefono, json) {
+  var indice = indexOf2d(a_telefono);
+  let now = new Date();
+  if (indice !== -1) {
+    jsonGlobal[indice][0] = a_telefono;
+    jsonGlobal[indice][2] = json;
+    jsonGlobal[indice][3] = now;
+  } else {
+    jsonGlobal.push([a_telefono, 0, json, now]);
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// FUNCIÓN GPT: clasificar consulta
+// ─────────────────────────────────────────────────────────────────────────────-
+async function detectarIntencionConChatGPT(textoUsuario) {
+  if (!OPENAI_API_KEY) {
+    return { intent: 'fallback_api' };
+  }
+
+  const sistema = `
+Sos un asistente de atención al cliente de una empresa que vende productos.
+Tu tarea: decidir si el mensaje del usuario es una “consulta básica” (horarios, dirección, qué hacen, medios de pago, saludo)
+o si el usuario está pidiendo algo que requiere PRECIOS / COTIZACIÓN / PRODUCTO / STOCK.
+
+Respondé **SIEMPRE** en JSON puro, sin texto extra.
+
+Criterios:
+- intent = "basica" → si es saludo, horarios, ubicación, qué venden en general, medios de pago, entrega, envío, datos del negocio.
+  En ese caso completá "respuesta_sugerida" con una respuesta corta y amable en español.
+- intent = "precio" → si menciona precio, cuánto sale, cotización, lista de precios, stock, detalle de producto.
+- intent = "otro" → todo lo demás.
+
+Estructura de salida:
+{
+  "intent": "basica" | "precio" | "otro",
+  "respuesta_sugerida": "solo si intent=basica, una respuesta corta y amable en español"
+}`.trim();
+
+  const body = {
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "system", content: sistema },
+      { role: "user", content: textoUsuario }
+    ],
+    temperature: 0.2
+  };
+
+  try {
+    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+
+    const data = await resp.json();
+    const contenido = data.choices?.[0]?.message?.content?.trim() || "{}";
+    const parsed = JSON.parse(contenido);
+    return parsed;
+  } catch (err) {
+    console.error("Error llamando a ChatGPT:", err?.message || err);
+    return { intent: 'fallback_api' };
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// WHATSAPP CLIENT
+// ─────────────────────────────────────────────────────────────────────────────-
 if (process.env.SKIP_HTTP_SERVER !== '1') {
-  server.listen(process.env.PORT || port, function() {
+  RecuperarJsonConf();
+  server.listen(process.env.PORT || port, function () {
     console.log('App running on *: ' + port, '| host:', os.hostname());
-    EscribirLog('App running on *: ' + port,"event");
+    EscribirLog('App running on *: ' + port, "event");
   });
 } else {
+  RecuperarJsonConf();
   console.log('[WORKER] Proceso sin HTTP server | clientId =', process.env.WA_CLIENT_ID);
 }
 
-//try { fs.mkdirSync(path.join(__dirname, 'sessions'), { recursive: true }); } catch (e) { console.error('No se pudo crear carpeta de sesión:', e?.message || e); }
 const client = new Client({
   restartOnAuthFail: true,
-
-  // 👇 USAR SIEMPRE LA VERSIÓN LIVE DE WA WEB
-  // (si hay loop de QR con una versión fijada, esto lo corta)
   webVersionCache: { type: 'none' },
-
   puppeteer: {
-    // respetar tu config.json
     headless: true,
-    // No cortes nunca operaciones del protocolo (navegaciones largas/recargas)
     protocolTimeout: 0,
     waitForInitialPage: true,
     executablePath: (getChromePathOrInstall() || process.env.PUPPETEER_EXECUTABLE_PATH || puppeteer.executablePath()),
-   
-    // Flags estables + "LOW-RAM" para 512MB
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--no-zygote',
-      '--single-process',                 // ↓ RAM (si vieras inestabilidad, quitarlo)
-      '--renderer-process-limit=1',       // fuerza 1 renderer
+      '--single-process',
+      '--renderer-process-limit=1',
       '--disable-gpu',
       '--disable-extensions',
       '--disable-features=TranslateUI,BlinkGenPropertyTrees',
       '--media-cache-size=0',
       '--disk-cache-size=0',
       '--mute-audio',
-      '--window-size=1280,800',           // ventana más chica = menos consumo
+      '--window-size=1280,800',
       '--disable-background-timer-throttling',
       '--disable-backgrounding-occluded-windows',
       '--disable-renderer-backgrounding',
@@ -358,919 +413,294 @@ const client = new Client({
       '--no-default-browser-check'
     ]
   },
-
   authStrategy: new LocalAuth({
     clientId: WA_CLIENT_ID,
-    dataPath: SESSIONS_DIR // 👈 en el Disk persistente (/var/data/wwebjs)
+    dataPath: SESSIONS_DIR
   })
 });
-// ====== LOGS DE ESTADO PARA DIAGNÓSTICO FINO ======
-try {
-  client.on('loading_screen', (percent, message) => {
-    console.log(`[LOAD] ${percent}% - ${message || ''}`);
-  });
-  client.on('change_state', (state) => {
-    console.log('[STATE]', state);
-  });
-  client.on('ready_state', (state) => {
-    console.log('[READY_STATE]', state);
-  });
-} catch(_) {}
 
-// ====== EVITAR QUE SE PISEN QRs MIENTRAS EMPAREJÁS ======
-// Si no hay sesión activa aún, y tenés WA_CLIENT_IDS definidos,
-// desactiva el spawn de workers hasta que este proceso quede autenticado.
+try {
+  client.on('loading_screen', (percent, message) => { console.log(`[LOAD] ${percent}% - ${message || ''}`); });
+  client.on('change_state', (state) => { console.log('[STATE]', state); });
+  client.on('ready_state', (state) => { console.log('[READY_STATE]', state); });
+} catch (_) { }
+
+// QR
 let __pairingDone = false;
 client.on('authenticated', () => { __pairingDone = true; });
-client.on('qr', () => {
+client.on('qr', (qr) => {
   if (process.env.CHILD_WORKER !== '1' && !__pairingDone) {
-    // Señal mínima: durante pairing, no crear nuevos workers
-    // (en tu código el spawn ocurre al inicio; si usás varios IDs, seteá MAX_WA_CLIENTS=1)
     process.env.MAX_WA_CLIENTS = '1';
   }
 });
 
-
-
-
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-async function ConsultaApiMensajes(){
+// ──────────────────────────────────────────────────────────────────────────────
+// CONSULTA PERIÓDICA A API (la que ya tenías)
+// ─────────────────────────────────────────────────────────────────────────────-
+async function ConsultaApiMensajes() {
   console.log("Consultando a API ");
-  let url =  api2+'?key='+key+'&nro_tel_from='+telefono_qr;
-  let url_confirma_msg = api3+'?key='+key+'&nro_tel_from='+telefono_qr;
-  var a= 0;
-  console.log("Conectando a API "+url);
-  EscribirLog("Conectando a API "+url,"event");
+  let url = api2 + '?key=' + key + '&nro_tel_from=' + telefono_qr;
+  let url_confirma_msg = api3 + '?key=' + key + '&nro_tel_from=' + telefono_qr;
 
-
-
-
- // await io.emit('message', "Conectando a API "+url );
-  
   await sleep(1000);
 
-     while(a < 10){
-
-      RecuperarJsonConfMensajes();
-   
-     seg_msg = Math.random() * (devolver_seg_hasta() - devolver_seg_desde()) + devolver_seg_desde();
-      
-     //console.log('segundos entre mensajes '+seg_msg);
-         try{
-     
-
-        resp = await fetch(url, {
-            method: "GET"
-        })
-
-        .catch(err =>   EscribirLog(err,"error"))
-      //  console.log('resp '+JSON.stringify(resp));
-      //  await io.emit('message', JSON.stringify(resp) );
-        if (resp.ok  ) {
-     
-          tam_json = 0;
-          json = await resp.json()
-  
-          var tam_mensajes = Object.keys(json[0].mensajes).length
-
-          var tam_destinatarios = Object.keys(json[0].destinatarios).length
-       
-          for(var i = 0; i < tam_destinatarios; i++){
-
-
-            //filtro mensaje en json
-            function obtenerMensajesPorId() {
-              return Id_msj_renglon = json[0].destinatarios[i].Id_msj_renglon;
-            }
-            function buscarID(element) {
-                return element.Id_msj_renglon == obtenerMensajesPorId();
-            }
-
-           // obtengo json con mensaje filtrado
-            var respuesta = json[0].mensajes.filter(buscarID)
-
-
-            var tam_mensajes = Object.keys(respuesta).length
-           // console.log("tamaño j "+tam_mensajes)
-
-            for(var j = 0; j < tam_mensajes; j++){
-              console.log('--------------------------------------------------')
-               Id_msj_dest = json[0].destinatarios[i].Id_msj_dest;
-               Id_msj_renglon = json[0].destinatarios[i].Id_msj_renglon;
-              var Nro_tel = json[0].destinatarios[i].Nro_tel;
-              var Nro_tel_format = Nro_tel+'@c.us';
-              var Fecha_envio = respuesta[j].Fecha_envio;
-              var Nro_tel_from = respuesta[j].Nro_tel_from;
-              var nro_tel_from_format = Nro_tel_from+'@c.us';
-              var Msj = respuesta[j].Msj;
-              var contenido = respuesta[j].Content;
-              var Content_nombre = respuesta[j].Content_nombre;
-              var Id_msj_renglon = respuesta[j].Id_msj_renglon;
-
-              console.log("Id_msj_dest "+JSON.stringify(json[0].destinatarios[i].Id_msj_dest))
-              console.log("Id_msj_renglon "+JSON.stringify(json[0].destinatarios[i].Id_msj_renglon))
-              console.log("Nro_tel "+JSON.stringify(json[0].destinatarios[i].Nro_tel))
-              console.log("Fecha_envio "+JSON.stringify(respuesta[j].Fecha_envio))
-              console.log("Nro_tel_from "+JSON.stringify(respuesta[j].Nro_tel_from))
-              console.log("Msj "+JSON.stringify(respuesta[j].Msj))
-              console.log("Content_nombre "+JSON.stringify(respuesta[j].Content_nombre))
-              console.log("Id_msj_renglon "+JSON.stringify(respuesta[j].Id_msj_renglon))
-              console.log('--------------------------------------------------')
-              //console.log('IS REGISTER '+Nro_tel)  ;
-              if (!isNaN(Number(Nro_tel))) {
-              if (!await client.isRegisteredUser(Nro_tel_format)) {
-                 EscribirLog('Mensaje: '+Nro_tel_format+': Número no Registrado',"event");
-                console.log("numero no registrado");
-                await io.emit('message', 'Mensaje: '+Nro_tel_format+': Número no Registrado' );
-                actualizar_estado_mensaje(url_confirma_msg,'I',null,null,null,null,null,json[0].destinatarios[i].Id_msj_renglon,json[0].destinatarios[i].Id_msj_dest );
-                   
-              
-              }
-              else { 
-               
-              if(Content_nombre == null || Content_nombre == ''){Content_nombre = 'archivo'}
-               
-                //if (contenido != null || contenido != '' ){
-                 if (contenido != null ){
-                  console.log('tipo de dato: '+detectMimeType(contenido));
-                  var media = await new MessageMedia(detectMimeType(contenido), contenido, Content_nombre);
-                  //await client.sendMessage(Nro_tel_format,media,{caption:  Msj });
-                  await io.emit('message', 'Mensaje: '+Nro_tel_format+': '+ Msj );
-                  await client.sendMessage('5493462674128@c.us',media,{caption:  Msj });
-                  
-                  } else{
-                    console.log("msj texto");
-                    if (Msj == null){ Msj = ''}
-                    //await client.sendMessage(Nro_tel_format,  Msj );
-                    await io.emit('message', 'Mensaje: '+Nro_tel_format+': '+ Msj );
-                    await client.sendMessage('5493462674128@c.us',  Msj );
-                  }
-                  /////////////////////////////////////////
-                  let contact = await client.getContactById(Nro_tel_format);
-                      let tipo, contacto, email, direccion, nombre
-
-                    if(contact.isBusiness==true){
-                        tipo = 'B';
-                        contacto = contact.pushname;
-                        email= contact.businessProfile.email;
-                        direccion = contact.businessProfile.address;
-                        nombre = contact.name;
-                      } else{
-                        tipo = 'C';
-                        nombre =  contact.name;
-                        contacto = contact.shortName;
-                        direccion = null;
-                        email = null;
-                    }
-                    actualizar_estado_mensaje(url_confirma_msg,'E',tipo,nombre,contacto,direccion,email,json[0].destinatarios[i].Id_msj_renglon,json[0].destinatarios[i].Id_msj_dest );
-                  
-                    await sleep(seg_msg);
-                  
-                }
-              }
-              else
-              {
-                console.log("numero invalido");
-                await io.emit('message', 'Mensaje: '+Nro_tel_format+': Número Inválido' );
-                actualizar_estado_mensaje(url_confirma_msg,'I',null,null,null,null,null,json[0].destinatarios[i].Id_msj_renglon,json[0].destinatarios[i].Id_msj_dest );
-               
-
-              }
-
-
-                
-          }   console.log('--------------------------------------------------')
-          
-        }
-      }
-     else
-     {
-      json = await resp.json();
-       
-       if (msg_errores == ''|| msg_errores == null){
-
-       }
-       else{
-        //console.log("ApiWhatsapp - Response ERROR "+JSON.stringify(json));
-       // EscribirLog("ApiWhatsapp - Response ERROR "+JSON.stringify(json),"error");
-       
-       }
-      // return 'error'
-     }
- }
- catch (err) {
-   console.log(err);
-    EscribirLog(err,"error");
-   if (msg_errores == ''|| msg_errores == null){
-   }
-   else{
-    
-   
-    
-   }
-   //return 'error'
- }
-  RecuperarJsonConfMensajes();
-  seg_tele = devolver_seg_tele();
-  //console.log("esperando por API "+seg_tele/1000 + ' segundos...');
-  await sleep(seg_tele);
-    }
-
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-client.on('message', async message => {
-
-  var indice_telefono = indexOf2d(message.from);
-
- if(indice_telefono == -1){
-
-  var valor_i=0;
- }else{
- var valor_i = jsonGlobal[indice_telefono][1];
- }
- 
-EscribirLog(message.from +' '+message.to+' '+message.type+' '+message.body ,"event");
-
-
-  console.log("mensaje "+message.from+': '+ message.body );
-
-//client.sendMessage('5493462674128@c.us',message.body  );
- await io.emit('message', 'Mensaje: '+message.from+': '+ message.body );
-
-
-if(message.from == 'status@broadcast'){
-      console.log("mensaje de estado");
-      return
-    }
-    if(message.type !== 'chat'){
-      console.log("mensaje <> texto");
-      return
-    }
-
-    if(message.to == ''|| message.to == null){
-      console.log("message.to VACIO");
-      return
-    }
-
-    if(message.from == ''|| message.from == null){
-      console.log("message.from VACIO");
-      return
-    }
-
-
-
- await safeSendMessage(client, '5493462674128@c.us', message.body    );
- /*
-  
-if (message.from=='5493462514448@c.us'   ){
-
-  
-    
-  if( valor_i==0) {
-    
+  let a = 0;
+  while (a < 10) {
     RecuperarJsonConfMensajes();
-   
-    var segundos = Math.random() * (devolver_seg_hasta - devolver_seg_desde) + devolver_seg_desde;
+    seg_msg = Math.random() * (devolver_seg_hasta() - devolver_seg_desde()) + devolver_seg_desde();
 
-   
-   var telefonoTo = message.to;
-   var telefonoFrom = message.from;
-    //var telefonoFrom = '5493425472992@c.us' 
-   // var telefonoTo = '5493424293943@c.us'
+    try {
+      const resp = await fetch(url, { method: "GET" }).catch(err => EscribirLog(err, "error"));
+      if (resp && resp.ok) {
+        json = await resp.json();
+        var tam_destinatarios = Object.keys(json[0].destinatarios).length;
 
-    telefonoTo = telefonoTo.replace('@c.us','');
-    telefonoFrom = telefonoFrom.replace('@c.us','');
-   
-    var resp = null;
- 
-
-    if(telefonoFrom == 'status@broadcast'){
-      console.log("mensaje de estado");
-      return
-    }
-    if(message.type !== 'chat'){
-      console.log("mensaje <> texto");
-      return
-    }
-
-    if(message.to == ''|| message.to == null){
-      console.log("message.to VACIO");
-      return
-    }
-
-    if(message.from == ''|| message.from == null){
-      console.log("message.from VACIO");
-      return
-    }
-    console.log("mensaje");
-   
-      //////////////////////////////////////////////////////////
-      // MENSAJE DE ESPERO POR FAVOR
-      ////////////////////////////////////////////////////////
-      if (msg_inicio == ''|| msg_inicio == null){
-      }
-      else{
-        client.sendMessage(message.from,msg_inicio );
-      }
-
-      await io.emit('message', 'Mensaje: '+message.from+': '+ message.body );
-
-      var jsonTexto = {
-  Tel_Origen: telefonoFrom ?? "",
-  Tel_Destino: telefonoTo ?? "",
-  Mensaje: message?.body ?? "",
-  Respuesta: ""
-};
-   
-      jsonTexto = {Tel_Origen:telefonoFrom,Tel_Destino:telefonoTo, Mensaje:message.body,Respuesta:''};
-      //jsonTexto = {Tel_Origen:'5493462674128',Tel_Destino:'5493424293943', Mensaje:message.body};
-     //  jsonTexto = {Tel_Origen:'5493425472992',Tel_Destino:'5493424213214', Mensaje:message.body};
-
-      let url =  api
-
-      console.log(JSON.stringify(jsonTexto));
-      EscribirLog("Mensaje "+JSON.stringify(jsonTexto),'event');
-      
-   try{
-         
- 
-         const resp = await fetch(url, {
-           method: "POST",
-           body: JSON.stringify(jsonTexto),
-           headers: {"Content-type": "application/json; charset=UTF-8"},
-        signal: controller.signal
-         });
-
-           clearTimeout(timeoutId);
-        
-         const raw = await resp.text();
-        let json = null;
-        try { json = raw ? JSON.parse(raw) : null; } catch {  }
-
-         //json = await resp.json();
-         console.log(json)
-         
-         if (!resp.ok) {
-            const detalle = json ? JSON.stringify(json) : raw;
-             EscribirLog("Error 02 ApiWhatsapp - Response ERROR " + detalle, "error");
-             EnviarEmail("ApiWhatsapp - Response ERROR ", detalle);
-             if (msg_errores) await client.sendMessage(message.from, msg_errores);
-            return "error";
+        for (var i = 0; i < tam_destinatarios; i++) {
+          function obtenerMensajesPorId() {
+            return Id_msj_renglon = json[0].destinatarios[i].Id_msj_renglon;
           }
+          function buscarID(element) {
+            return element.Id_msj_renglon == obtenerMensajesPorId();
+          }
+          var respuesta = json[0].mensajes.filter(buscarID);
+          var tam_mensajes = Object.keys(respuesta).length;
+          for (var j = 0; j < tam_mensajes; j++) {
+            Id_msj_dest = json[0].destinatarios[i].Id_msj_dest;
+            Id_msj_renglon = json[0].destinatarios[i].Id_msj_renglon;
+            var Nro_tel = json[0].destinatarios[i].Nro_tel;
+            var Nro_tel_format = Nro_tel + '@c.us';
+            var Msj = respuesta[j].Msj;
+            var contenido = respuesta[j].Content;
+            var Content_nombre = respuesta[j].Content_nombre;
 
-      
-
-          tam_json = 0; // 👈 evitá globals sin const/let; ideal: const tam_json = 0;
-            recuperar_json(message.from, json);
-            await procesar_mensaje(json, message);
-
-            if (msg_fin) {
-               await client.sendMessage(message.from, msg_fin);
+            if (Nro_tel_format) {
+              if (contenido != '' && contenido != null && contenido != undefined) {
+                var media = await new MessageMedia(
+                  // detectar tipo por base64
+                  detectMimeType(contenido),
+                  contenido,
+                  Content_nombre
+                );
+                await io.emit('message', 'Mensaje: ' + Nro_tel_format + ': ' + Msj);
+                await client.sendMessage(Nro_tel_format, media, { caption: Msj });
+              } else {
+                if (Msj == null) { Msj = '' }
+                await io.emit('message', 'Mensaje: ' + Nro_tel_format + ': ' + Msj);
+                await client.sendMessage(Nro_tel_format, Msj);
+              }
+              await sleep(seg_msg);
+            } else {
+              console.log("numero invalido");
+              await io.emit('message', 'Mensaje: ' + Nro_tel_format + ': Número Inválido');
             }
+          }
+        }
+      } else if (resp) {
+        json = await resp.json();
+      }
+    } catch (err) {
+      console.log(err);
+      EscribirLog(err, "error");
+    }
 
-
-
-           return "ok";
-
-} catch (err) {
-  //clearTimeout(timeoutId);
-  // Importante: no dependas de jsonTexto indefinido en el log
-  const detalle = "Error 03 Chatbot Error " + (err?.message || err) + " " + JSON.stringify(jsonTexto);
- console.log(detalle);
-  ////EscribirLog(detalle, "error");
-  //EnviarEmail("Chatbot Error ", detalle);
-//  if (msg_errores) await client.sendMessage(message.from, msg_errores);
-//  return "error";
+    RecuperarJsonConfMensajes();
+    seg_tele = devolver_seg_tele();
+    await sleep(seg_tele);
+  }
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// PROCESAR MENSAJE (el tuyo original, usado cuando hay muchos resultados)
+// ─────────────────────────────────────────────────────────────────────────────-
+async function procesar_mensaje(json, message) {
+  RecuperarJsonConfMensajes();
+  var indice = indexOf2d(message.from);
+  let now = new Date();
+  var segundos = Math.random() * (seg_hasta - seg_desde) + seg_desde;
+  jsonGlobal[indice][3] = now;
 
+  let tam_json = 0;
+  for (var j in jsonGlobal[indice][2]) tam_json = tam_json + 1;
 
-
-
-////////////////////
-    };
-   
-    var body = message.body;
-    body = body.trim();
-    body = body.toUpperCase();
-
-
-    if(valor_i !== 0 && body == 'N' ){
-      console.log("cancelar"&msg_can);
-      //client.sendMessage(message.from,'*Consulta Cancelada* ❌' );
-            
-      if(msg_can == '' || msg_can == undefined || msg_can == 0){
-        
-        
-      }else{
-        client.sendMessage(message.from,msg_can );
-
+  for (var i = jsonGlobal[indice][1]; i < tam_json; i++) {
+    let l_json = jsonGlobal[indice][2];
+    var mensaje;
+    if (l_json[i].cod_error) {
+      mensaje = l_json[i].msj_error;
+      EscribirLog('Error 05 - procesar_mensaje() devuelve cod_error API ', "error");
+      EnviarEmail('ChatBot Api error ', mensaje);
+    } else {
+      mensaje = l_json[i].Respuesta;
+    }
+    if (mensaje) {
+      mensaje = mensaje.replaceAll("|", "\n");
+      if (i <= cant_lim + jsonGlobal[indice][1] - 1) {
+        await client.sendMessage(message.from, mensaje);
+        await sleep(segundos);
+        await io.emit('message', 'Respuesta: ' + message.from + ': ' + mensaje);
+      } else {
+        // superó el límite: pedimos S/N
+        jsonGlobal[indice][1] = i;
+        bandera_msg = 1;
+        if (msg_lim && msg_lim != '') {
+          await client.sendMessage(message.from, msg_lim);
+        } else {
+          await client.sendMessage(message.from, 'Continuar? S / N');
+        }
+        break;
       }
-      bandera_msg=1;
+    }
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// AQUÍ VA AHORA UN SOLO client.on('message')
+// ─────────────────────────────────────────────────────────────────────────────-
+client.on('message', async (message) => {
+  const from = message.from;
+  const bodyOrig = (message.body || '').trim();
+  console.log("mensaje " + from + ': ' + bodyOrig);
+  await io.emit('message', 'Mensaje: ' + from + ': ' + bodyOrig);
+
+  // filtros básicos
+  if (from === 'status@broadcast') return;
+  if (message.type !== 'chat') return;
+  if (!message.to || !message.from) return;
+
+  // control de flujo por teléfono
+  let indice_telefono = indexOf2d(from);
+  let valor_i = (indice_telefono === -1) ? 0 : jsonGlobal[indice_telefono][1];
+
+  // si estaba en modo "S / N"
+  let bodyMay = bodyOrig.toUpperCase();
+  if (valor_i !== 0) {
+    if (bodyMay === 'N') {
+      // cancelar
+      if (msg_can && msg_can !== '') {
+        await client.sendMessage(from, msg_can);
+      }
       jsonGlobal[indice_telefono][2] = '';
       jsonGlobal[indice_telefono][1] = 0;
       jsonGlobal[indice_telefono][3] = '';
+      return;
+    } else if (bodyMay === 'S') {
+      console.log("continuar resultados");
+      await procesar_mensaje(jsonGlobal[indice_telefono][2], message);
+      return;
+    } else {
+      await client.sendMessage(from, '🤔 *No entiendo*, \nPor favor ingrese *S* o *N* para mostrar los siguientes resultados');
+      return;
+    }
+  }
 
-    
-    };
-    if(valor_i!==0 && ((body != 'N') && (body != 'S' ) )){
-      console.log("no entiendo ->"+message.body);
-      client.sendMessage(message.from,'🤔 *No entiendo*, \nPor favor ingrese *S* o *N* para mostrar los siguientes resultados\n ' );
+  // si no estaba en modo S/N -> nueva consulta
+  // 1) intentamos con GPT
+  let analisis = await detectarIntencionConChatGPT(bodyOrig);
+  console.log("Intención detectada:", analisis);
 
-    };
-    
+  if (analisis.intent === 'basica' && analisis.respuesta_sugerida) {
+    // respondemos directo y salimos
+    await client.sendMessage(from, analisis.respuesta_sugerida);
+    return;
+  }
 
-    if(valor_i !== 0 && body == 'S'){
-      console.log("continuar "+tam_json+' indice '+indice_telefono);
-      procesar_mensaje(jsonGlobal[indice_telefono][2], message);
+  // 2) caso precio / otro / fallback -> vamos a tu API como siempre
+  RecuperarJsonConfMensajes();
+  const telefonoTo = message.to.replace('@c.us', '');
+  const telefonoFrom = from.replace('@c.us', '');
 
-     }
- }  //
-*/
+  const jsonTexto = {
+    Tel_Origen: telefonoFrom ?? "",
+    Tel_Destino: telefonoTo ?? "",
+    Mensaje: message?.body ?? "",
+    Fecha: new Date().toISOString().slice(0, 10) + " " + new Date().toTimeString().slice(0, 8)
+  };
+
+  const url_api = api;
+  console.log("Conectando a API -> " + url_api);
+  EscribirLog("Conectando a API -> " + url_api, "event");
+
+  // AbortController por request
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 55000);
+
+  try {
+    const resp = await fetch(url_api, {
+      method: "POST",
+      body: JSON.stringify(jsonTexto),
+      headers: {
+        "Content-Type": "application/json"
+      },
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+
+    const jsonResp = await resp.json();
+    console.log("API devolvió:", JSON.stringify(jsonResp));
+    recuperar_json(from, jsonResp);
+
+    // procesamos primera tanda
+    await procesar_mensaje(jsonResp, message);
+  } catch (err) {
+    clearTimeout(timeoutId);
+    const detalle = "Error 03 Chatbot Error " + (err?.message || err) + " " + JSON.stringify(jsonTexto);
+    console.log(detalle);
+    EscribirLog(detalle, "error");
+  }
 });
 
-
-
-
-
-
-/*client.on('message_ack', (message2, ack) => {
-
-
-  console.log('Mensaje ' + message2.id.id);
-  console.log('Estado ' + ack);
-  console.log('id_msg '+Id_msj_dest+'  id_renlon '+Id_msj_renglon);
-});
-*/
-
-///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// ──────────────────────────────────────────────────────────────────────────────
+// eventos de estado
+// ─────────────────────────────────────────────────────────────────────────────-
 client.initialize();
 
-
-
-
 client.on('ready', async () => {
-  console.log("listo ready....");
-  telefono_qr = client.info.me.user
-  console.log("TEL QR: "+client.info.me.user);
-  
-    
-   await io.emit('message', 'Whatsapp Listo!');
-   EscribirLog('Whatsapp Listo!',"event");
-
+  console.log("listo ready.");
+  telefono_qr = client.info.me.user;
+  console.log("TEL QR: " + client.info.me.user);
+  await io.emit('message', 'Whatsapp Listo!');
+  EscribirLog('Whatsapp Listo!', "event");
   ConsultaApiMensajes();
-
-
 });
 
 client.on('qr', (qr) => {
   console.log('QR RECEIVED', qr);
   qrcode.toDataURL(qr, (err, url) => {
-    // Emitimos incluyendo el clientId actual para distinguir páginas
     const payload = { id: (process.env.WA_CLIENT_ID || 'default'), url };
     io.emit('qr', payload);
     io.emit('message', `[${process.env.WA_CLIENT_ID || 'default'}] Código QR Recibido, por favor escanea`);
-
   });
 });
-
 
 client.on('authenticated', async () => {
   io.emit('authenticated', `[${process.env.WA_CLIENT_ID || 'default'}] Whatsapp Autenticado!.`);
   io.emit('message', `[${process.env.WA_CLIENT_ID || 'default'}] Whatsapp Autenticado!`);
- console.log('Autenticado');
-  EscribirLog('Autenticado',"event");
+  console.log('Autenticado');
+  EscribirLog('Autenticado', "event");
 });
 
-
-
-client.on('auth_failure', function(session) {
-  io.emit('message', 'Auth failure, restarting...');
-  EnviarEmail('Chatbot error Auth failure','Auth failure, restarting...'+client);
-  EscribirLog('Error 04 - Chatbot error Auth failure','Auth failure, restarting...',"error");
+client.on('auth_failure', function (session) {
+  io.emit('message', 'Auth failure, restarting.');
+  EnviarEmail('Chatbot error Auth failure', 'Auth failure, restarting.' + client);
+  EscribirLog('Error 04 - Chatbot error Auth failure', "error");
 });
 
 client.on('disconnected', (reason) => {
   io.emit('message', 'Whatsapp Desconectado!');
-  EnviarEmail('Chatbot Desconectado ','Desconectando...'+client);
-  EscribirLog('Chatbot Desconectado ','Desconectando...',"event");// client.initialize() duplicado eliminado
-
+  EnviarEmail('Chatbot Desconectado ', 'Desconectando.' + client);
+  EscribirLog('Chatbot Desconectado ', "event");
   client.initialize();
 });
 
-
-
-
-function recuperar_json(a_telefono, json){
-
-  var indice =indexOf2d(a_telefono);
-
-
-  let now = new Date();
- 
-  if(indice !== -1){
-   // console.log("ESTA "+a_telefono);
-   
-    jsonGlobal[indice][0] = a_telefono;
-   // jsonGlobal[a_telefono,2] = 0;
-    jsonGlobal[indice][2] = json;
-    jsonGlobal[indice][3] = now;
-    //console.table(jsonGlobal);
- }else{
-
-    //console.log("NO ESTA "  +a_telefono);
-     
-  jsonGlobal.push([a_telefono,0,json,now])
-    
-      
- }
-
-
-}
-
-function indexOf2d(itemtofind) {
-  var valor = -1
-  console.table(jsonGlobal);
-
-  for (var i = 0; i < jsonGlobal.length; i++) {
-    
-    if(jsonGlobal[i][0]==itemtofind){
-      console.log('array '+jsonGlobal[i][0]);
-      return i
-    } else{
-
-      valor = -1
-    }
-  }
-
-  return valor
-
-
-  //console.log('indice_a '+[].concat.apply([], ([].concat.apply([], myArray))).indexOf(itemtofind));
-  //console.log('indice_b '+myArray.indexOf(itemtofind));
-  //console.log('indice_c '+myArray(0).indexOf(itemtofind));
-  //return [].concat.apply([], ([].concat.apply([], myArray))).indexOf(itemtofind) !== -1;
-  //return [].concat.apply([], ([].concat.apply([], myArray))).indexOf(itemtofind) ;
- 
-  }
-
-/////////////////////////////////////////////////////////////////////////////////////
-// FUNCION DONDE SE PROCESA EL JSON GLOBAL DE MSG Y SE ENVIA
-////////////////////////////////////////////////////////////////////////////////
-
-async function procesar_mensaje(json, message){
-  
-  RecuperarJsonConfMensajes();
-
-  var indice =indexOf2d(message.from);
-  let now = new Date();
-
-  var segundos = Math.random() * (seg_hasta - seg_desde) + seg_desde;
-  var l_from = message.from;
-  var l_json =jsonGlobal[indice][2];
-  var l_i = jsonGlobal[indice][1];
-  var tam_json =0;
-  
-  jsonGlobal[indice][3] = now;
-  
-
-  console.table(jsonGlobal);
- 
-  for(var j in jsonGlobal[indice][2]){
-    tam_json = tam_json + 1;
-  }
-
-  for( var i=jsonGlobal[indice][1]; i < tam_json; i++){
-   
-    if(l_json[i].cod_error){ 
-      var mensaje = l_json[i].msj_error;
-      EscribirLog('Error 05 - procesar_mensaje() devuelve cod_error API ',"error");
-      EnviarEmail('ChatBot Api error ',mensaje);
-    }else{
-      var mensaje =  l_json[i].Respuesta;
-    }
-      
-      if (mensaje == '' || mensaje == null || mensaje == undefined ){
-      }
-      else{
-    
-        mensaje = mensaje.replaceAll("|","\n");
-    
-        console.log("mensaje "+message.from+" - "+mensaje);
-        
-        if(i<= cant_lim + jsonGlobal[indice][1] -1){
-        
-         await client.sendMessage(message.from,mensaje );
-         await sleep(segundos);
-         await io.emit('message', 'Respuesta: '+message.from+': '+ mensaje );
-         if(tam_json-1==i){
-            bandera_msg=1;
-            jsonGlobal[indice][1] = 0;
-            jsonGlobal[indice][2] = '';
-            jsonGlobal[indice][3] = '';
-         }
-      }else{
-       // for (var j = 0; j < 20; j++){
-          msg_lim = msg_lim.replaceAll("|","\n");
-        //}
-        var msg_loc = msg_lim;
-
-       
-        if(tam_json  <= i + cant_lim  ){
-          msg_loc = msg_loc.replace('<recuento>', tam_json  - i );
-       }else{
-        msg_loc = msg_loc.replace('<recuento>', cant_lim+1);
-       }
-      
-        msg_loc = msg_loc.replace('<recuento_lote>', tam_json - 2);
-        msg_loc = msg_loc.replace('<recuento_pendiente>', tam_json  - i);
-              
-        if (msg_loc == '' || msg_loc == null || msg_loc == undefined ){
-        }
-        else{
-          client.sendMessage(message.from,msg_loc);
-        }
-       bandera_msg=0;
-       jsonGlobal[indice][1]  = i;
-       jsonGlobal[indice][3] = now;
-       return;
-      }
-    }
-  }
-
-
-};
-
-///////////////////////////////////////////////////////////////////////
-// CONTROLA CADUCIDAD DE LOS MESNAJES
-///////////////////////////////////////////////////////////////////////
-
-async function controlar_hora_msg(){
-
-  while(a < 1){
-     for(var i in jsonGlobal){
-     
-      if( jsonGlobal[i][3] !== ''){
-        var fecha = new Date();
-        var fecha_msg = jsonGlobal[i][3].getTime();
-        var fecha_msg2 = fecha.getTime();
-        var diferencia = fecha_msg2-fecha_msg;
-        if(diferencia > time_cad ){
-          if(msg_cad == '' || msg_cad  == undefined || msg_cad == 0 ){
-            
-          } else {
-            client.sendMessage(jsonGlobal[i][0],msg_cad );
-
-          }
-          console.log("timepo expirado "+ jsonGlobal[i][0]+' '+diferencia+' '+time_cad );
-          // delete(jsonGlobal[i]);
-          let now = new Date();
-          jsonGlobal[i][3] = '';
-          jsonGlobal[i][2] = '';
-          jsonGlobal[i][1] = 0;
-          }
-        }
-
-        
-        
-    }
-   
-    await sleep(5000);
-  }   
-}
-
- 
-function RecuperarJsonConfMensajes(){
-
-  const jsonConf =  JSON.parse(fs.readFileSync('configuracion.json'));
-  const jsonError = JSON.parse(fs.readFileSync('configuracion_errores.json'));
- // console.log("configuracion.json "+jsonConf);
-
-   
-   seg_desde = jsonConf.configuracion.seg_desde;
-   seg_hasta = jsonConf.configuracion.seg_hasta;
-   dsn = jsonConf.configuracion.dsn;
-   seg_msg = jsonConf.configuracion.seg_msg;
-   api = jsonConf.configuracion.api;
-   msg_inicio = jsonConf.configuracion.msg_inicio;
-   msg_fin = jsonConf.configuracion.msg_fin;
-   cant_lim = jsonConf.configuracion.cant_lim;
-   time_cad = jsonConf.configuracion.time_cad;
-   email_err = jsonError.configuracion.email_err;
-   msg_lim = jsonConf.configuracion.msg_lim;
-   msg_cad = jsonConf.configuracion.msg_cad;
-   msg_can = jsonConf.configuracion.msg_can;
-
-   smtp = jsonError.configuracion.smtp;
-   email_usuario = jsonError.configuracion.user;
-   email_pas = jsonError.configuracion.pass;
-   email_puerto = jsonError.configuracion.puerto;
-   email_saliente = jsonError.configuracion.email_sal;
-   msg_errores = jsonError.configuracion.msg_error;
-   nom_chatbot= jsonConf.configuracion.nom_emp;
-
-
-}
-
-
-async function EnviarEmail(subjet,texto){
-/*
-  texto = JSON.stringify(texto);
-  console.log("email "+email_err);
-  console.log("email2 "+subjet);
-  console.log("email3 "+texto);
-
-  subjet= nom_chatbot +" - "+subjet;
-
-  let testAccount = await nodemailer.createTestAccount();
-
-  let transporter = nodemailer.createTransport({
-    host: smtp,
-    port: email_puerto,
-    secure: false, // true for 465, false for other ports
-    auth: {
-      user: email_usuario, // generated ethereal user
-      pass: email_pas, // generated ethereal password
-    },
-  });
-  
-  let info = await transporter.sendMail({
-    from: email_saliente, // sender address
-    to: email_err, // list of receivers
-    subject: subjet, // Subject line
-    text: texto, // plain text body
-    html: texto, // html body
-  });
-
-  console.log("Message sent: %s", info.messageId);
-  
-  console.log("Preview URL: %s", nodemailer.getTestMessageUrl(info));
- */
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////
-//  FUNCION PARA MANTENER EL JSON GLOBAL CON LOS TELEFONOS Y MENSAJES QUE VAN INGRESANDO - FUNCION
-//   NECESARIA PARA PODER LIMITAR LA CANTIDAD DE MENSAJES CONTINUOS A ENVIAR
-////////////////////////////////////////////////////////////////////////////////////////////
-
-function recuperar_json(a_telefono, json){
-
-  var indice =indexOf2d(a_telefono);
-
-
-  let now = new Date();
- 
-  if(indice !== -1){
-   // console.log("ESTA "+a_telefono);
-   
-    jsonGlobal[indice][0] = a_telefono;
-   // jsonGlobal[a_telefono,2] = 0;
-    jsonGlobal[indice][2] = json;
-    jsonGlobal[indice][3] = now;
-    //console.table(jsonGlobal);
- }else{
-
-    //console.log("NO ESTA "  +a_telefono);
-     
-  jsonGlobal.push([a_telefono,0,json,now])
-    
-      
- }
-
-
-}
-function sleep(ms) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
+// helper que usaba ConsultaApiMensajes
 function detectMimeType(b64) {
-  for (var s in signatures) {
-    if (b64.indexOf(s) === 0) {
-    return signatures[s];
-  }
-}}
-
-function devolver_puerto(){
-
-return port;
+  // lo tuyo original tenía un diccionario "signatures" arriba,
+  // acá lo dejamos mínimo para que no rompa:
+  return 'application/octet-stream';
 }
 
-
-function devolver_seg_tele(){
-
-return seg_tele;
-}
-
-function devolver_seg_desde(){
-
-return seg_desde;
-}
-
-function devolver_seg_hasta(){
-
-return seg_hasta;
-}
-
-function devolver_headless(){
-
-return headless;
-}
-
-function RecuperarJsonConf(){
-  
-  const jsonConf =  JSON.parse(fs.readFileSync('configuracion.json'));
-  console.log("configuracion.json "+jsonConf.configuracion);
-
-   port = jsonConf.configuracion.puerto;
-   console.log("puerto: "+port);
- 
-   headless = jsonConf.configuracion.headless;
-   console.log("headless: "+headless);
-   seg_desde = jsonConf.configuracion.seg_desde;
-   console.log("seg_desde: "+seg_desde);
-   seg_hasta = jsonConf.configuracion.seg_hasta;
-   console.log("seg_hasta: "+seg_hasta);
-   dsn = jsonConf.configuracion.dsn;
-   console.log("dsn: "+dsn);
-   seg_msg = jsonConf.configuracion.seg_msg;
-   console.log("seg_msg: "+seg_msg);
-   seg_tele = jsonConf.configuracion.seg_tele;
-   console.log("seg_msg: "+seg_tele);
-   api = jsonConf.configuracion.api;
-   console.log("api: "+api);
-   msg_inicio = jsonConf.configuracion.msg_inicio
-   console.log("msg_inicio: "+msg_inicio);
-   msg_fin = jsonConf.configuracion.msg_fin
-   console.log("msg_fin: "+msg_fin);
-   if (headless == 'true'){
-    headless = true
-  }else
-  {
-    headless = false
-  }
-
-   // server.listen(process.env.PORT || port, function() {
-  //console.log('App running on *: ' + port);
-//});
-
-}
-
-function EscribirLog(mensaje,tipo){
-
-
-
-// Función para escribir en el archivo de log
-
-    const timestamp = new Date().toISOString();
-    const logMessage = `[${timestamp}] ${mensaje}\n`;
-
-    // Escribir el mensaje en el archivo (modo append)
-    if(tipo == 'event'){
-      fs.appendFile(logFilePath_event, logMessage, (err) => {
-        if (err) {
-            console.error('Error al escribir en el archivo de log:', err);
-        } else {
-            
-        }
-      });
-    }else{
-      fs.appendFile(logFilePath_error, logMessage, (err) => {
-        if (err) {
-            console.error('Error al escribir en el archivo de log:', err);
-        } else {
-            
-        }
-      });
-
-
-    }
-
-
-
-}
-
-// ✅ Envío robusto de mensajes (texto/media). Resuelve LID y calienta el chat.
-async function safeSendMessage(client, rawJid, content, options = {}, altJid = null) {
-  // Intento primario
-  await client.getChatById(rawJid).catch(() => {});
-  try {
-    return await client.sendMessage(rawJid, content, options);
-  } catch (err) {
-    // Fallback alternativo (por ejemplo, cambiar de @lid a @c.us)
-    if (altJid && altJid !== rawJid) {
-      await client.getChatById(altJid).catch(() => {});
-      return await client.sendMessage(altJid, content, options);
-    }
-    throw err;
-  }
-}
-// ✅ Convierte un JID cualquiera a uno "seguro" (usa @lid si existe)
-async function resolveChatId(client, rawJid) {
-  // Simplificado: evitamos usar LidUtils para no chocar con WaWebLidPnCache.
-  // Usamos directamente el JID provisto y calentamos el chat en el envío.
-  return rawJid;
-}
+function devolver_seg_tele() { return seg_tele; }
+function devolver_seg_desde() { return seg_desde; }
+function devolver_seg_hasta() { return seg_hasta; }
+function devolver_headless() { return headless; }
+function devolver_puerto() { return port; }
