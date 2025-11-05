@@ -620,7 +620,7 @@ const contact = await client.getContactById(message.from); // ej: '1203...@lid'
 //tel_from = contact.number;
       var telefonoFrom = contact.number;  
     //var telefonoFrom = '5493425472992@c.us' 
-    var telefonoTo = '5493424293943@c.us'
+    var telefonoTo = '5493462616000@c.us'
 
     telefonoTo = telefonoTo.replace('@c.us','');
 
