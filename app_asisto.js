@@ -618,11 +618,11 @@ const contact = await client.getContactById(message.from); // ej: '1203...@lid'
       console.log(contact.id._serialized); // '1203...@lid'
       console.log(contact.number); 
 //tel_from = contact.number;
-     const telefonoFrom = contact.number;  
+      var telefonoFrom = contact.number;  
     //var telefonoFrom = '5493425472992@c.us' 
-   // var telefonoTo = '5493424293943@c.us'
+    var telefonoTo = '5493424293943@c.us'
 
-  const  telefonoTo = telefonoTo.replace('@c.us','');
+    telefonoTo = telefonoTo.replace('@c.us','');
 
 
 
