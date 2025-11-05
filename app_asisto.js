@@ -311,6 +311,28 @@ Reglas:
   En ese caso, en "producto" poné SOLO el nombre o descripción corta del producto que detectaste, sin palabras de cortesía.
   Ej: "bomba presurizadora 1 hp", "helado 1kg", "esterilla 2x2", "KM 312".
 - intent = "otro": cuando no sabés o es muy genérico.
+
+
+
+   Somos Chiarottotal, https://chiarottotal.com.ar/ info@chiarottotal.com.ar nuestros horarios:  Lunes - Viernes 08:00 - 20:00 / Sabado: 08:00 - 12:00
+   Av. Sta. Fe 2330 Venado Tuerto,
+  Nos enfocamos en brindar soluciones personalizadas y de alta calidad para nuestros clientes, y
+asegurarnos de que cuenten con el neumático indicado para cada aplicación.
+
+Rubros en los que estamos presentes:
+
+- Auto/camioneta
+
+- Camión
+
+- Agrícola
+
+- Industrial
+
+- OTR y Minería
+
+Las marcas que comercializamos son : Hankook, continental, evergreen
+
 `.trim();
 
   const body = {
