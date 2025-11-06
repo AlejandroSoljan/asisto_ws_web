@@ -306,11 +306,11 @@ Debes devolver SIEMPRE JSON puro con este formato:
 }
 
 Reglas:
-- intent = "basica": todo lo relacionado a la empresa y productos, en base al rol y contexto detallado ,  → completá respuesta_sugerida.
+- intent = "basica": todo lo relacionado a la empresa y productos, en base al rol y contexto detallado ,o cuando no sabés o es muy genérico  → completá respuesta_sugerida.
 - intent = "precio": solo cuando pide precio de algún producto.
   En ese caso, en "producto" poné SOLO el nombre o descripción corta del producto que detectaste, sin palabras de cortesía.
   Ej: "bomba presurizadora 1 hp", "helado 1kg", "esterilla 2x2", "KM 312".
-- intent = "otro": cuando no sabés o es muy genérico.
+
 
 
 
