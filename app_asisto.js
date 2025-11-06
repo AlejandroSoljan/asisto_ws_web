@@ -1,5 +1,5 @@
 /*script:app_asisto_extendido*/
-/*version:1.06.04   05/11/2025  (GPT + producto para precio)*/
+/*version:1.06.05   05/11/2025  (GPT + producto para precio + historial)*/
 
 // ──────────────────────────────────────────────────────────────────────────────
 // MULTI-SESIÓN + PÁGINAS QR POR CUENTA
@@ -177,6 +177,9 @@ var nom_chatbot;
 var Id_msj_dest;
 var Id_msj_renglon;
 
+// 👉 NUEVO: historial de conversación por número
+const convHistory = {};
+
 // ──────────────────────────────────────────────────────────────────────────────
 // APP / SOCKET
 // ──────────────────────────────────────────────────────────────────────────────
@@ -287,9 +290,9 @@ function extraerNumeroWhatsapp(id) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// FUNCIÓN GPT: clasificar consulta + producto
+// FUNCIÓN GPT: clasificar consulta + producto (AHORA CON HISTORIAL)
 // ──────────────────────────────────────────────────────────────────────────────
-async function detectarIntencionConChatGPT(textoUsuario) {
+async function detectarIntencionConChatGPT(textoUsuario, historial = []) {
   if (!OPENAI_API_KEY) {
     return { intent: 'fallback_api' };
   }
@@ -356,6 +359,8 @@ Usá un tono profesional, claro y amable, como vendedor técnico de una casa de 
     model: "gpt-4o-mini",
     messages: [
       { role: "system", content: sistema },
+      // 👉 pegamos hasta los últimos 6 mensajes del historial de ese número
+      ...historial.slice(-6),
       { role: "user", content: textoUsuario }
     ],
     temperature: 0.2
@@ -484,6 +489,12 @@ client.on('message', async (message) => {
   if (message.type !== 'chat') return;
   if (!message.to || !message.from) return;
 
+  // 👉 sacamos la key de historial de este número (sin @...)
+  const histKey = from.split('@')[0];
+  if (!convHistory[histKey]) convHistory[histKey] = [];
+  // guardamos lo que dijo el usuario
+  convHistory[histKey].push({ role: 'user', content: bodyOrig });
+
   // tu filtro actual
   if (message.from == '5493462514448@c.us') {
 
@@ -509,12 +520,14 @@ client.on('message', async (message) => {
       }
     }
 
-    // 1) pasamos por GPT
-    let analisis = await detectarIntencionConChatGPT(bodyOrig);
+    // 1) pasamos por GPT con historial
+    let analisis = await detectarIntencionConChatGPT(bodyOrig, convHistory[histKey]);
     console.log("Intención detectada:", analisis);
 
     if (analisis.intent === 'basica' && analisis.respuesta_sugerida) {
       await client.sendMessage(from, analisis.respuesta_sugerida);
+      // también guardamos la respuesta del bot en el historial
+      convHistory[histKey].push({ role: 'assistant', content: analisis.respuesta_sugerida });
       return;
     }
 
@@ -533,15 +546,12 @@ client.on('message', async (message) => {
       telefonoFrom = extraerNumeroWhatsapp(message.from);
     }
 
-    // Tel_Destino del propio mensaje
-    //const telefonoTo = extraerNumeroWhatsapp(message.to);
-
-    const telefonoTo = '5493462616000'
+    // Tel_Destino del propio mensaje (en tu archivo estaba fijo)
+    const telefonoTo = '5493462616000';
 
     // mensaje que va al API
     let mensajeParaApi = bodyOrig;
     if (analisis.intent === 'precio' && analisis.producto) {
-      // 👉 acá está el cambio que pediste
       mensajeParaApi = analisis.producto;
     }
 
