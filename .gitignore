@@ -1,0 +1,16 @@
+# runtime
+**/node_modules/
+**/.wwebjs_auth/
+**/sessions/
+**/*.log
+**/*.log.*
+**/.watch_state_cliente_*.json
+**/ecosystem.local.config.js
+
+# env / secrets
+**/.env
+**/*.local.*
+
+# Windows noise
+Thumbs.db
+Desktop.ini
