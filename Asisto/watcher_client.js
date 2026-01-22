@@ -21,9 +21,11 @@ const fs = require("fs");
 const path = require("path");
 const { execSync } = require("child_process");
 
-const SHEET_URL = process.env.SHEET_URL;
-const MI_CLIENTE_ID = String(process.env.MI_CLIENTE_ID || "").trim();
-const REPO_DIR = process.env.REPO_DIR;
+const SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSh1HHp-nb7EEm-eoChHzGxlsYdJQgJyP6BaoKqhTu3UXfYishZTaGZjv8ejATkvkhjusOcjTPTTxzl/pub?gid=0&single=true&output=csv";
+const MI_CLIENTE_ID = "1";
+// ✅ Ruta absoluta al repo (ajustada a tu caso)
+const REPO_DIR = "C:\\Asisto2";
+const PROJECT_DIR = path.join(REPO_DIR, "Asisto");
 const POLL_SECONDS = Number(process.env.POLL_SECONDS || 60);
 const PM2_NAME = process.env.PM2_NAME || `asisto-${MI_CLIENTE_ID}`;
 
@@ -31,11 +33,11 @@ if (!SHEET_URL) throw new Error("Falta SHEET_URL (URL CSV publicado del Google S
 if (!MI_CLIENTE_ID) throw new Error("Falta MI_CLIENTE_ID (ej: 1).");
 if (!REPO_DIR) throw new Error("Falta REPO_DIR (ej: C:\\Asisto).");
 
-const STATE_FILE = path.join(REPO_DIR, `.watch_state_cliente_${MI_CLIENTE_ID}.json`);
-const ECOSYSTEM_FILE = path.join(REPO_DIR, `ecosystem.local.config.js`);
+const STATE_FILE = path.join(PROJECT_DIR, `.watch_state_cliente_${MI_CLIENTE_ID}.json`);
+const ECOSYSTEM_FILE = path.join(PROJECT_DIR, `ecosystem.local.config.js`);
 
 // ---------- Helpers ----------
-function run(cmd, cwd = REPO_DIR) {
+function run(cmd, cwd = PROJECT_DIR) {
   console.log(`[cmd] ${cmd}`);
   execSync(cmd, { stdio: "inherit", cwd });
 }
@@ -112,13 +114,38 @@ function normalizeActualiza(x) {
   return String(x || "").trim().toUpperCase();
 }
 
-// Tu sheet trae Version como "1.23". En git tags suele ser "v1.23" o "1.23".
-// Probamos ambos.
+// Tu sheet trae Version como "2.00", "1.23", etc.
+// Normalizamos a semver y probamos varios formatos de tag:
+//  - 2.00   -> v2.00.00
+//  - 1.23   -> v1.23.00
+//  - 1.2.3  -> v1.2.3
+// Además probamos sin "v" por si tagueaste así.
 function candidateTags(version) {
-  const v = String(version || "").trim();
+  let v = String(version || "").trim();
   if (!v) return [];
-  if (v.startsWith("v")) return [v, v.replace(/^v/, "")];
-  return [v, `v${v}`];
+
+  const hasV = v.startsWith("v");
+  const raw = hasV ? v.slice(1) : v;
+
+  const parts = raw.split(".").filter(p => p.length > 0);
+  let norm = raw;
+  if (parts.length === 1) norm = `${parts[0]}.0.0`;
+  if (parts.length === 2) norm = `${parts[0]}.${parts[1]}.00`;
+  // si ya tiene 3 partes, lo dejamos tal cual
+
+  const vTag = `v${norm}`;
+  // orden: primero lo más probable
+  const candidates = [
+    vTag,          // v2.00.00
+    norm,          // 2.00.00
+    `v${raw}`,     // v2.00
+    raw,           // 2.00
+    v,             // v2.00 (si venía con v)
+    hasV ? raw : `v${raw}`
+  ];
+
+  // únicos
+  return candidates.filter((x, i, a) => x && a.indexOf(x) === i);
 }
 
 function computeRowHash(row) {
@@ -146,7 +173,7 @@ function writeEcosystem(row) {
   const clientId = `cliente-${row.ClienteId}`;
 
   // Sesión por cliente (NO se pisa)
-  const sessionPath = path.join(REPO_DIR, "sessions", clientId);
+  const sessionPath = path.join(PROJECT_DIR, "sessions", clientId);
 
   // Si en el futuro agregás columnas headless/chrome_path/port, el watcher las pasa también
   const env = {
@@ -170,7 +197,7 @@ function writeEcosystem(row) {
     {
       name: "${PM2_NAME}",
       script: "app_asisto.js",
-      cwd: ${JSON.stringify(REPO_DIR)},
+      cwd: ${JSON.stringify(PROJECT_DIR)},
       interpreter: "node",
       autorestart: true,
       watch: false,
@@ -191,10 +218,14 @@ function ensureGitRepo() {
 }
 
 function checkoutTag(tag) {
-  // trae tags y cambia versión
-  run(`git fetch --tags --force`);
-  run(`git checkout ${tag}`);
-  run(`npm ci`);
+  // Git se corre en la raíz del repo
+  run(`git fetch --tags --force`, REPO_DIR);
+  run(`git checkout ${tag}`, REPO_DIR);
+
+  // NPM se corre en la carpeta del proyecto
+  const lock = path.join(PROJECT_DIR, "package-lock.json");
+  if (fs.existsSync(lock)) run(`npm ci`, PROJECT_DIR);
+  else run(`npm install`, PROJECT_DIR);
 }
 
 function pm2Apply() {
@@ -239,23 +270,30 @@ async function tick() {
     }
   }
 
-  // Si no encuentra tag, intentamos igual con el primero (por si es branch)
-  if (!chosenTag) chosenTag = candidateTags(version)[0];
+  // Si no hay tag, NO intentamos checkout porque explota.
+  // En ese caso, solo aplicamos config/env y seguimos con la versión actual del repo.
+  if (!chosenTag) {
+    console.log(
+      `⚠️ No existe tag para Version="${version}". ` +
+      `Crealo en git (ej: v${String(version).trim()}.00) o cambiá el Sheet a un tag real. ` +
+      `Se aplicará solo config/env sin cambiar código.`
+    );
+  }
 
   const rowHash = computeRowHash(row);
 
-  // Si cambió versión: checkout + npm ci
-  if (st.lastTag !== chosenTag) {
+  if (chosenTag && st.lastTag !== chosenTag) {
     console.log(`Cambio de versión: ${st.lastTag || "(none)"} -> ${chosenTag}`);
     checkoutTag(chosenTag);
   }
 
   // Si cambió config o versión (o primera vez): reescribir ecosystem + restart pm2
-  if (st.lastHash !== rowHash || st.lastTag !== chosenTag) {
+  // Si no hubo chosenTag, igual reiniciamos si cambió config
+  if (st.lastHash !== rowHash || (chosenTag && st.lastTag !== chosenTag)) {
     console.log(`Aplicando configuración PM2/env (hash cambió=${st.lastHash !== rowHash})`);
     writeEcosystem(row);
     pm2Apply();
-    saveState({ lastTag: chosenTag, lastHash: rowHash });
+    saveState({ lastTag: chosenTag || st.lastTag || null, lastHash: rowHash });
   } else {
     console.log("Sin cambios.");
   }
