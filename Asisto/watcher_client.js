@@ -252,6 +252,16 @@ function pm2Apply() {
   run(`pm2 save`);
 }
 
+function pm2Exists() {
+  try {
+    // Si el proceso no existe, pm2 describe devuelve errorlevel != 0
+    execSync(`pm2 describe "${PM2_NAME}"`, { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ---------- Main loop ----------
 async function tick() {
   ensureGitRepo();
@@ -308,6 +318,16 @@ async function tick() {
       saveState({ lastTag: st.lastTag || null, lastHash: rowHash });
     } else {
       console.log("Sin cambios.");
+    // ✅ Si no hay cambios pero el proceso no existe, lo iniciamos igual
+    if (!pm2Exists()) {
+      console.log(`PM2 process "${PM2_NAME}" no existe. Iniciando...`);
+      writeEcosystem(row);
+      pm2Apply();
+      // dejamos state consistente
+      saveState({ lastTag: chosenTag || st.lastTag || null, lastHash: rowHash });
+    } else {
+      console.log("Sin cambios.");
+    }
     }
     return;
   }
