@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version:2.00.08   23/01/2026*/
+/*version:2.00.09   23/01/2026*/
 
 //const chatbot = require("./funciones_asisto.js")
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
@@ -700,7 +700,7 @@ client.on('ready', async () => {
 });
 
 client.on('qr', (qr) => {
-  console.log('QR RECEIVED 2.00.03', qr);
+  console.log('QR RECEIVED 2.00.09', qr);
   qrcode.toDataURL(qr, (err, url) => {
   io.emit('qr', url);
   io.emit('message', 'Código QR Recibido...');
