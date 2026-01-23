@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version:2.00.09   23/01/2026*/
+/*version:2.00.10   23/01/2026*/
 
 //const chatbot = require("./funciones_asisto.js")
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');

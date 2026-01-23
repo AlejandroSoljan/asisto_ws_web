@@ -1,3 +1,7 @@
+# Archivos locales por cliente (NO versionar)
+cliente.json
+watcher_client.js
+
 # runtime
 **/node_modules/
 **/.wwebjs_auth/
