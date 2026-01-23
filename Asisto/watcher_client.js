@@ -42,10 +42,28 @@ function run(cmd, cwd = PROJECT_DIR) {
   execSync(cmd, { stdio: "inherit", cwd });
 }
 
-async function fetchText(url) {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`HTTP ${res.status} leyendo Sheet`);
-  return await res.text();
+async function fetchText(url, { timeoutMs = 15000, retries = 2, retryDelayMs = 2000 } = {}) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+      if (!res.ok) throw new Error(`HTTP ${res.status} leyendo Sheet`);
+      return await res.text();
+    } catch (e) {
+      const last = (attempt === retries);
+      const name = e?.name || "Error";
+      const msg = e?.message || String(e);
+      if (last) {
+        console.log(`⚠️ No se pudo leer el Sheet (${name}: ${msg}). Reintenta en el próximo tick...`);
+        throw e;
+      }
+      console.log(`⚠️ Falló leer Sheet (intento ${attempt + 1}/${retries + 1}). Reintentando...`);
+      await new Promise(r => setTimeout(r, retryDelayMs));
+   } finally {
+      clearTimeout(t);
+    }
+  }
 }
 
 // CSV robusto: comillas, comas dentro de campos, "" escapado
@@ -238,7 +256,13 @@ function pm2Apply() {
 async function tick() {
   ensureGitRepo();
 
-  const csv = await fetchText(SHEET_URL);
+   let csv;
+  try {
+    csv = await fetchText(SHEET_URL, { timeoutMs: 15000, retries: 2, retryDelayMs: 2000 });
+  } catch {
+    // si falla la red, no hacemos nada este ciclo (no reinicia nada)
+    return;
+  }
   const rows = parseCsvRobusto(csv);
 
   const row = rows.find(r => String(r.ClienteId || "").trim() === MI_CLIENTE_ID);
@@ -255,6 +279,11 @@ async function tick() {
   if (actualiza !== "S") return;
   if (!version) return;
 
+ // ✅ IMPORTANTÍSIMO: traer tags ANTES de verificar refs/tags/...
+  // Si no, el tag existe en GitHub pero no en local todavía.
+  run(`git fetch --tags --force`, REPO_DIR);
+
+
   const st = loadState();
 
   // Determinar tag real
@@ -269,15 +298,18 @@ async function tick() {
       // no existe ese tag
     }
   }
-
-  // Si no hay tag, NO intentamos checkout porque explota.
-  // En ese caso, solo aplicamos config/env y seguimos con la versión actual del repo.
   if (!chosenTag) {
-    console.log(
-      `⚠️ No existe tag para Version="${version}". ` +
-      `Crealo en git (ej: v${String(version).trim()}.00) o cambiá el Sheet a un tag real. ` +
-      `Se aplicará solo config/env sin cambiar código.`
-    );
+    console.log(`⚠️ No existe tag para Version="${version}". Se aplicará solo config/env sin cambiar código.`);
+    const rowHash = computeRowHash(row);
+    if (st.lastHash !== rowHash) {
+      console.log(`Aplicando configuración PM2/env (hash cambió=${st.lastHash !== rowHash})`);
+      writeEcosystem(row);
+      pm2Apply();
+      saveState({ lastTag: st.lastTag || null, lastHash: rowHash });
+    } else {
+      console.log("Sin cambios.");
+    }
+    return;
   }
 
   const rowHash = computeRowHash(row);
@@ -289,7 +321,9 @@ async function tick() {
 
   // Si cambió config o versión (o primera vez): reescribir ecosystem + restart pm2
   // Si no hubo chosenTag, igual reiniciamos si cambió config
-  if (st.lastHash !== rowHash || (chosenTag && st.lastTag !== chosenTag)) {
+  const changedConfig = (st.lastHash !== rowHash);
+  const changedVersion = (chosenTag && st.lastTag !== chosenTag);
+  if (changedConfig || changedVersion) {
     console.log(`Aplicando configuración PM2/env (hash cambió=${st.lastHash !== rowHash})`);
     writeEcosystem(row);
     pm2Apply();
