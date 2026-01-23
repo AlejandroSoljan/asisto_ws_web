@@ -24,16 +24,81 @@ const AR_TZ = 'America/Argentina/Cordoba';
 // Overrides por cliente (desde PM2 / Sheet)
 
 // -------------------------------
-// Overrides por cliente (ENV)
+// Overrides por cliente (cliente.json)
 // -------------------------------
-const CLIENT_ID = process.env.CLIENT_ID || "default";
-const SESSION_PATH = process.env.SESSION_PATH || path.join(__dirname, ".wwebjs_auth");
-const CHROME_PATH = process.env.CHROME_PATH || ""; // opcional
+// A partir de ahora, los overrides de "entorno necesarios" se leen desde cliente.json
+// (si el archivo no existe o falta alguna clave, se usan defaults y/o los valores de configuracion.json)
+let CLIENTE_CONF = {};
+try {
+  const clientePath = path.join(__dirname, "cliente.json");
+  if (fs.existsSync(clientePath)) {
+    CLIENTE_CONF = JSON.parse(fs.readFileSync(clientePath, "utf8")) || {};
+  }
+} catch (e) {
+  CLIENTE_CONF = {};
+}
 
-const ENV_PORT = process.env.PORT || "";
-const ENV_HEADLESS = (process.env.HEADLESS || "").toLowerCase();
-const ENV_API_URL = process.env.API_URL || "";
+// cliente.json puede venir como:
+//  A) { "configuracion": { ... } , "tenantId": "...", "clienteId":"...", "mongo_uri":"..." }
+//  B) { ...todo plano... }
+const CLIENTE_CFG = (CLIENTE_CONF && CLIENTE_CONF.configuracion && typeof CLIENTE_CONF.configuracion === "object")
+  ? CLIENTE_CONF.configuracion
+  : CLIENTE_CONF;
 
+
+// Compat: aceptamos claves en español/inglés
+const CLIENT_ID = String(CLIENTE_CONF.clienteId || CLIENTE_CONF.clientId || "default");
+const SESSION_PATH = String(CLIENTE_CONF.sessionPath || CLIENTE_CONF.session_path || path.join(__dirname, ".wwebjs_auth"));
+const CHROME_PATH = String(CLIENTE_CONF.chromePath || CLIENTE_CONF.chrome_path || ""); // opcional
+
+
+// -------------------------------
+// Multi-tenant (por cliente)
+// - Se usa para particionar sesiones en Mongo (tenantId + clientId)
+// - Se toma de cliente.json; si no está, fallback a configuracion.json si existe
+// -------------------------------
+let TENANT_ID = String(CLIENTE_CONF.tenantId || CLIENTE_CONF.tenant_id || "").trim();
+
+if (!TENANT_ID) TENANT_ID = CLIENT_ID; // último fallback (no rompe compat)
+
+// Overrides operativos salen de CLIENTE_CFG (configuracion)
+const OVERRIDE_PORT = CLIENTE_CFG.port || CLIENTE_CFG.puerto || "";
+const OVERRIDE_HEADLESS = String(CLIENTE_CFG.headless ?? "").toLowerCase();
+const OVERRIDE_API_URL = CLIENTE_CFG.apiUrl || CLIENTE_CFG.api_url || CLIENTE_CFG.api || "";
+ 
+ // -------------------------------
+ // MongoDB (opcional) - sesiones + panel QR
+ // -------------------------------
+ const MONGO_URI = String(CLIENTE_CONF.mongoUri || CLIENTE_CONF.mongo_uri || "");
+ const MONGO_DB  = String(CLIENTE_CONF.mongoDb || CLIENTE_CONF.mongo_db || ""); // opcional, si viene en URI se ignora
+ const MONGO_CONNECT_TIMEOUT_MS = parseInt(String(CLIENTE_CONF.mongoConnectTimeoutMs || CLIENTE_CONF.mongo_connect_timeout_ms || "5000"), 10);
+ const MONGO_BUCKET = String(CLIENTE_CONF.mongoBucket || CLIENTE_CONF.mongo_bucket || "wa_sessions_fs");
+ const MONGO_SESSIONS_COLLECTION = String(CLIENTE_CONF.mongoSessionsCollection || CLIENTE_CONF.mongo_sessions_collection || "wa_sessions");
+ 
+ // Intentamos dependencias sin romper si no existen
+ let MongoClient, GridFSBucket, ObjectId;
+ try {
+   ({ MongoClient, GridFSBucket, ObjectId } = require("mongodb"));
+ } catch (e) {
+   // si no está mongodb, seguimos 100% local
+ }
+ 
+ let AdmZip = null;
+ try {
+   AdmZip = require("adm-zip");
+ } catch (e) {
+   // adm-zip no es obligatorio (solo para backup/restore)
+ }
+ 
+ let mongoReady = false;
+ let mongoClient = null;
+ let mongoDb = null;
+ let gridfsBucket = null;
+ 
+ // Estado para panel QR (socket + endpoints)
+ let lastQrRaw = null;          // string QR
+ let lastQrDataUrl = null;      // data:image/png;base64,...
+ let lastQrAt = null;           // Date
 
 var a = 0;
 //var port = 8002
@@ -103,6 +168,8 @@ app.use(express.urlencoded({
   extended: true
 }));
 
+// Tenant actual (para debug/panel)
+EscribirLog(`TENANT_ID runtime: ${TENANT_ID}`, "event");
 
 app.use(fileUpload({
   debug: false
@@ -114,13 +181,111 @@ app.get('/', (req, res) => {
   });
 });
 
+ 
+ // -------------------------------
+ // Endpoints para "panel web de sesiones"
+ // (sirven tanto con Mongo como sin Mongo)
+// -------------------------------
+ app.get('/api/sessions', async (req, res) => {
+  try {
+     // Permite override por querystring (por si querés un panel superadmin)
+     const tenantReq = String(req.query.tenantId || req.query.tenant || TENANT_ID || "").trim();
+
+
+    // Si hay Mongo, devolvemos la lista desde DB
+     if (mongoReady && mongoDb) {
+       const col = mongoDb.collection(MONGO_SESSIONS_COLLECTION);
+       const q = tenantReq ? { tenantId: tenantReq } : {};
+       const docs = await col.find(q, { projection: { _id: 0 } }).sort({ updatedAt: -1 }).toArray();
+       return res.json({ ok: true, source: "mongo", sessions: docs });
+     }
+ 
+     // Fallback: inspecciona la carpeta LocalAuth
+     // LocalAuth crea: <SESSION_PATH>/session-<CLIENT_ID>
+     let sessions = [];
+     try {
+       if (fs.existsSync(SESSION_PATH)) {
+         const items = fs.readdirSync(SESSION_PATH, { withFileTypes: true });
+         sessions = items
+           .filter(d => d.isDirectory() && d.name.startsWith("session-"))
+           .map(d => ({
+             tenantId: tenantReq || TENANT_ID,
+             status: (d.name.replace(/^session-/, "") === CLIENT_ID) ? "local" : "local_other",
+             telefono_qr: (d.name.replace(/^session-/, "") === CLIENT_ID) ? telefono_qr : undefined,
+             updatedAt: null
+           }));
+       }
+     } catch (e) { /* ignore */ }
+ 
+     return res.json({ ok: true, source: "local", sessions });
+   } catch (e) {
+     return res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+ });
+ 
+ // QR del cliente actual (para panel)
+ app.get('/api/sessions/me/qr', async (req, res) => {
+   try {
+     const payload = {
+      tenantId: TENANT_ID,
+       clientId: CLIENT_ID,
+       telefono_qr,
+       status: await safeGetClientState(),
+       qrDataUrl: lastQrDataUrl,
+       qrAt: lastQrAt ? lastQrAt.toISOString() : null,
+       mongoReady
+     };
+ 
+     // Si hay Mongo, trae lo último persistido (si existe)
+    if (mongoReady && mongoDb) {
+       const col = mongoDb.collection(MONGO_SESSIONS_COLLECTION);
+       const doc = await col.findOne({ tenantId: TENANT_ID, clientId: CLIENT_ID }, { projection: { _id: 0 } });
+       if (doc) return res.json({ ok: true, ...doc, ...payload });
+     }
+
+     return res.json({ ok: true, ...payload });
+   } catch (e) {
+     return res.status(500).json({ ok: false, error: String(e?.message || e) });
+   }
+ });
+ 
+// QR por clientId (panel multi-sesión)
+ app.get('/api/sessions/:clientId/qr', async (req, res) => {
+   try {
+     const cid = String(req.params.clientId || "");
+     if (!cid) return res.status(400).json({ ok: false, error: "clientId requerido" });
+    const tenantReq = String(req.query.tenantId || req.query.tenant || TENANT_ID || "").trim();
+     // Mongo primero
+    if (mongoReady && mongoDb) {
+       const col = mongoDb.collection(MONGO_SESSIONS_COLLECTION);
+       const q = { clientId: cid };
+       if (tenantReq) q.tenantId = tenantReq;
+       const doc = await col.findOne(q, { projection: { _id: 0 } });
+
+       if (doc) return res.json({ ok: true, ...doc });
+     }
+ 
+     // Fallback local solo para el CLIENT_ID actual (no podemos leer QR de otros procesos)
+     if (cid === CLIENT_ID) {
+        return res.json({ ok: true, tenantId: tenantReq || TENANT_ID, clientId: CLIENT_ID, telefono_qr, status: await safeGetClientState(), qrDataUrl: lastQrDataUrl, qrAt: lastQrAt ? lastQrAt.toISOString() : null, mongoReady });
+
+     }
+ 
+     return res.status(404).json({ ok: false, error: "No encontrado (sin Mongo no hay QR remoto)" });
+   } catch (e) {
+     return res.status(500).json({ ok: false, error: String(e?.message || e) });
+   }
+ });
+
+
 RecuperarJsonConf();
 //headless = devolver_headless();
 
 //const port =  devolver_puerto();
 // Permitir override de headless por env (útil si lo controlás desde el sheet)
-if (ENV_HEADLESS === "true" || ENV_HEADLESS === "1" || ENV_HEADLESS === "yes") headless = true;
-if (ENV_HEADLESS === "false" || ENV_HEADLESS === "0" || ENV_HEADLESS === "no") headless = false;
+// Permitir override de headless por cliente.json
+if (OVERRIDE_HEADLESS === "true" || OVERRIDE_HEADLESS === "1" || OVERRIDE_HEADLESS === "yes") headless = true;
+if (OVERRIDE_HEADLESS === "false" || OVERRIDE_HEADLESS === "0" || OVERRIDE_HEADLESS === "no") headless = false;
 
 
 server.listen(port, function() {
@@ -128,6 +293,12 @@ server.listen(port, function() {
   EscribirLog('App running on *: ' + port,"event");
 
 });
+
+ 
+ // Intentamos conectar a Mongo en background (sin bloquear arranque)
+ initMongoAndMaybeRestoreSession().catch(e => {
+   EscribirLog("Mongo init error (se continua en local): " + String(e?.message || e), "error");
+ });
 
 const client = new Client({
 
@@ -152,6 +323,16 @@ const client = new Client({
     dataPath: SESSION_PATH
   })
 });
+ 
+ // Helpers (no rompen si Mongo no está)
+ async function safeGetClientState() {
+   try {
+     const st = await client.getState();
+     return st || null;
+   } catch (e) {
+     return null;
+   }
+ }
 
 /**
  * Envío robusto con reintentos ante errores de evaluación/recarga en WhatsApp Web
@@ -694,6 +875,17 @@ client.on('ready', async () => {
    await io.emit('message', 'Whatsapp Listo!');
    EscribirLog('Whatsapp Listo!',"event");
 
+ 
+     // Persistimos estado en Mongo (si está)
+     upsertSessionState({
+       clientId: CLIENT_ID,
+       telefono_qr,
+       status: "ready"
+     }).catch(() => {});
+ 
+     // Backup de sesión LocalAuth a Mongo (si está)
+     backupLocalAuthToMongo().catch(() => {});
+
   //ConsultaApiMensajes();
 
 
@@ -701,9 +893,25 @@ client.on('ready', async () => {
 
 client.on('qr', (qr) => {
   console.log('QR RECEIVED 2.00.09', qr);
+ 
+   // Guardamos QR en memoria para panel
+   lastQrRaw = qr;
+   lastQrAt = new Date();
+ 
+
   qrcode.toDataURL(qr, (err, url) => {
+    lastQrDataUrl = url || null;
   io.emit('qr', url);
   io.emit('message', 'Código QR Recibido...');
+ 
+   // Persistimos QR en Mongo para el panel (si está)
+   upsertSessionState({
+     clientId: CLIENT_ID,
+     telefono_qr,
+     status: "qr",
+     qrDataUrl: lastQrDataUrl,
+     qrAt: lastQrAt
+   }).catch(() => {});
   });
 });
 
@@ -713,6 +921,16 @@ client.on('authenticated', async () => {
   io.emit('message', 'Whatsapp Autenticado!');
   console.log('Autenticado');
   EscribirLog('Autenticado',"event");
+ 
+   // Persistimos estado en Mongo (si está)
+   upsertSessionState({
+     clientId: CLIENT_ID,
+     telefono_qr,
+     status: "authenticated"
+   }).catch(() => {});
+ 
+   // Backup de sesión LocalAuth a Mongo (si está)
+   backupLocalAuthToMongo().catch(() => {});
 });
 
 
@@ -721,16 +939,190 @@ client.on('auth_failure', function(session) {
   io.emit('message', 'Auth failure, restarting...');
   EnviarEmail('Chatbot error Auth failure','Auth failure, restarting...'+client);
   EscribirLog('Error 04 - Chatbot error Auth failure','Auth failure, restarting...',"error");
+ 
+   upsertSessionState({
+     clientId: CLIENT_ID,
+     telefono_qr,
+     status: "auth_failure"
+   }).catch(() => {});
 });
 
 client.on('disconnected', (reason) => {
   io.emit('message', 'Whatsapp Desconectado!');
   EnviarEmail('Chatbot Desconectado ','Desconectando...'+client);
   EscribirLog('Chatbot Desconectado ','Desconectando...',"event");
+ 
+   upsertSessionState({
+     clientId: CLIENT_ID,
+     telefono_qr,
+     status: "disconnected",
+     reason: String(reason || "")
+   }).catch(() => {});
+ 
   client.destroy();
   client.initialize();
 });
+ 
+ //////////////////////////////////////////////////////////////////////////////////////////////////
+ // MongoDB - implementación (opcional) con fallback local
+ //////////////////////////////////////////////////////////////////////////////////////////////////
+ async function initMongoAndMaybeRestoreSession() {
+   if (!MONGO_URI) {
+     mongoReady = false;
+     EscribirLog("Mongo: MONGO_URI vacío, se trabaja en local.", "event");
+     return;
+   }
+   if (!MongoClient || !GridFSBucket) {
+     mongoReady = false;
+     EscribirLog("Mongo: dependencia 'mongodb' no disponible, se trabaja en local.", "error");
+     return;
+   }
+ 
+   try {
+     mongoClient = new MongoClient(MONGO_URI, {
+       serverSelectionTimeoutMS: MONGO_CONNECT_TIMEOUT_MS
+     });
+     await mongoClient.connect();
+     mongoDb = mongoClient.db(MONGO_DB || undefined);
+     gridfsBucket = new GridFSBucket(mongoDb, { bucketName: MONGO_BUCKET });
+     mongoReady = true;
+     EscribirLog("Mongo: conectado OK (sesiones habilitadas).", "event");
+ 
+     // Restore de LocalAuth desde Mongo (si falta local)
+     await restoreLocalAuthFromMongoIfNeeded();
+ 
+     // Upsert inicial de estado
+     await upsertSessionState({
+       clientId: CLIENT_ID,
+       telefono_qr,
+       status: "boot"
+     });
+   } catch (e) {
+     mongoReady = false;
+    mongoClient = null;
+     mongoDb = null;
+     gridfsBucket = null;
+     EscribirLog("Mongo: NO conecta, se trabaja en local. Detalle: " + String(e?.message || e), "error");
+   }
+ }
+ 
+ async function upsertSessionState(payload) {
+   try {
+     if (!mongoReady || !mongoDb) return;
+     const col = mongoDb.collection(MONGO_SESSIONS_COLLECTION);
+     const now = new Date();
+     const doc = {
+      tenantId: String(payload.tenantId || TENANT_ID || "").trim() || TENANT_ID,
+       clientId: payload.clientId || CLIENT_ID,
+       telefono_qr: payload.telefono_qr || telefono_qr || null,
+       status: payload.status || null,
+       reason: payload.reason || null,
+       qrDataUrl: payload.qrDataUrl ?? lastQrDataUrl ?? null,
+       qrAt: payload.qrAt ? new Date(payload.qrAt) : (lastQrAt ? new Date(lastQrAt) : null),
+       mongoReady: true,
+       updatedAt: now
+     };
+     await col.updateOne({ tenantId: doc.tenantId, clientId: doc.clientId }, { $set: doc }, { upsert: true });
+   } catch (e) {
+     // si falla, no cortamos el flujo principal
+     EscribirLog("Mongo upsertSessionState error: " + String(e?.message || e), "error");
+   }
+ }
+ 
+ function localAuthSessionDir() {
+   // whatsapp-web.js LocalAuth crea "session-<clientId>" dentro de dataPath
+   return path.join(SESSION_PATH, `session-${CLIENT_ID}`);
+ }
+ 
+ async function restoreLocalAuthFromMongoIfNeeded() {
+   try {
+     if (!mongoReady || !mongoDb || !gridfsBucket) return;
+     if (!AdmZip) {
+       EscribirLog("Mongo restore: falta 'adm-zip' (se omite restore).", "error");
+       return;
+     }
+ 
+    const sessDir = localAuthSessionDir();
+     const exists = fs.existsSync(sessDir);
+     const notEmpty = exists && fs.readdirSync(sessDir).length > 0;
+     if (notEmpty) {
+       EscribirLog("Mongo restore: existe sesión local, no restaura.", "event");
+       return;
+     }
+ 
+     // Buscar el zip en GridFS
+     const filename = `localauth-${TENANT_ID}-${CLIENT_ID}.zip`;
+     const files = await mongoDb.collection(`${MONGO_BUCKET}.files`).find({ filename }).sort({ uploadDate: -1 }).limit(1).toArray();
+     if (!files || files.length === 0) {
+       EscribirLog("Mongo restore: no hay backup en Mongo para " + filename, "event");
+       return;
+     }
+ 
+     // Descargar a buffer
+     const fileId = files[0]._id;
+     const chunks = [];
+     await new Promise((resolve, reject) => {
+       gridfsBucket.openDownloadStream(fileId)
+         .on("data", (d) => chunks.push(d))
+         .on("error", reject)
+         .on("end", resolve);
+     });
+     const buf = Buffer.concat(chunks);
 
+     // Extraer en SESSION_PATH
+     fs.mkdirSync(SESSION_PATH, { recursive: true });
+     const zip = new AdmZip(buf);
+     zip.extractAllTo(SESSION_PATH, true);
+     EscribirLog("Mongo restore: sesión restaurada a " + SESSION_PATH, "event");
+   } catch (e) {
+     EscribirLog("Mongo restore error (se continua en local): " + String(e?.message || e), "error");
+   }
+ }
+ 
+
+ async function backupLocalAuthToMongo() {
+   try {
+     if (!mongoReady || !mongoDb || !gridfsBucket) return;
+     if (!AdmZip) {
+       // No es fatal: solo omite backup
+       return;
+     }
+ 
+     const sessDir = localAuthSessionDir();
+     if (!fs.existsSync(sessDir)) return;
+ 
+     // Armamos zip con todo SESSION_PATH para mantener estructura (incluye session-CLIENT_ID)
+     const zip = new AdmZip();
+     zip.addLocalFolder(SESSION_PATH);
+     const buf = zip.toBuffer();
+ 
+      const filename = `localauth-${TENANT_ID}-${CLIENT_ID}.zip`;
+ 
+     // Borramos backups anteriores con mismo filename (si existen)
+     const oldFiles = await mongoDb.collection(`${MONGO_BUCKET}.files`).find({ filename }).toArray();
+     for (const f of oldFiles) {
+       try { await gridfsBucket.delete(f._id); } catch (e) { /* ignore */ }
+     }
+ 
+     await new Promise((resolve, reject) => {
+       const up = gridfsBucket.openUploadStream(filename, {
+         metadata: {
+           clientId: CLIENT_ID,
+           telefono_qr: telefono_qr || null,
+           createdAt: new Date()
+         },
+         contentType: "application/zip"
+       });
+       up.on("error", reject);
+       up.on("finish", resolve);
+       up.end(buf);
+     });
+ 
+     EscribirLog("Mongo backup: sesión guardada en GridFS (" + filename + ")", "event");
+   } catch (e) {
+     EscribirLog("Mongo backup error (se continua en local): " + String(e?.message || e), "error");
+   }
+ }
 
 
 
@@ -918,40 +1310,67 @@ async function controlar_hora_msg(){
  
 function RecuperarJsonConfMensajes(){
 
-  const jsonConf =  JSON.parse(fs.readFileSync('configuracion.json'));
-  const jsonError = JSON.parse(fs.readFileSync('configuracion_errores.json'));
- // console.log("configuracion.json "+jsonConf);
+  // Todo se lee de cliente.json (que contiene "configuracion")
+  let rawCliente = null;
+  let conf = null;
+  try {
+    rawCliente = JSON.parse(fs.readFileSync('cliente.json', 'utf8'));
+    conf = (rawCliente && rawCliente.configuracion && typeof rawCliente.configuracion === "object")
+      ? rawCliente.configuracion
+      : rawCliente;
+  } catch (e) {
+    // si no hay cliente.json, no rompemos (quedan defaults)
+    return;
+  }
 
-   
-   seg_desde = jsonConf.configuracion.seg_desde;
-   seg_hasta = jsonConf.configuracion.seg_hasta;
-   dsn = jsonConf.configuracion.dsn;
-   seg_msg = jsonConf.configuracion.seg_msg;
-   api = jsonConf.configuracion.api;
-   msg_inicio = jsonConf.configuracion.msg_inicio;
-   msg_fin = jsonConf.configuracion.msg_fin;
-   cant_lim = jsonConf.configuracion.cant_lim;
-   time_cad = jsonConf.configuracion.time_cad;
-   email_err = jsonError.configuracion.email_err;
-   msg_lim = jsonConf.configuracion.msg_lim;
-   msg_cad = jsonConf.configuracion.msg_cad;
-   msg_can = jsonConf.configuracion.msg_can;
+  // Config "mensajes"
+  if (conf) {
+    if (conf.seg_desde != null) seg_desde = conf.seg_desde;
+    if (conf.seg_hasta != null) seg_hasta = conf.seg_hasta;
+    if (conf.dsn != null) dsn = conf.dsn;
+    if (conf.seg_msg != null) seg_msg = conf.seg_msg;
+    if (conf.api != null) api = conf.api;
+    if (conf.msg_inicio != null) msg_inicio = conf.msg_inicio;
+    if (conf.msg_fin != null) msg_fin = conf.msg_fin;
+    if (conf.cant_lim != null) cant_lim = conf.cant_lim;
+    if (conf.time_cad != null) time_cad = conf.time_cad;
+    if (conf.msg_lim != null) msg_lim = conf.msg_lim;
+    if (conf.msg_cad != null) msg_cad = conf.msg_cad;
+    if (conf.msg_can != null) msg_can = conf.msg_can;
+    if (conf.nom_emp != null) nom_chatbot = conf.nom_emp;
+    if (conf.email_err != null) email_err = conf.email_err;
+    if (conf.seg_tele != null) seg_tele = conf.seg_tele;
+  }
 
-   smtp = jsonError.configuracion.smtp;
-   email_usuario = jsonError.configuracion.user;
-   email_pas = jsonError.configuracion.pass;
-   email_puerto = jsonError.configuracion.puerto;
-   email_saliente = jsonError.configuracion.email_sal;
-   msg_errores = jsonError.configuracion.msg_error;
-   nom_chatbot= jsonConf.configuracion.nom_emp;
+  // SMTP/errores: primero intentamos desde cliente.json (si lo incluiste ahí),
+  // y si NO existe, mantenemos compat con configuracion_errores.json (por si todavía lo usás).
+  try {
+    const errBlock = (rawCliente && (rawCliente.errores || rawCliente.configuracion_errores || rawCliente.email || rawCliente.smtp))
+      ? (rawCliente.errores || rawCliente.configuracion_errores || rawCliente)
+      : null;
 
-   // --- Overrides por ENV (si existen) ---
-   if (process.env.SMTP_HOST) smtp = process.env.SMTP_HOST;
-   if (process.env.SMTP_USER) email_usuario = process.env.SMTP_USER;
-   if (process.env.SMTP_PASS) email_pas = process.env.SMTP_PASS;
-   if (process.env.SMTP_PORT) email_puerto = parseInt(process.env.SMTP_PORT, 10);
-   if (process.env.EMAIL_SALIENTE) email_saliente = process.env.EMAIL_SALIENTE;
-   if (process.env.EMAIL_ENVIO) email_err = process.env.EMAIL_ENVIO;
+    if (errBlock) {
+      if (errBlock.smtp != null) smtp = errBlock.smtp;
+      if (errBlock.user != null) email_usuario = errBlock.user;
+      if (errBlock.pass != null) email_pas = errBlock.pass;
+      if (errBlock.puerto != null) email_puerto = errBlock.puerto;
+      if (errBlock.email_sal != null) email_saliente = errBlock.email_sal;
+      if (errBlock.msg_error != null) msg_errores = errBlock.msg_error;
+      if (errBlock.email_err != null) email_err = errBlock.email_err;
+    } else {
+      // Compat LEGACY (no obligatorio)
+      const jsonError = JSON.parse(fs.readFileSync('configuracion_errores.json'));
+      if (jsonError && jsonError.configuracion) {
+        if (jsonError.configuracion.email_err != null) email_err = jsonError.configuracion.email_err;
+        if (jsonError.configuracion.smtp != null) smtp = jsonError.configuracion.smtp;
+        if (jsonError.configuracion.user != null) email_usuario = jsonError.configuracion.user;
+        if (jsonError.configuracion.pass != null) email_pas = jsonError.configuracion.pass;
+        if (jsonError.configuracion.puerto != null) email_puerto = jsonError.configuracion.puerto;
+        if (jsonError.configuracion.email_sal != null) email_saliente = jsonError.configuracion.email_sal;
+        if (jsonError.configuracion.msg_error != null) msg_errores = jsonError.configuracion.msg_error;
+      }
+    }
+  } catch (e) {}
 
 }
 
@@ -1063,45 +1482,65 @@ return headless;
 
 function RecuperarJsonConf(){
   
-  const jsonConf =  JSON.parse(fs.readFileSync('configuracion.json'));
-  console.log("configuracion.json "+jsonConf.configuracion);
-
-   port = jsonConf.configuracion.puerto;
-   console.log("puerto: "+port);
- 
-   headless = jsonConf.configuracion.headless;
-   console.log("headless: "+headless);
-   seg_desde = jsonConf.configuracion.seg_desde;
-   console.log("seg_desde: "+seg_desde);
-   seg_hasta = jsonConf.configuracion.seg_hasta;
-   console.log("seg_hasta: "+seg_hasta);
-   dsn = jsonConf.configuracion.dsn;
-   console.log("dsn: "+dsn);
-   seg_msg = jsonConf.configuracion.seg_msg;
-   console.log("seg_msg: "+seg_msg);
-   seg_tele = jsonConf.configuracion.seg_tele;
-   console.log("seg_msg: "+seg_tele);
-   api = jsonConf.configuracion.api;
-   console.log("api: "+api);
-   msg_inicio = jsonConf.configuracion.msg_inicio
-   console.log("msg_inicio: "+msg_inicio);
-   msg_fin = jsonConf.configuracion.msg_fin
-   console.log("msg_fin: "+msg_fin);
-   if (headless == 'true'){
-    headless = true
-  }else
-  {
-    headless = false
+   // Todo se lee de cliente.json (que contiene "configuracion")
+  let rawCliente = null;
+  let conf = null;
+  try {
+    rawCliente = JSON.parse(fs.readFileSync('cliente.json', 'utf8'));
+    conf = (rawCliente && rawCliente.configuracion && typeof rawCliente.configuracion === "object")
+      ? rawCliente.configuracion
+      : rawCliente;
+  } catch (e) {
+    // si no hay cliente.json, no rompemos (quedan defaults)
+    return;
   }
 
-   // --- Overrides por ENV (si existen) ---
-   if (ENV_PORT) port = parseInt(ENV_PORT, 10);
-   if (ENV_HEADLESS === "true" || ENV_HEADLESS === "1" || ENV_HEADLESS === "yes") headless = true;
-   if (ENV_HEADLESS === "false" || ENV_HEADLESS === "0" || ENV_HEADLESS === "no") headless = false;
-   if (ENV_API_URL) api = ENV_API_URL;
-   // server.listen(port, function() {
-  //console.log('App running on *: ' + port);
-//});
+  console.log("cliente.json configuracion "+(conf || {}));
+
+  if (conf) {
+    if (conf.puerto != null) port = conf.puerto;
+    console.log("puerto: "+port);
+
+    if (conf.headless != null) headless = conf.headless;
+    console.log("headless: "+headless);
+
+    if (conf.seg_desde != null) seg_desde = conf.seg_desde;
+    console.log("seg_desde: "+seg_desde);
+
+    if (conf.seg_hasta != null) seg_hasta = conf.seg_hasta;
+    console.log("seg_hasta: "+seg_hasta);
+
+    if (conf.dsn != null) dsn = conf.dsn;
+    console.log("dsn: "+dsn);
+
+    if (conf.seg_msg != null) seg_msg = conf.seg_msg;
+    console.log("seg_msg: "+seg_msg);
+
+    if (conf.seg_tele != null) seg_tele = conf.seg_tele;
+    console.log("seg_tele: "+seg_tele);
+
+    if (conf.api != null) api = conf.api;
+    console.log("api: "+api);
+
+    if (conf.msg_inicio != null) msg_inicio = conf.msg_inicio;
+    console.log("msg_inicio: "+msg_inicio);
+
+    if (conf.msg_fin != null) msg_fin = conf.msg_fin;
+    console.log("msg_fin: "+msg_fin);
+
+    if (conf.nom_emp != null) nom_chatbot = conf.nom_emp;
+    if (conf.email_err != null) email_err = conf.email_err;
+  }
+
+  // Normaliza headless (viene "true"/"false" como string en tu config completa) :contentReference[oaicite:2]{index=2}
+  if (headless == 'true') headless = true;
+  else if (headless == 'false') headless = false;
+
+   // --- Overrides por cliente.json (si existen) ---
+   if (OVERRIDE_PORT) port = parseInt(OVERRIDE_PORT, 10);
+   if (OVERRIDE_HEADLESS === "true" || OVERRIDE_HEADLESS === "1" || OVERRIDE_HEADLESS === "yes") headless = true;
+   if (OVERRIDE_HEADLESS === "false" || OVERRIDE_HEADLESS === "0" || OVERRIDE_HEADLESS === "no") headless = false;
+   if (OVERRIDE_API_URL) api = OVERRIDE_API_URL;
 
 }
 

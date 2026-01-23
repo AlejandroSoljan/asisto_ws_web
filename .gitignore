@@ -1,6 +1,9 @@
 # Archivos locales por cliente (NO versionar)
 cliente.json
 watcher_client.js
+script-stop.bat
+script-stop-watcher.bat
+start-watcher.bat
 
 # runtime
 **/node_modules/
