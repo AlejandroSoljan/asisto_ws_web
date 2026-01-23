@@ -293,7 +293,7 @@ async function tick() {
   // Si no, el tag existe en GitHub pero no en local todavía.
   run(`git fetch --tags --force`, REPO_DIR);
 
-
+  const pm2Ok = pm2Exists();
   const st = loadState();
 
   // Determinar tag real
@@ -311,23 +311,15 @@ async function tick() {
   if (!chosenTag) {
     console.log(`⚠️ No existe tag para Version="${version}". Se aplicará solo config/env sin cambiar código.`);
     const rowHash = computeRowHash(row);
-    if (st.lastHash !== rowHash) {
-      console.log(`Aplicando configuración PM2/env (hash cambió=${st.lastHash !== rowHash})`);
+    const changedConfigOnly = (st.lastHash !== rowHash);
+    if (changedConfigOnly || !pm2Ok) {
+      console.log(`Aplicando PM2/env (config=${changedConfigOnly}, pm2Existe=${pm2Ok})`);
       writeEcosystem(row);
       pm2Apply();
       saveState({ lastTag: st.lastTag || null, lastHash: rowHash });
     } else {
       console.log("Sin cambios.");
-    // ✅ Si no hay cambios pero el proceso no existe, lo iniciamos igual
-    if (!pm2Exists()) {
-      console.log(`PM2 process "${PM2_NAME}" no existe. Iniciando...`);
-      writeEcosystem(row);
-      pm2Apply();
-      // dejamos state consistente
-      saveState({ lastTag: chosenTag || st.lastTag || null, lastHash: rowHash });
-    } else {
-      console.log("Sin cambios.");
-    }
+   
     }
     return;
   }
@@ -340,11 +332,10 @@ async function tick() {
   }
 
   // Si cambió config o versión (o primera vez): reescribir ecosystem + restart pm2
-  // Si no hubo chosenTag, igual reiniciamos si cambió config
   const changedConfig = (st.lastHash !== rowHash);
   const changedVersion = (chosenTag && st.lastTag !== chosenTag);
-  if (changedConfig || changedVersion) {
-    console.log(`Aplicando configuración PM2/env (hash cambió=${st.lastHash !== rowHash})`);
+   if (changedConfig || changedVersion || !pm2Ok) {
+    console.log(`Aplicando PM2/env (config=${changedConfig}, version=${changedVersion}, pm2Existe=${pm2Ok})`);
     writeEcosystem(row);
     pm2Apply();
     saveState({ lastTag: chosenTag || st.lastTag || null, lastHash: rowHash });
