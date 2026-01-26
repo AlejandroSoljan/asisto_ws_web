@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version:2.00.10   23/01/2026*/
+/*version:2.00.11   26/01/2026*/
 
 //const chatbot = require("./funciones_asisto.js")
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
@@ -27,7 +27,7 @@ const AR_TZ = 'America/Argentina/Cordoba';
 // Overrides por cliente (cliente.json)
 // -------------------------------
 // A partir de ahora, los overrides de "entorno necesarios" se leen desde cliente.json
-// (si el archivo no existe o falta alguna clave, se usan defaults y/o los valores de configuracion.json)
+// (si el archivo no existe o falta alguna clave, se usan defaults)
 let CLIENTE_CONF = {};
 try {
   const clientePath = path.join(__dirname, "cliente.json");
@@ -101,7 +101,7 @@ const OVERRIDE_API_URL = CLIENTE_CFG.apiUrl || CLIENTE_CFG.api_url || CLIENTE_CF
  let lastQrAt = null;           // Date
 
 var a = 0;
-//var port = 8002
+var port = 8002
 var headless = true;
 var seg_desde = 80000;
 var seg_hasta = 10000;
@@ -280,6 +280,10 @@ app.get('/', (req, res) => {
 
 RecuperarJsonConf();
 //headless = devolver_headless();
+// Si cliente.json trae puerto, lo aplicamos ANTES del listen
+if (OVERRIDE_PORT) {
+  port = parseInt(OVERRIDE_PORT, 10);
+}
 
 //const port =  devolver_puerto();
 // Permitir override de headless por env (útil si lo controlás desde el sheet)
@@ -892,7 +896,7 @@ client.on('ready', async () => {
 });
 
 client.on('qr', (qr) => {
-  console.log('QR RECEIVED 2.00.09', qr);
+  console.log('QR RECEIVED 3.00.11', qr);
  
    // Guardamos QR en memoria para panel
    lastQrRaw = qr;
