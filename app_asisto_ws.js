@@ -37,34 +37,8 @@ let mongoConnectingPromise = null;
 
 // Momento en el que ESTA instancia tomó el lock (para ignorar acciones viejas en wa_wweb_actions)
 let lockAcquiredAt = null;
-// --- LocalAuth backup to Mongo (GridFS) ---
-let AdmZip = null;
-try { AdmZip = require('adm-zip'); } catch (e) { /* optional until you install: npm i adm-zip */ }
-let GridFSBucket = null;
-try { ({ GridFSBucket } = require('mongodb')); }
-catch (e) {
-  // Fallback: mongoose ya trae el driver de mongodb
-  try { GridFSBucket = mongoose?.mongo?.GridFSBucket; } catch {}
-}
-
-// Mientras una PC RESTAURA, "pin" para que el prune no borre ese fileId.
-// Debe ser > timeout de restore.
-const LOCALAUTH_RESTORE_PIN_MS = Number(process.env.LOCALAUTH_RESTORE_PIN_MS || 5 * 60_000);
-// Si querés logs más verbosos de restore/backup
-const LOCALAUTH_VERBOSE = String(process.env.LOCALAUTH_VERBOSE || "0").trim() === "1";
-
- // --- LocalAuth: anti-crecimiento en GridFS ---
- // Evita backups concurrentes (duplican files/chunks)
- let savingLocalAuth = false;
- // Evita multiplicar timers/intervals si 'ready' se dispara más de una vez (reconnect)
- let localAuthBackupSchedulerStarted = false;
- let localAuthBackupInterval = null;
-
-  // Evita que en recreaciones (Target closed / execution_context) se intente RESTORE otra vez
-  // y termine tocando la carpeta local innecesariamente.
-  let localAuthRestoreAttempted = false;
-  // Evita manejar múltiples auth_failure en cascada
-  let authFailureHandling = false;
+// --- LocalAuth backup/restore removido ---
+let authFailureHandling = false;
 const AR_TZ = 'America/Argentina/Cordoba';
 
 
@@ -187,95 +161,17 @@ async function loadTenantConfigFromDb() {
   return true;
 }
 
-function localAuthDirHasKeyData(sessionDir) {
-  try {
-    if (!sessionDir || !fs.existsSync(sessionDir)) return false;
-    // ⚠️ Importante: en WhatsApp Web (Chromium profile), que exista la carpeta no alcanza.
-    // En reinicios, si faltan "Service Worker" / "CacheStorage" suele volver a pedir QR.
-    // Entonces hacemos un probe más estricto, pero SIN leer contenido sensible.
-
-    const probes = [
-      // nivel root
-      { p: path.join(sessionDir, "Local State"), kind: "file", minBytes: 200 },
-      // nivel Default
-      { p: path.join(sessionDir, "Default", "IndexedDB"), kind: "dir", minItems: 1 },
-      { p: path.join(sessionDir, "Default", "Local Storage", "leveldb"), kind: "dir", minItems: 1 },
-      { p: path.join(sessionDir, "Default", "Cookies"), kind: "file", minBytes: 1 },
-     { p: path.join(sessionDir, "Default", "Service Worker"), kind: "dir", minItems: 1 },
-      { p: path.join(sessionDir, "Default", "CacheStorage"), kind: "dir", minItems: 1 },
-      { p: path.join(sessionDir, "Default", "Network"), kind: "dir", minItems: 1 },
-      { p: path.join(sessionDir, "Default", "Preferences"), kind: "file", minBytes: 50 },
-    ];
-
-    let okCount = 0;
-    for (const pr of probes) {
-     try {
-        if (!fs.existsSync(pr.p)) continue;
-        const st = fs.statSync(pr.p);
-        if (pr.kind === "file") {
-          if (st.isFile() && st.size >= (pr.minBytes || 1)) okCount++;
-        } else {
-          if (st.isDirectory()) {
-            const items = fs.readdirSync(pr.p);
-            if ((items?.length || 0) >= (pr.minItems || 1)) okCount++;
-          }
-        }
-      } catch {}
-   }
-
-    // Regla práctica: si tenemos al menos 4 señales fuertes, asumimos que la sesión es restaurable.
-    if (okCount >= 4) return true;
-
-    // Fallback ultra-permisivo: carpeta grande con estructura mínima.
-    // (evita falsos negativos en OS que no guardan CacheStorage, etc.)
-    try {
-     const items = fs.readdirSync(sessionDir).filter(x => x && !String(x).startsWith("."));
-      if (items.length < 3) return false;
-      // Si la carpeta pesa < 20MB, suele ser perfil "incompleto" recién creado.
-      const approxSize = (dirPath) => {
-        let sum = 0;
-        try {
-          const stack = [dirPath];
-          while (stack.length) {
-            const cur = stack.pop();
-            let lst = [];
-            try { lst = fs.readdirSync(cur); } catch { continue; }
-            for (const name of lst) {
-              const abs = path.join(cur, name);
-              let st2;
-              try { st2 = fs.statSync(abs); } catch { continue; }
-              if (st2.isDirectory()) stack.push(abs);
-              else sum += (st2.size || 0);
-              if (sum > 25 * 1024 * 1024) return sum; // corte temprano
-            }
-          }
-        } catch {}
-        return sum;
-      };
-      const sz = approxSize(sessionDir);
-      return sz >= 20 * 1024 * 1024;
-    } catch {
-      return false;
-    }
-  } catch {
-    return false;
-  }
-}
-
 function sessionLog(msg) {
   try { console.log(msg); } catch {}
   try { EscribirLog(msg, "event"); } catch {}
 }
 
-const RESTORE_TIMEOUT_MS = Number(process.env.RESTORE_TIMEOUT_MS || 240_000);
-const RESTORE_LOG_EVERY_BYTES = Number(process.env.RESTORE_LOG_EVERY_BYTES || (2 * 1024 * 1024)); // 2MB
-const RESTORE_RETRY_ON_TIMEOUT = Number(process.env.RESTORE_RETRY_ON_TIMEOUT || 1); // 1 reintento
 
 // Lease/heartbeat configurables (ms)
 const MIN_LEASE_MS = Number(process.env.MIN_LEASE_MS || 180000);
 let lease_ms = Number(process.env.LEASE_MS || MIN_LEASE_MS);
 let heartbeat_ms = Number(process.env.HEARTBEAT_MS || 5000);
-let backup_every_ms = Number(process.env.BACKUP_EVERY_MS || 300000); // LocalAuth backup period
+let backup_every_ms = Number(process.env.BACKUP_EVERY_MS || 300000);
 let auth_base_path = process.env.ASISTO_AUTH_PATH || "";            // LocalAuth dataPath override
 let auth_mode = String(process.env.ASISTO_AUTH_MODE || '').trim().toLowerCase(); // 'remote' | 'local' (default: local)
 
@@ -639,25 +535,6 @@ app.get('/', (req, res) => {
 // =========================
 // STATUS endpoints (debug / monitoreo)
 // =========================
-
-async function cleanupOrphanGridFSChunks(bucketName = "wa_localauth") {
-  await ensureMongo();
-
-  const db = mongoose.connection.db; // ✅ acá está la DB real
-  if (!db) {
-    sessionLog("GridFS cleanup: mongo db not ready");
-    return;
-  }
-
-  const filesColl = db.collection(`${bucketName}.files`);
-  const chunksColl = db.collection(`${bucketName}.chunks`);
-
-  const ids = await filesColl.distinct("_id");
-  const filter = ids.length ? { files_id: { $nin: ids } } : {}; // si no hay files, borra todo
-
-  const res = await chunksColl.deleteMany(filter);
-  sessionLog(`GridFS cleanup: orphan chunks deleted=${res.deletedCount}`);
-}
 
 function requireStatusToken(req, res, next) {
   if (!status_token) return next();
@@ -1043,7 +920,7 @@ let store = null;
 let client = null;
 
 // =========================
-// LocalAuth <-> Mongo (GridFS) helpers
+// LocalAuth helpers
 // =========================
 function getAuthBasePath() {
   // priority: config auth_base_path -> env -> default in user home
@@ -1068,727 +945,6 @@ function dirLooksPopulated(p) {
   }
 }
 
-
-
-function zipDirectoryToBuffer(dirPath) {
-  if (!AdmZip) {
-    const msg = "Falta dependencia adm-zip. Instalá: npm i adm-zip";
-    try { console.log(msg); } catch {}
-    throw new Error("missing_dependency_adm_zip");
-  }
-  const zip = new AdmZip();
-
-  // Backup MINIMAL (para que no sea gigante y para evitar EBUSY en Windows):
-  // Incluye solo lo necesario para que LocalAuth restaure la sesión.
-  // Todo lo de cache se excluye.
-  // ⚠️ En la práctica, WhatsApp Web/Chromium suele necesitar más que IndexedDB/LocalStorage/Cookies
-  // para sobrevivir reinicios sin pedir QR (Service Worker / CacheStorage / Session Storage, etc.).
-  const INCLUDE_MIN = [
-    "Local State",
-    "Default/Local Storage",
-    "Default/IndexedDB",
-    "Default/Cookies",
-    "Default/Cookies-journal",
-    "Default/Preferences",
-    "Default/Secure Preferences",
-    // Recomendados para persistencia estable:
-    "Default/Service Worker",
-    "Default/CacheStorage",
-    "Default/Session Storage",
-    "Default/Web Storage",
-    "Default/Code Cache",
-    "Default/Network",
-    "Default/TransportSecurity"
-  ];
-
-  const INCLUDE_FULL = [
-    ...INCLUDE_MIN,
-    "Default/Web Storage",
-    "Default/Session Storage",
-    "Default/Network",
-     "Default/TransportSecurity"
-   ];
- const INCLUDE = (String(process.env.ASISTO_AUTH_BACKUP_FULL || "").trim() === "1") ? INCLUDE_FULL : INCLUDE_MIN;
-  const normalizeRel = (p) => String(p || "").split("\\").join("/").replace(/^\/+/, "");
-
-  function addFile(absFile, zipDir) {
-    try {
-      zip.addLocalFile(absFile, zipDir || "");
-      return;
-    } catch (e) {
-      const msg = String(e?.message || e || "");
-      const busy = msg.includes("EBUSY") || msg.toLowerCase().includes("busy") || msg.toLowerCase().includes("locked");
-      if (busy) {
-        // En Windows algunos archivos quedan bloqueados para escritura pero se pueden LEER.
-        // Probamos agregarlos al zip desde buffer; si falla, los omitimos.
-        try {
-          const data = fs.readFileSync(absFile);
-          const base = path.basename(absFile);
-          const zpath = (zipDir && String(zipDir).length) ? `${zipDir}/${base}` : base;
-          zip.addFile(zpath, data);
-          return;
-        } catch {
-          return;
-        }
-      }
-      throw e;
-    }
-  }
-
-  function walk(absDir, relZipBase) {
-    let entries = [];
-    try {
-      entries = fs.readdirSync(absDir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const ent of entries) {
-      const abs = path.join(absDir, ent.name);
-      const nextRel = relZipBase ? `${relZipBase}/${ent.name}` : ent.name;
-
-      if (ent.isDirectory()) {
-        walk(abs, nextRel);
-      } else if (ent.isFile()) {
-        addFile(abs, relZipBase || "");
-      }
-    }
-  }
-
-  for (const rel of INCLUDE) {
-    const relNorm = normalizeRel(rel);
-    const abs = path.join(dirPath, ...relNorm.split("/"));
-    if (!fs.existsSync(abs)) continue;
-
-    try {
-      const st = fs.statSync(abs);
-      if (st.isDirectory()) {
-        walk(abs, relNorm);
-      } else if (st.isFile()) {
-        const zipDir = relNorm.includes("/") ? relNorm.split("/").slice(0, -1).join("/") : "";
-        addFile(abs, zipDir);
-      }
-    } catch {
-      continue;
-    }
-  }
-
-  return zip.toBuffer();
-}
-
-function extractZipBufferToDir(buf, destDir) {
-  if (!AdmZip) {
-    const msg = "Falta dependencia adm-zip. Instalá: npm i adm-zip";
-    try { console.log(msg); } catch {}
-    throw new Error("missing_dependency_adm_zip");
-  }
-  fs.mkdirSync(destDir, { recursive: true });
-  const zip = new AdmZip(buf);
-  zip.extractAllTo(destDir, true);
-}
-
-function getBucket() {
-  if (!mongoose?.connection?.db) throw new Error("mongo_db_not_ready");
-  if (!GridFSBucket) throw new Error("mongodb_gridfsbucket_not_available");
-  // bucket name: wa_localauth (creates wa_localauth.files / wa_localauth.chunks)
-  return new GridFSBucket(mongoose.connection.db, { bucketName: "wa_localauth" });
-}
-
-
-
-
-function isGridfsFileNotFoundError(err) {
-   
-  if (!err) return false;
-  const msg = String(err.message || err).toLowerCase();
-  // mongodb driver suele tirar: "File not found for id <id>"
-  if (msg.includes('file not found for id')) return true;
-  // algunas variantes
-  if (msg.includes('filenotfound')) return true;
-  if (String(err.code || '').toLowerCase() == 'filenotfound') return true;
-  return false;
-}
-
-
-function bucketDeleteAsync(bucket, fileId) {
-  return new Promise((resolve, reject) => {
-     // Compatibilidad: mongodb driver v3/v4 (callback) y v5/v6 (Promise)
-    try {
-      const maybePromise = bucket.delete(fileId);
-      if (maybePromise && typeof maybePromise.then === 'function') {
-        maybePromise.then(resolve).catch(reject);
-        return;
-      }
-      // fallback callback-style
-      bucket.delete(fileId, (err) => {
-        if (err) return reject(err);
-        resolve();
-      });
-    } catch (e) {
-      // si falló el modo Promise, intentamos callback-style
-      try {
-        bucket.delete(fileId, (err) => {
-          if (err) return reject(err);
-          resolve();
-        });
-      } catch (e2) {
-        reject(e2);
-      }
-    }
-  }).catch((err) => {
-    // Si el file ya no existe (race), no queremos tirar abajo el proceso.
-    if (isGridfsFileNotFoundError(err)) return;
-    throw err;
-  });
-}
-
-async function pinGridFsFile(bucket, fileId, ms) {
-  try {
-    const until = new Date(Date.now() + (Number(ms) || LOCALAUTH_RESTORE_PIN_MS));
-    await bucket.s.db.collection(`${bucket.s.options.bucketName}.files`).updateOne(
-      { _id: fileId },
-      { $set: { "metadata.pinnedUntil": until } }
-    );
-    if (LOCALAUTH_VERBOSE) console.log(`LocalAuth: PIN set fileId=${fileId} pinnedUntil=${until.toISOString()}`);
-  } catch (e) {
-    // no romper restore si falla el pin
-    if (LOCALAUTH_VERBOSE) console.log(`LocalAuth: PIN warn fileId=${fileId} err=${e?.message || e}`);
-  }
-}
-
-async function unpinGridFsFile(bucket, fileId) {
-  try {
-    await bucket.s.db.collection(`${bucket.s.options.bucketName}.files`).updateOne(
-      { _id: fileId },
-      { $unset: { "metadata.pinnedUntil": "" } }
-    );
-    if (LOCALAUTH_VERBOSE) console.log(`LocalAuth: PIN cleared fileId=${fileId}`);
-  } catch {}
-}
-
-async function deleteTempBackups(bucket, canonicalFilename) {
-  // borra residuos de uploads temporales (si quedaron por cortes)
-  try {
-    const filesColl = bucket.s.db.collection(`${bucket.s.options.bucketName}.files`);
-    // canonicalFilename puede tener caracteres especiales -> escapar para regex
-    const rx = `^${escapeRegex(String(canonicalFilename))}\\.tmp-`;
-    const cursor = filesColl.find({ filename: { $regex: rx } }, { projection: { _id: 1 } });
-    const ids = [];
-    await cursor.forEach(d => ids.push(d._id));
-    for (const id of ids) {
-      // bucket.delete() no siempre es Promise; usar wrapper seguro
-      try { await bucketDeleteAsync(bucket, id); } catch {}
-
-    }
-    if (ids.length && LOCALAUTH_VERBOSE) console.log(`LocalAuth: TEMP cleanup deleted=${ids.length}`);
-  } catch {}
-}
-
-
-
-async function deleteExistingFilename(bucket, filename) {
-   // OJO: GridFSBucket.delete() usa callback (no Promise) en varias versiones del driver.
-  // Si hacemos `await bucket.delete(...)` NO borra y la colección wa_localauth.chunks crece sin límite.
-
-  const existing = await bucket.find({ filename }).toArray();
-  for (const f of (existing || [])) {
-     try {
-      await bucketDeleteAsync(bucket, f._id);
-    } catch (e) {
-      if (!isGridfsFileNotFoundError(e)) {
-        try { console.warn('GridFS deleteExistingFilename error:', e?.message || e); } catch {}
-      }
-    }
-  }
-}
-
-
-async function deleteByFilenamePrefix(bucketName, filenamePrefix) {
-  await ensureMongo();
-  const db = mongoose.connection.db;
-  if (!db) return;
-  const filesColl = db.collection(`${bucketName}.files`);
-  const rows = await filesColl.find({ filename: { $regex: `^${escapeRegex(filenamePrefix)}` } }, { projection: { _id: 1, filename: 1 } }).toArray();
-  if (!rows || !rows.length) return;
-  const bucket = new GridFSBucket(db, { bucketName });
-  for (const r of rows) {
-    try { await bucketDeleteAsync(bucket, r._id); } catch {}
-  }
-}
-
-function escapeRegex(s) {
-  return String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-async function pruneOldLocalAuthFiles(bucket, filename, keep ) {
-  try {
-    const keepN = Math.max(1, Number(keep) || 1);
-    const now = new Date();
-    const files = await bucket.find({ filename }).sort({ uploadDate: -1 }).toArray();
-    // ⚠️ NO borrar archivos "pinned" (otra PC puede estar restaurando)
-   const safe = [];
-    for (const f of files) {
-      const pu = f?.metadata?.pinnedUntil ? new Date(f.metadata.pinnedUntil) : null;
-      const isPinned = pu && pu > now;
-      if (isPinned) {
-        if (LOCALAUTH_VERBOSE) console.log(`LocalAuth: PRUNE skip pinned fileId=${f._id} pinnedUntil=${pu.toISOString()}`);
-        continue;
-      }
-      safe.push(f);
-    }
-
-    // Mantener el más nuevo (keep=1) entre los NO-pinned
-    const toDelete = safe.slice(keepN);
-    for (const f of toDelete) {
-      // bucket.delete() no siempre es Promise; usar wrapper seguro
-      try { await bucketDeleteAsync(bucket, f._id); } catch {}
-
-    }
-    if (toDelete.length && LOCALAUTH_VERBOSE) console.log(`LocalAuth: PRUNE deleted=${toDelete.length} keep=${keepN}`);
-  } catch {}
-}
-
-
-async function restoreRemoteLocalAuthToDisk(clientId, sessionDir, timeoutMs = 90_000) {
-  const filename = `LocalAuth-${clientId}.zip`;
-  const bucket = getBucket();
-  const filesColl = bucket.s.db.collection(`${bucket.s.options.bucketName}.files`);
-
-  // Buscar el más nuevo
-  const latest = await filesColl.find({ filename }).sort({ uploadDate: -1 }).limit(1).next();
-  if (!latest) {
-    console.log(`LocalAuth: RESTORE skip (no remote) filename=${filename}`);
-    return false;
-  }
-
-  console.log(`LocalAuth: RESTORE start filename=${filename} fileId=${latest._id} uploadDate=${latest.uploadDate} timeoutMs=${timeoutMs}`);
-
-  // PIN para evitar que el prune de otra PC lo borre mientras se descarga
-  await pinGridFsFile(bucket, latest._id, LOCALAUTH_RESTORE_PIN_MS);
-
-  try {
-    const buf = await downloadGridFsFileToBuffer(bucket, latest._id, timeoutMs);
-    extractZipBufferToDir(buf, sessionDir);
-    console.log(`LocalAuth: RESTORE OK fileId=${latest._id} bytes=${buf.length}`);
-    return true;
-  } finally {
-    // liberamos pin (igual el prune ya respeta pinnedUntil)
-    await unpinGridFsFile(bucket, latest._id);
-  }
-}
-
-
-
-async function promoteTempToCanonical(bucketName, tempFileId, canonicalFilename) {
-  await ensureMongo();
-  const db = mongoose.connection.db;
-  if (!db) throw new Error("mongo_db_not_ready");
-  const filesColl = db.collection(`${bucketName}.files`);
-  // Renombramos el staging al nombre canónico (NO mueve chunks, solo actualiza metadata)
-  await filesColl.updateOne({ _id: tempFileId }, { $set: { filename: canonicalFilename } });
-}
-
-
-async function saveLocalAuthToMongo(label = "") {
-  if (!tenantId || !numero) return;
-  if (!await ensureMongo()) return;
-
-  const clientId = `asisto_${tenantId}_${numero}`;
-  const sessionDir = getLocalAuthSessionDir(clientId);
-
-    if (!localAuthDirHasKeyData(sessionDir)) {
-    EscribirLog(`LocalAuth: BACKUP skip (sin data clave) (${sessionDir})`, "event");
-     return;
-   }
-
-  
-  
-
-  const filename = `LocalAuth-${clientId}.zip`;
-  const bucket = getBucket();
-
-  // Zip -> upload
-  const buf = zipDirectoryToBuffer(sessionDir);
-  const bytes = buf?.length || 0;
-
-   // Evitar backups concurrentes (duplican GridFS files/chunks)
-   if (savingLocalAuth) {
-     sessionLog(`LocalAuth: BACKUP skip (ya hay uno en curso) label=${label}`);
-     return;
-   }
-   savingLocalAuth = true;
-
-   try {
-  
-     // FAILOVER + 1 SOLO BACKUP:
-    // 1) subimos a "staging filename" (temporal)
-    // 2) promovemos staging -> filename canónico
-    // 3) borramos duplicados y staging viejos
-    const tmpName = `${filename}.tmp-${instanceId}-${Date.now()}`;
-    sessionLog(`LocalAuth: BACKUP start label=${label} bytes=${bytes} tmp=${tmpName}`);
-    let uploadedFileId = null;
-    await new Promise((resolve, reject) => {
-      const up = bucket.openUploadStream(tmpName, {
-         metadata: {
-           tenantId,
-           numero,
-           clientId,
-           label,
-           host: os.hostname(),
-           pid: process.pid,
-           savedAt: new Date()
-         }
-       });
-       up.on("error", reject);
-        up.on("finish", () => {
-        try { uploadedFileId = up.id; } catch {}
-        resolve();
-      });
-       up.end(buf);
-     });
-
-    if (!uploadedFileId) throw new Error("gridfs_upload_no_file_id");
-
-    // 2) promover a nombre canónico (no hay ventana: el viejo sigue existiendo hasta acá)
-    await promoteTempToCanonical("wa_localauth", uploadedFileId, filename);
-
-    // 3) dejar SOLO 1 canónico (el más nuevo) y limpiar staging viejos
-    await pruneOldLocalAuthFiles(bucket, filename, 1);
-    // borrar cualquier staging remanente (por fallos anteriores)
-    await deleteByFilenamePrefix("wa_localauth", `${filename}.tmp-`);
-
-     sessionLog(`LocalAuth: BACKUP OK (${label}) filename=${filename} bytes=${bytes}`);
-     EscribirLog(`REMOTE SESSION SAVED (LocalAuth->Mongo) bytes=${bytes} label=${label}`, "event");
-     try { console.log(`REMOTE SESSION SAVED (LocalAuth->Mongo) bytes=${bytes} label=${label}`); } catch {}
-   } catch (e) {
-     const msg = `LocalAuth: BACKUP FAIL (${label}) ${e?.message || e}`;
-     try { console.log(msg); } catch {}
-     try { EscribirLog(msg, "error"); } catch {}
-   } finally {
-     savingLocalAuth = false;
-   }
-}
-
-async function restoreLocalAuthFromMongoIfNeeded() {
-
-if (!tenantId || !numero) return false;
-if (!await ensureMongo()) return false;
-
-const clientId = `asisto_${tenantId}_${numero}`;
-const sessionDir = getLocalAuthSessionDir(clientId);
-let movedAsideDir = null;
-
-sessionLog(`LocalAuth: RESTORE check clientId=${clientId} sessionDir=${sessionDir}`);
-
-// Cachear resultado (evita llamar 2 veces y tomar decisiones inconsistentes)
-const forceRestore = String(process.env.LOCALAUTH_FORCE_RESTORE || "0").trim() === "1";
-
-
-// Regla segura:
-// - Si existe sesión local y está poblada -> NO restaurar automáticamente (evita borrar/renombrar por falsos negativos).
-// - Solo se restaura si NO existe la carpeta / está vacía, o si el usuario fuerza LOCALAUTH_FORCE_RESTORE=1.
-try {
-  if (fs.existsSync(sessionDir) && dirLooksPopulated(sessionDir) && !forceRestore) {
-    sessionLog(`LocalAuth: RESTORE skip (local folder populated). Use LOCALAUTH_FORCE_RESTORE=1 to override.`);
-    return false;
-  }
-  if (fs.existsSync(sessionDir) && forceRestore) {
-    sessionLog(`LocalAuth: FORCE restore -> limpio y restauro (${sessionDir})`);
-    try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch {}
-  }
-} catch {}
-// Si no existe, la creamos para el restore
-try { fs.mkdirSync(sessionDir, { recursive: true }); } catch {}
-
- 
-
-
-  const filename = `LocalAuth-${clientId}.zip`;
-  const bucket = getBucket();
-
-  // Asegurar indices GridFS (evita: "Sort exceeded memory limit" en wa_localauth.chunks)
-  // Se ejecuta una sola vez por proceso.
-  try {
-    if (!globalThis.__WA_LOCALAUTH_GRIDFS_INDEXES_OK) {
-      const db = mongoose?.connection?.db;
-      if (db) {
-        await db.collection("wa_localauth.chunks").createIndex({ files_id: 1, n: 1 });
-        await db.collection("wa_localauth.files").createIndex({ filename: 1, uploadDate: -1 });
-        globalThis.__WA_LOCALAUTH_GRIDFS_INDEXES_OK = true;
-      }
-    }
-  } catch (e) {
-    // no frenamos el inicio, pero lo logueamos
-    try { EscribirLog(`GridFS index ensure failed: ${e?.message || e}`, "error"); } catch {}
-  }
-  // Requisito: SOLO 1 backup. Entonces buscamos el canónico.
-
-
-  const files = await bucket.find({ filename }).sort({ uploadDate: -1 }).limit(1).toArray();
-  let picked = (files && files[0]) ? files[0] : null;
-
-  // Si justo estamos en ventana de "staging promote", puede existir tmp pero no canónico.
-  if (!picked) {
-    const tmp = await bucket.find({ filename: { $regex: `^${escapeRegex(filename)}\\.tmp-` } }).sort({ uploadDate: -1 }).limit(1).toArray();
-    if (tmp && tmp[0]) {
-      picked = tmp[0];
-      sessionLog(`LocalAuth: RESTORE no canonical; found staging fileId=${picked._id} uploadDate=${picked.uploadDate}`);
-      // Lo promovemos para estabilizar estado (opcional pero recomendado)
-      try {
-        await promoteTempToCanonical("wa_localauth", picked._id, filename);
-        await pruneOldLocalAuthFiles(bucket, filename, 1);
-        await deleteByFilenamePrefix("wa_localauth", `${filename}.tmp-`);
-      } catch (e) {
-        sessionLog(`LocalAuth: RESTORE staging promote failed: ${e?.message || e}`);
-      }
-    }
-  }
-
-  if (!picked) {
-    EscribirLog(`LocalAuth: no hay backup en Mongo (${filename}). Se pedirá QR.`, "event");
-    sessionLog(`LocalAuth: RESTORE FAIL (no backup in Mongo) filename=${filename}`);
-    return false;
-  }
-
-  sessionLog(`LocalAuth: RESTORE start filename=${picked.filename} fileId=${picked._id} uploadDate=${picked.uploadDate} timeoutMs=${RESTORE_TIMEOUT_MS}`);
- 
-
-  // Preparamos carpeta temporal para extraer/validar sin ensuciar sessionDir
-  const tmpBase = path.join(os.tmpdir(), `asisto_localauth_restore_${clientId}_${Date.now()}`);
-  let restoredBytes = 0;
-  const f = picked;
-  const tmpDir = `${tmpBase}_${String(f._id)}`;
-  
-    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-    try { fs.mkdirSync(tmpDir, { recursive: true }); } catch {}
-
-    try {
-      // Validación clave: si el file existe pero NO tiene chunks, el download queda en 0 bytes y termina en timeout.
-      const db = mongoose.connection.db;
-      const chunksColl = db.collection("wa_localauth.chunks");
-      const hasChunk = await chunksColl.findOne({ files_id: f._id }, { projection: { _id: 1 } });
-      if (!hasChunk) {
-        sessionLog(`LocalAuth: RESTORE FAIL (no chunks for fileId=${f._id}). Backup incompleto o limpieza. Se pedirá QR.`);
-        return false;
-      }
-
-
-       const chunks = [];
-      const t0 = Date.now();
-      let total = 0;
-      let nextLogAt = RESTORE_LOG_EVERY_BYTES;
-
-      // Descarga con timeout + (opcional) 1 reintento si da timeout con bytes=0
-      let attempt = 0;
-      while (attempt <= RESTORE_RETRY_ON_TIMEOUT) {
-        attempt++;
-        try {
-          await new Promise((resolve, reject) => {
-            const dl = bucket.openDownloadStream(f._id);
-
-            // timeout por INACTIVIDAD (se resetea con cada chunk)
-            let to = null;
-            const armTimeout = () => {
-              try { if (to) clearTimeout(to); } catch {}
-              to = setTimeout(() => {
-                try { dl.destroy(new Error(`restore_timeout_${RESTORE_TIMEOUT_MS}ms`)); } catch {}
-                reject(new Error(`LocalAuth restore timeout after ${RESTORE_TIMEOUT_MS}ms (bytes=${total})`));
-              }, RESTORE_TIMEOUT_MS);
-            };
-            armTimeout();
-
-            // Pin temporal: evita borrado durante restore (aunque corra cleanup)
-           // best-effort, no rompe si falla
-            try { pinGridFsFile(bucket, f._id, Math.max(LOCALAUTH_RESTORE_PIN_MS, RESTORE_TIMEOUT_MS + 60_000)); } catch {}
-
-           try { sessionLog(`LocalAuth: RESTORE stream opened fileId=${f._id}`); } catch {}
-
-
-            dl.on("data", (d) => {
-              chunks.push(d);
-              total += d.length;
-              // IMPORTANTE: resetear timeout por actividad
-              // (en este archivo estaba faltando, por eso corta aunque venga data lenta)
-              armTimeout();
-              if (total >= nextLogAt) {
-                nextLogAt += RESTORE_LOG_EVERY_BYTES;
-                sessionLog(`LocalAuth: RESTORE downloading... bytes=${total}`);
-              }
-            });
-
-            // Logs extra para diagnosticar "bytes=0":
-            // - si nunca aparece "file", suele ser stall/selección de server/permiso/stream bloqueado
-            dl.on("file", (fileDoc) => {
-              try { sessionLog(`LocalAuth: RESTORE file event name=${fileDoc?.filename || ""} len=${fileDoc?.length || ""}`); } catch {}
-            });
-            dl.on("close", () => {
-              try { sessionLog(`LocalAuth: RESTORE stream closed fileId=${f._id} bytes=${total}`); } catch {}
-            });
-
-
-            dl.on("error", (err) => {
-              try { if (to) clearTimeout(to); } catch {}
-              try { unpinGridFsFile(bucket, f._id); } catch {}
-              reject(err);
-            });
-
-            dl.on("end", () => {
-              try { if (to) clearTimeout(to); } catch {}
-              try { unpinGridFsFile(bucket, f._id); } catch {}
-              resolve();
-            });
-          });
-          break; // ok
-        } catch (e) {
-          const msg = String(e?.message || e);
-          const isTimeout = msg.includes("restore timeout");
-          if (isTimeout && total === 0 && attempt <= RESTORE_RETRY_ON_TIMEOUT) {
-            sessionLog(`LocalAuth: RESTORE retry attempt=${attempt} reason=timeout_bytes0 fileId=${f._id}`);
-            // reset acumuladores por si quedó basura
-            chunks.length = 0;
-            total = 0;
-            nextLogAt = RESTORE_LOG_EVERY_BYTES;
-            continue;
-          }
-          throw e;
-        }
-
-
-
-
-      }
-
-      const buf = Buffer.concat(chunks);
-      const bytes = buf?.length || 0;
-      sessionLog(`LocalAuth: RESTORE downloaded bytes=${bytes} elapsedMs=${Date.now() - t0}`);
-      if (!bytes) {
-        sessionLog(`LocalAuth: RESTORE FAIL (download bytes=0) fileId=${f._id} -> pedirá QR`);
-        return false;
-      }
-      extractZipBufferToDir(buf, tmpDir);
-
-      // Validar que lo restaurado realmente tenga data clave
-      if (!localAuthDirHasKeyData(tmpDir)) {
-        sessionLog(`LocalAuth: RESTORE FAIL (incompleto) fileId=${f._id} uploadDate=${f.uploadDate}`);
-        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-        return false;
-      }
-
-      // Swap seguro: NO borrar sessionDir. Si falla el restore, revertimos.
-      const parentDir = path.dirname(sessionDir);
-      try { fs.mkdirSync(parentDir, { recursive: true }); } catch {}
-      const prevDir = `${sessionDir}.prev-${Date.now()}`;
-      let hadPrev = false;
-
-      // si ya existía sesión local, la movemos a "prev" para poder volver atrás
-      try {
-        if (fs.existsSync(sessionDir)) {
-          fs.renameSync(sessionDir, prevDir);
-          hadPrev = true;
-        }
-      } catch (e) {
-        // si no podemos renombrar, NO seguimos (evita quedarte sin sesión)
-        sessionLog(`LocalAuth: RESTORE FAIL (cannot move existing session) err=${e?.message || e}`);
-        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-        return false;
-      }
-
-      // ahora intentamos colocar el restore
-      try {
-        try { fs.renameSync(tmpDir, sessionDir); } catch {
-          // fallback cross-device
-          extractZipBufferToDir(buf, sessionDir);
-          try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-        }
-      } catch (e) {
-        sessionLog(`LocalAuth: RESTORE FAIL (swap exception) err=${e?.message || e}`);
-        // revertir
-        try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch {}
-        if (hadPrev) {
-          try { fs.renameSync(prevDir, sessionDir); } catch {}
-        }
-        return false;
-      }
-
-      // validar restore nuevo; si falla, revertimos al prev
-      if (!localAuthDirHasKeyData(sessionDir)) {
-        sessionLog(`LocalAuth: RESTORE FAIL (swap incompleto) -> revert to previous`);
-        try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch {}
-        if (hadPrev) {
-          try { fs.renameSync(prevDir, sessionDir); } catch {}
-        }
-        return false;
-      }
-
-      // restore OK -> limpiar prev si existía
-      if (hadPrev) {
-        try { fs.rmSync(prevDir, { recursive: true, force: true }); } catch {}
-      }
-
-
-   // ✅ ACÁ MISMO es donde va la limpieza de la .bak (movedAsideDir)
-      // (justo después de limpiar prevDir y antes de loguear RESTORE OK/return true)
-      if (movedAsideDir) {
-        try { fs.rmSync(movedAsideDir, { recursive: true, force: true }); } catch {}
-        movedAsideDir = null;
-      }
-
-
-      restoredBytes = bytes;
-      sessionLog(`LocalAuth: RESTORE OK (${sessionDir}) fileId=${f._id}`);
-      EscribirLog(`LocalAuth: restore desde Mongo OK bytes=${restoredBytes} -> ${sessionDir}`, "event");
-      try { console.log(`LocalAuth: restore desde Mongo OK bytes=${restoredBytes} -> ${sessionDir}`); } catch {}
-      return true;
-    } catch (e) {
-      sessionLog(`LocalAuth: RESTORE error fileId=${f?._id} err=${e?.message || e}`);
-      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-      // rollback: si movimos carpeta original a .bak y el restore falló, volvemos atrás
-      if (movedAsideDir) {
-        try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch {}
-        try { fs.renameSync(movedAsideDir, sessionDir); } catch {}
-        movedAsideDir = null;
-      }
-      return false;
-    }
-  
-}
-
-
-function scheduleLocalAuthBackups() {
-   // OJO: 'ready' puede dispararse más de una vez por reconnect y duplicar intervals.
-   if (localAuthBackupSchedulerStarted) {
-     sessionLog("LocalAuth backup schedule: ya estaba iniciado (skip)");
-     return;
-   }
-   localAuthBackupSchedulerStarted = true;
-
-  if (!AdmZip) {
-    console.log("ERROR: falta dependencia adm-zip. Instalá: npm i adm-zip");
-    EscribirLog("ERROR: falta dependencia adm-zip. Instalá: npm i adm-zip", "error");
-  }
-  // IMPORTANTE: NO tragarnos errores: si falla el backup, lo logueamos.
-  const safeSave = (label) => saveLocalAuthToMongo(label).catch((e) => {
-    const msg = `saveLocalAuthToMongo failed (${label}): ${e?.message || e}`;
-    try { console.log(msg); } catch {}
-    EscribirLog(msg, "error");
-  });
-
-  // backups diferidos para evitar capturar sesión incompleta
-  setTimeout(() => safeSave("ready+60s"), 60_000);
-  setTimeout(() => safeSave("ready+120s"), 120_000);
-  setTimeout(() => safeSave("ready+240s"), 240_000);
-
-  // backup periódico
-  const every = Math.max(160_000, Number(backup_every_ms) || 600_000);
-    if (localAuthBackupInterval) {
-     try { clearInterval(localAuthBackupInterval); } catch {}
-     localAuthBackupInterval = null;
-   }
-   localAuthBackupInterval = setInterval(() => safeSave("interval"), every);
-
-  EscribirLog(`LocalAuth backup schedule: every=${every}ms`, "event");
-}
-
-
 /**
  * Crea el cliente WhatsApp SOLO cuando Mongo está listo (mongoose.connection.db disponible).
  * Esto evita el crash de wwebjs-mongo: Cannot read properties of undefined (reading 'collection')
@@ -1796,51 +952,13 @@ function scheduleLocalAuthBackups() {
 async function createClientIfNeeded(opts = {}) {
   if (client) return client;
 
-  // Necesitamos Mongo para lock + (backup/restore) LocalAuth
+  // Necesitamos Mongo para lock y estado del panel
   const ok = await ensureMongo();
   if (!ok) throw new Error("mongo_not_ready");
 
   if (!tenantId || !numero) throw new Error("tenant_or_numero_missing");
 
   const clientId = `asisto_${tenantId}_${numero}`;
-
-  const skipLocalRestore = !!opts.skipLocalRestore;
-
-  // Antes de inicializar el navegador:
-  // - RESTORE SOLO si realmente hace falta (no hay carpeta o está vacía)
-  // - y SOLO una vez por proceso (evita restore repetido en recreaciones por "Target closed").
-  try {
-    if (!localAuthRestoreAttempted) {
-      localAuthRestoreAttempted = true;
-      const sessionDir = getLocalAuthSessionDir(clientId);
-      const hasLocalFolder = (() => {
-        try { return !!(sessionDir && fs.existsSync(sessionDir)); } catch { return false; }
-      })();
-      const localLooksOk = (() => {
-        try {
-          // En Windows/Chromium el "probe" de claves puede dar falsos negativos y romper la sesión.
-          // Si la carpeta existe y está poblada, asumimos OK y NO tocamos.
-          return hasLocalFolder && dirLooksPopulated(sessionDir);
-        } catch { return false; }
-      })();
-
-      // IMPORTANTÍSIMO:
-      // En recreates por "Target closed / execution context", NO restaurar ni mover carpetas.
-      if (skipLocalRestore) {
-        if (LOCALAUTH_VERBOSE) sessionLog(`LocalAuth: RESTORE skip (skipLocalRestore=true) (${sessionDir})`);
-      } else if (!localLooksOk) {
- 
-        await restoreLocalAuthFromMongoIfNeeded();
-      } else {
-        if (LOCALAUTH_VERBOSE) sessionLog(`LocalAuth: RESTORE skip (createClientIfNeeded local exists) (${sessionDir})`);
-      }
-    } else {
-      if (LOCALAUTH_VERBOSE) sessionLog(`LocalAuth: RESTORE skip (already attempted in this process)`);
-    }
-  } catch (e) {
-    EscribirLog(`LocalAuth restore error: ${e?.message || e}`, "error");
-  }
-
 
   const useRemoteAuth = isRemoteAuthMode();
   if (useRemoteAuth) {
@@ -2458,7 +1576,6 @@ async function gracefulShutdown(signal) {
   try { sessionLog(`[SHUTDOWN] ${signal} -> cerrando WhatsApp...`); } catch {}
   try { if (autoUpdateTimer) { clearInterval(autoUpdateTimer); autoUpdateTimer = null; } } catch {}
    try { if (client) { try { await client.destroy(); } catch {} } } catch {}
-  try { await saveLocalAuthToMongo(`shutdown_${signal}`); } catch {}
   // IMPORTANTE: liberamos el lock para takeover inmediato (sin esperar lease_ms)
   try { await forceReleaseLock(); } catch {}
   try { isOwner = false; } catch {}
@@ -2867,13 +1984,6 @@ client.on('ready', async () => {
     
    await io.emit('message', 'Whatsapp Listo!');
    EscribirLog('Whatsapp Listo!',"event");
-  await ensureMongo();
-  await cleanupOrphanGridFSChunks("wa_localauth");
-  // Programar backups periódicos de sesión (LocalAuth -> Mongo)
-  // Programar backups periódicos SOLO si usamos LocalAuth (RemoteAuth ya guarda en Mongo).
-  if (isLocalAuthMode()) {
-    try { scheduleLocalAuthBackups(); } catch (e) { EscribirLog(`scheduleLocalAuthBackups error: ${e?.message || e}`, 'error'); }
-  }
    // Para el panel: sesión activa
   updateLockStateSafe('online').catch(()=>{});
   // Opcional: si querés conservar un "hito" ready en historial:
@@ -2916,14 +2026,6 @@ client.on('authenticated', async () => {
   EscribirLog('Autenticado',"event");
   updateLockStateSafe('authenticated').catch(()=>{});
 
-  // Backup temprano (apenas se autentica) para minimizar casos donde se corta antes del "ready"
-  try {
-    setTimeout(() => saveLocalAuthToMongo('authenticated+20s').catch((e) => {
-      const msg = `saveLocalAuthToMongo failed (authenticated+20s): ${e?.message || e}`;
-      try { console.log(msg); } catch {}
-      EscribirLog(msg, 'error');
-    }), 20_000);
-  } catch {}
 });
 
 
@@ -2934,24 +2036,15 @@ client.on('auth_failure', async function(session) {
   EscribirLog('Error 04 - Chatbot error Auth failure', String(session || ''), "error");
   updateLockStateSafe('auth_failure').catch(()=>{});
 
-  // Con LocalAuth, whatsapp-web.js puede borrar la carpeta de sesión si restartOnAuthFail=true.
-  // Acá lo manejamos nosotros: intentamos restaurar desde Mongo y reiniciar el cliente SIN borrar la sesión.
+  // Sin backup/restore remoto: reiniciamos el cliente y dejamos que LocalAuth use solo la sesión local.
   if (isLocalAuthMode() && isOwner && !authFailureHandling) {
     authFailureHandling = true;
     setTimeout(async () => {
       try {
-        // Permitir un nuevo intento de RESTORE en este proceso
-        localAuthRestoreAttempted = false;
-
         try { await destroyClientHard(client); } catch {}
         try { client = null; } catch {}
+        clientStarted = false;
 
-        // Si hay backup remoto, lo baja a disco antes de re-inicializar
-        try { await restoreLocalAuthFromMongoIfNeeded(); } catch (e) {
-          EscribirLog('LocalAuth restore on auth_failure failed: ' + String(e?.message || e), 'error');
-        }
-
-        // Reintenta inicializar (solo si seguimos teniendo el lock)
         if (isOwner && !clientStarted) {
           await startClientInitialize();
         }
@@ -3308,8 +2401,7 @@ async function recreateClientForRetry(reason) {
   // Re-crea el client:
   // Si venimos por execution_context / detached_frame, NO tocar el storage local ni forzar restore,
   // porque esos errores suelen ser del navegador, no de la sesión.
-  const skipLocalRestore = (reason === "execution_context" || reason === "detached_frame");
-  await createClientIfNeeded({ skipLocalRestore });
+  await createClientIfNeeded();
   return client;
 }
 
