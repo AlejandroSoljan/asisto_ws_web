@@ -1,4 +1,0 @@
-set SHEET_URL=https://docs.google.com/spreadsheets/d/e/2PACX-1vSh1HHp-nb7EEm-eoChHzGxlsYdJQgJyP6BaoKqhTu3UXfYishZTaGZjv8ejATkvkhjusOcjTPTTxzl/pub?gid=0&single=true&output=csv
-set MI_CLIENTE_ID=1
-set REPO_DIR=C:\Asisto_200
-node watcher_client.js
