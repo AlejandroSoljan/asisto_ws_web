@@ -1251,7 +1251,7 @@ function attachClientHandlers() {
 
 client.on('message', async message => {
 
-
+//if (message.from=='5493462514448@c.us'   ){
 
   var indice_telefono = indexOf2d(message.from);
 
