@@ -1,23 +1,14 @@
-# Archivos locales por cliente (NO versionar)
-cliente.json
-watcher_client.js
-script-stop.bat
-script-stop-watcher.bat
-start-watcher.bat
+node_modules/
+npm-debug.log*
+logs/
+*.log
 
-# runtime
-**/node_modules/
-**/.wwebjs_auth/
-**/sessions/
-**/*.log
-**/*.log.*
-**/.watch_state_cliente_*.json
-**/ecosystem.local.config.js
+.session/
+auth_info/
+LocalAuth/
+RemoteAuth/
+cache/
+tmp/
 
-# env / secrets
-**/.env
-**/*.local.*
-
-# Windows noise
-Thumbs.db
-Desktop.ini
+configuracion.json
+.env
