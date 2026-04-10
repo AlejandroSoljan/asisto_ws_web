@@ -442,6 +442,7 @@ let startingNow = false;       // evita inicializaciones concurrentes (doble Chr
 let lastQrRaw = null;
 let lastQrDataUrl = null;
 let lastQrAt = null;
+let localWsPanelState = 'idle';
 // Cache liviano: si la política marca disabled=true, no inicializamos WhatsApp.
 let lastPolicyDisabled = null;
 let mongoReady = false;
@@ -613,82 +614,8 @@ async function ensureMongo() {
 
 // Inicializa modelos una sola vez (lock/policies/history/actions)
 function initMongoModelsIfNeeded() {
-  try {
-    if (!mongoose?.connection?.db) return;
-
-    if (!PolicyModel) {
-      const PolicySchema = new mongoose.Schema(
-        {
-          _id: { type: String },
-          // Compat: algunos deployments antiguos guardaban tenantid.
-          tenantid: { type: String },
-          // Canonical: lo usamos para filtrar desde el panel.
-          tenantId: { type: String, index: true },
-          numero: { type: String, index: true },
-          // Nuevo: si disabled=true, el script no inicializa WhatsApp (queda "habilitado/bloqueado" desde el panel)
-          disabled: { type: Boolean, default: false },
-          mode: { type: String, default: "any" },          // any | pinned
-          pinnedHost: { type: String, default: "" },       // hostname permitido (si mode=pinned)
-          blockedHosts: { type: [String], default: [] },   // hostnames bloqueados
-          updatedAt: { type: Date },
-          updatedBy: { type: String }
-        },
-        { collection: "wa_wweb_policies" }
-      );
-      PolicyModel = mongoose.models.WaWwebPolicy || mongoose.model("WaWwebPolicy", PolicySchema);
-    }
-
-    if (!HistoryModel) {
-      const HistorySchema = new mongoose.Schema(
-        {
-          lockId: { type: String, index: true },
-          event: { type: String, index: true },            // startup|standby|lock_acquired|qr|ready|policy_blocked|policy_pinned|release|...
-          host: { type: String },
-          pid: { type: Number },
-          detail: { type: mongoose.Schema.Types.Mixed },
-          at: { type: Date, default: Date.now, index: true }
-        },
-        { collection: "wa_wweb_history" }
-      );
-      HistoryModel = mongoose.models.WaWwebHistory || mongoose.model("WaWwebHistory", HistorySchema);
-    }
-
-    if (!LockModel) {
-      const LockSchema = new mongoose.Schema(
-        {
-          _id: { type: String },
-          tenantId: { type: String },
-          tenantid: { type: String, index: true },
-          numero: { type: String },
-          holderId: { type: String },
-          host: { type: String },
-          pid: { type: Number },
-          state: { type: String },
-          startedAt: { type: Date },
-          lastSeenAt: { type: Date },
-          lastQrAt: { type: String },
-          lastQrDataUrl: { type: String }
-        },
-        { collection: "wa_locks" }
-      );
-      LockModel = mongoose.models.WaLock || mongoose.model("WaLock", LockSchema);
-    }
-
-    if (!ActionModel) {
-      const ActionSchema = new mongoose.Schema(
-        {
-          lockId: { type: String, index: true },
-          action: { type: String, index: true },           // release | restart | logout
-          reason: { type: String },
-          requestedBy: { type: String },
-          requestedAt: { type: Date, default: Date.now, index: true },
-          consumedAt: { type: Date }
-        },
-        { collection: "wa_wweb_actions" }
-      );
-      ActionModel = mongoose.models.WaWwebAction || mongoose.model("WaWwebAction", ActionSchema);
-    }
-  } catch {}
+  // Modo simplificado: ya no inicializamos modelos de lock/acciones/políticas.
+  return;
 }
 
  
@@ -774,36 +701,11 @@ async function loadTenantConfigFromDbMinimal() {
 
 
 async function pushHistory(event, detail) {
-  try {
-    if (!HistoryModel) return;
-    if (!lockId) return;
-    await HistoryModel.create({
-      lockId,
-      event: String(event || ""),
-      host: os.hostname(),
-      pid: process.pid,
-      detail: detail || null,
-      at: new Date()
-    });
-  } catch {}
+  return null;
 }
 
 async function getPolicySafe() {
-  try {
-    if (!PolicyModel) return null;
-    // El panel guarda políticas por {tenantId, numero}. Mantener fallback por _id por compat.
-    if (tenantId && numero) {
-      const p = await PolicyModel.findOne({ tenantId: String(tenantId), numero: String(numero) }).lean();
-      if (p) return p;
-    }
-    if (lockId) {
-      const p2 = await PolicyModel.findById(lockId).lean();
-      if (p2) return p2;
-    }
-    return null;
-  } catch {
-    return null;
-  }
+  return null;
 }
 
 function hostName() {
@@ -811,13 +713,19 @@ function hostName() {
 }
 
 async function getLockDocSafe() {
-  try {
-    if (!await ensureMongo()) return null;
-    if (!lockId) return null;
-    return await LockModel.findById(lockId).lean();
-  } catch {
-    return null;
-  }
+  return {
+    _id: lockId || `${tenantId}:${numero}`,
+    tenantId,
+    numero,
+    holderId: instanceId,
+    host: os.hostname(),
+    pid: process.pid,
+    state: localWsPanelState,
+    startedAt: lockAcquiredAt || null,
+    lastSeenAt: new Date(),
+    lastQrAt,
+    lastQrDataUrl
+  };
 }
 
 app.get("/status", requireStatusToken, async (req, res) => {
@@ -864,17 +772,11 @@ app.get("/status/qr", requireStatusToken, async (req, res) => {
 });
 
 app.post("/control/release", requireStatusToken, async (req, res) => {
-  // Libera el lock y apaga el cliente en esta PC (standby manual).
   try {
-    if (!isOwner) return res.status(409).json({ ok: false, error: "not_owner" });
-
-    // best-effort: apagar WA
-    try { if (clientStarted) await client.destroy(); } catch {}
+    try { if (clientStarted && client) await client.destroy(); } catch {}
     clientStarted = false;
-
-    await forceReleaseLock();
+    localWsPanelState = 'offline';
     isOwner = false;
-
     return res.json({ ok: true, released: true });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e?.message || e) });
@@ -900,8 +802,8 @@ app.post("/control/release", requireStatusToken, async (req, res) => {
     startAutoUpdateScheduler();
 
     bootstrapWithLock().catch(e => {
-      console.log('bootstrapWithLock error:', e?.message || e);
-      EscribirLog('bootstrapWithLock error: ' + String(e?.message || e), 'error');
+      console.log('bootstrap inicio directo error:', e?.message || e);
+      EscribirLog('bootstrap inicio directo error: ' + String(e?.message || e), 'error');
     });
   } catch (e) {
     console.log('FATAL bootstrap:', e?.message || e);
@@ -1033,279 +935,20 @@ async function safeSend(to, content, opts) {
 // =========================
 async function updateLockStateSafe(state) {
   try {
-    if (!isOwner) return;
-    if (!await ensureMongo()) return;
-    if (!lockId) return;
-    const now = new Date();
-    const update = { $set: { state: state || null, lastSeenAt: now, tenantId: tenantId, tenantid: tenantId } };
-
-    // Si salimos del estado QR, limpiamos el QR guardado para evitar confusión.
-    if (state && state !== "qr") {
-      update.$unset = { lastQrAt: "", lastQrDataUrl: "" };
-    }
-
-    await LockModel.updateOne({ _id: lockId, holderId: instanceId }, update);
+    localWsPanelState = String(state || localWsPanelState || 'idle');
   } catch {}
 }
 
 // Guarda el último QR en el lock para poder verlo desde el panel admin (/admin/wweb)
 async function updateLockQrDataSafe(qrDataUrl, qrAtIso) {
   try {
-    if (!isOwner) return;
-    if (!qrDataUrl) return;
-    if (!await ensureMongo()) return;
-    if (!lockId) return;
-    // OJO: este helper corre en el handler de QR. No debe depender de variables
-    // locales de otras funciones (por ej. "staleNow"), porque si falla queda el
-    // panel sin lastQrDataUrl y el botón "Ver QR" se deshabilita.
-    const now = new Date();
-
-    await LockModel.updateOne(
-      { _id: lockId, holderId: instanceId },
-      {
-        $set: {
-          state: "qr",
-          tenantId: tenantId,
-          // Mantener heartbeat "vivo" mientras se espera el escaneo.
-          lastSeenAt: now,
-          lastQrAt: String(qrAtIso || ""),
-          lastQrDataUrl: String(qrDataUrl),
-        },
-      }
-    );
+    if (qrDataUrl) lastQrDataUrl = String(qrDataUrl);
+    if (qrAtIso) lastQrAt = String(qrAtIso);
+    localWsPanelState = 'qr';
   } catch {}
 }
 
-async function tryAcquireLock() {
-  // Para Opción B necesitamos tenantId + numero + mongo_uri
-  if (!tenantId || !numero || !mongo_uri) {
-    console.log("ERROR: Falta tenantId/numero/mongo_uri en configuracion.json. No se inicia WhatsApp.");
-    EscribirLog("ERROR: Falta tenantId/numero/mongo_uri en configuracion.json. No se inicia WhatsApp.", "error");
-    return false;
-  }
-
-  // Normalizar tenantId (consistencia en Mongo / evitar dobles locks)
-  tenantId = String(tenantId || '').trim();
-  if (tenantId) tenantId = tenantId.toUpperCase();
-
-  lockId = `${tenantId}:${numero}`;
-
-  const okMongo = await ensureMongo();
-  if (!okMongo || !LockModel) {
-    console.log("ERROR: No se pudo conectar a Mongo. No se inicia WhatsApp.");
-    EscribirLog("ERROR: No se pudo conectar a Mongo. No se inicia WhatsApp.", "error");
-    return false;
-  }
-
-  
-  // Aplicar política de sesión (bloqueos / pin por PC) antes de intentar lock
-  const pol = await getPolicySafe();
-  const hn = hostName();
-  if (pol) {
-    const blocked = Array.isArray(pol.blockedHosts) && pol.blockedHosts.includes(hn);
-    const pinned =
-     String(pol.mode || "any") === "pinned" &&
-      String(pol.pinnedHost || "").trim() &&
-      String(pol.pinnedHost || "").trim() !== hn;
-
-    if (blocked) {
-      isOwner = false;
-      await updateLockStateSafe("standby");
-      await pushHistory("policy_blocked", { host: hn, policy: pol });
-      console.log(`POLICY: Esta PC (${hn}) está BLOQUEADA para ${lockId}. STANDBY.`);
-      EscribirLog(`POLICY: PC bloqueada (${hn}) para ${lockId}.`, "event");
-      return false;
-    }
-    if (pinned) {
-      isOwner = false;
-      await updateLockStateSafe("standby");
-      await pushHistory("policy_pinned", { host: hn, pinnedHost: pol.pinnedHost, policy: pol });
-      console.log(`POLICY: Sesión fijada a otra PC (${pol.pinnedHost}). Esta PC (${hn}) queda en STANDBY.`);
-      EscribirLog(`POLICY: Sesión fijada a ${pol.pinnedHost}. Esta PC (${hn}) standby.`, "event");
-      return false;
-    }
-  }
-
-const now = new Date();
-  const stale = new Date(now.getTime() - (Number(lease_ms) || 30000));
-
-  // ------------------------------------------------------------
-  // FIX: Evitar que DOS PCs "ganen" el lock en el arranque.
-  // Antes se hacía upsert sobre {_id} y podía pisar holderId si otra PC insertaba justo antes.
-  // Ahora: intentamos INSERT primero (solo 1 puede ganar). Si hay duplicate key, seguimos con el flujo normal.
-  // ------------------------------------------------------------
-  try {
-    await LockModel.create({
-      _id: lockId,
-      tenantId,
-      tenantid: tenantId,
-      numero,
-      holderId: instanceId,
-      host: os.hostname(),
-      pid: process.pid,
-      state: "standby",
-      startedAt: now,
-      lastSeenAt: now
-    });
-
-    isOwner = true;
-    lockAcquiredAt = now;
-    try { console.log(`[LOCK] INSERT -> owner lockId=${lockId} holderId=${instanceId} host=${os.hostname()} pid=${process.pid}`); } catch {}
-    return true;
-  } catch (e) {
-    const code = e && (e.code || e?.errorResponse?.code);
-    const msg = String(e?.message || e || "");
-    const dup = code === 11000 || msg.toLowerCase().includes("duplicate key");
-    if (!dup) {
-      try { console.log("tryAcquireLock insert error:", msg); } catch {}
-      EscribirLog("tryAcquireLock insert error: " + msg, "error");
-      return false;
-    }
-    // duplicate key: ya existe lock -> seguimos
-  }
-  // 1) Si ya existe un lock y NO está stale y NO es mío -> standby (sin upsert)
-  const existing = await LockModel.findById(lockId).lean();
-   if (!existing) {
-    isOwner = false;
-    return false;
-  }
-
-  const last = existing.lastSeenAt ? new Date(existing.lastSeenAt) : null;
-  const isStale = !last || last < stale;
-   const st = String(existing.state || "");
-   // IMPORTANTE:
-   // No permitimos takeover SOLO por state=offline (el panel a veces muestra "inactiva" aunque la sesión siga viva).
-   // El takeover se controla exclusivamente por lease_ms (stale).
-   const isOffline = ["offline", "release_requested", "reset_auth_requested"].includes(st);
-   const isMine = existing.holderId === instanceId;
-   const canTakeover = isStale;
-
-
-  if (!isMine && !canTakeover) {
-    try {
-      const ageMs = last ? (now.getTime() - last.getTime()) : null;
-      console.log(`[LOCK] OCUPADO -> standby lockId=${lockId} holderId=${existing.holderId} host=${existing.host || ''} lastSeenAt=${last ? last.toISOString() : 'null'} ageMs=${ageMs}`);
-    } catch {}
-    isOwner = false;
-    return false;
-  }
-  if (!isMine && canTakeover) {
-    try {
-      const ageMs = last ? (now.getTime() - last.getTime()) : null;
-      const reason = isOffline ? `state=${st}` : `ageMs=${ageMs} lease_ms=${lease_ms}`;
-      console.log(`[LOCK] STALE -> takeover permitido lockId=${lockId} holderId=${existing.holderId} host=${existing.host || ''} lastSeenAt=${last ? last.toISOString() : 'null'} ${reason}`);
-
-    } catch {}
-  }
-
-  if (isMine) {
-    try { console.log(`[LOCK] REENTRY -> ya soy holder lockId=${lockId}`); } catch {}
-  }
-
-  // 2) Existe y es mío o está stale: intentamos tomarlo SIN upsert
-
-  // 3) No existe: lo creo con upsert
-  const doc = await LockModel.findOneAndUpdate(
-   
-    {
-      _id: lockId,
-      $or: [
-        { holderId: instanceId },
-        { lastSeenAt: { $lt: stale } },
-         { lastSeenAt: { $exists: false } },
-        
-      ]
-    },
-    {
-      $set: {
-        tenantId,
-        holderId: instanceId,
-        numero,
-        holderId: instanceId,
-        host: os.hostname(),
-        pid: process.pid,
-        state: "standby",
-        startedAt: now,
-        lastSeenAt: now
-      }
-    },
-    { upsert: false, new: true }
-  ).lean();
-
-  isOwner = !!(doc && doc.holderId === instanceId);
-  if (isOwner) {
-    // Si el doc tiene startedAt lo usamos, sino usamos "now"
-    try { lockAcquiredAt = (doc && doc.startedAt) ? new Date(doc.startedAt) : now; } catch { lockAcquiredAt = now; }
-  }
-  return isOwner;
-}
-
-
-function startHeartbeat() {
-  if (heartbeatTimer) return;
-  heartbeatTimer = setInterval(async () => {
-    try {
-      if (!isOwner) return;
-      if (!await ensureMongo()) return;
-      if (!lockId) return;
-
-      // Política: permitir bloquear/habilitar desde el panel.
-      // Si disabled=true: apagamos el cliente (si estaba) y dejamos el lock vivo con state=disabled.
-      try {
-        const pol = await getPolicySafe();
-        const disabled = !!(pol && pol.disabled === true);
-        if (disabled && lastPolicyDisabled !== true) {
-          lastPolicyDisabled = true;
-          await pushHistory("policy_disabled", { disabled: true, by: "panel" });
-        }
-        if (!disabled && lastPolicyDisabled === true) {
-          lastPolicyDisabled = false;
-          await pushHistory("policy_disabled", { disabled: false, by: "panel" });
-        }
-
-        if (disabled && clientStarted) {
-          try { if (client) await client.destroy(); } catch {}
-          clientStarted = false;
-        }
-      } catch {}
-
-      const desiredState = (lastPolicyDisabled === true)
-        ? "disabled"
-        : (clientStarted ? "online" : (lastQrDataUrl ? "qr" : "starting"));
-
-
-      const r = await LockModel.updateOne(
-        { _id: lockId, holderId: instanceId },
-        {
-          $set: {
-            lastSeenAt: new Date(),
-            // Mantener el panel "ONLINE" mientras esta instancia vive y tiene el lock.
-             state: desiredState,
-            host: os.hostname(),
-            pid: process.pid
-          }
-        }
-      );
-      if (!r || r.matchedCount === 0) {
-        // perdimos el lock
-        isOwner = false;
-        sessionLog(`[LOCK] LOST -> otra PC tomó el lockId=${lockId}`);
-        if (clientStarted) {
-          try { await client.destroy(); } catch {}
-          clientStarted = false;
-        }
-      }
-
-      // Si acaba de habilitarse desde el panel y todavía no iniciamos, intentamos arrancar.
-      try {
-        if (isOwner && lastPolicyDisabled !== true && !clientStarted && !startingNow) {
-          startClientInitialize();
-        }
-      } catch {}
-
-    } catch {}
-  }, heartbeat_ms || 10000);
-}
+// Lock/lease multi-PC removido en modo simplificado.
 
 
 async function startClientInitialize() {
@@ -1368,218 +1011,43 @@ async function startClientInitialize() {
   }
 }
 async function bootstrapWithLock() {
-  // intenta adquirir
-  const ok = await tryAcquireLock();
-  if (ok) {
+  // Modo simplificado:
+  // - no usa lock/lease multi-PC
+  // - inicia WhatsApp apenas corre el script
+  try {
+    lockId = `${tenantId}:${numero}`;
     isOwner = true;
+
     try { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } } catch {}
-    startHeartbeat();
-    startActionPoller();
+    try { if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; } } catch {}
+    try { if (actionTimer) { clearInterval(actionTimer); actionTimer = null; } } catch {}
+
+    console.log("Inicio directo sin lock -> inicializando WhatsApp...");
+    EscribirLog("Inicio directo sin lock -> inicializando WhatsApp...", "event");
+
     await startClientInitialize();
-    return;
-  }
-
-  // standby
-  console.log(`STANDBY: sesión activa en otra PC (${lockId}). No se inicializa WhatsApp acá.`);
-  pushHistory('standby_other_pc', { lockId }).catch(()=>{});
-  EscribirLog(`STANDBY: sesión activa en otra PC (${lockId}).`, "event");
-
-  if (!pollTimer) {
-    pollTimer = setInterval(async () => {
-      try {
-        const ok2 = await tryAcquireLock();
-        if (ok2) {
-          // Ya tomamos el lock: frenamos el poll para no inicializar 2 veces.
-          try { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } } catch {}
-          console.log("LOCK TOMADO (otra PC cayó) -> iniciando...");
-          EscribirLog("LOCK TOMADO (otra PC cayó) -> iniciando...", "event");
-          // IMPORTANTÍSIMO: si no seteamos isOwner, NO corre el heartbeat y el panel queda "inactiva"
-          isOwner = true;
-          startHeartbeat();
-          startActionPoller();
-          await startClientInitialize();
-        }
-      } catch {}
-    }, 8000);
-  }
-}
-
-
-async function forceReleaseLock(finalState) {
-  // Libera el lock SIN borrarlo (así el panel sigue viéndolo) y permite takeover inmediato.
-  // finalState: estado a dejar (ej: 'offline', 'release_requested', 'reset_auth_requested')
-  const st = String(finalState || 'offline');
-  try {
-    if (!await ensureMongo()) return;
-    if (!lockId) return;
-    // Forzamos "stale inmediato" para permitir takeover sin esperar lease_ms.
-    const staleNow = new Date(0);
-    // Solo el holder actual puede soltar el lock.
-    await LockModel.updateOne(
-      { _id: lockId, holderId: instanceId },
-      {
-        $set: {
-          state: st,
-          // Dejamos stale inmediato SOLO cuando liberamos explícitamente.
-          lastSeenAt: staleNow,
-          releasedAt: new Date(),
-          releasedBy: instanceId,
-          lastOwnerHost: os.hostname(),
-        },
-        // IMPORTANTE:
-        // NO hacemos unset de holderId/host/pid porque eso deja el lock "sin dueño"
-        // y otra PC lo toma aunque esta siga viva (panel lo ve como inactiva).
-        // El takeover se controla con lastSeenAt + lease_ms.
-      }
-    );
-
-    isOwner = false;
-    return 'released';
+    return true;
   } catch (e) {
-    try { EscribirLog(`forceReleaseLock error: ${e?.message || e}`, 'error'); } catch {}
+    console.log("bootstrap directo error:", e?.message || e);
+    EscribirLog("bootstrap directo error: " + String(e?.message || e), "error");
+    return false;
   }
 }
 
-async function releaseLock() {
-  try {
-    if (!isOwner) return;
-    if (!await ensureMongo()) return;
-    if (!lockId) return;
-    await LockModel.updateOne(
-      { _id: lockId, holderId: instanceId },
-      { $set: { state: "offline", lastSeenAt: new Date() } }
-    );
-  } catch {}
-}
 
+// Release/acciones remotas removidas en modo simplificado.
 
-
-let actionTimer = null;
-let actionBusy = false;
-
-async function handleActionDoc(doc) {
-  const action = String(doc?.action || "").toLowerCase();
-  const reason = String(doc?.reason || "");
-  try {
-    if (action === "release") {
-      EscribirLog(`Accion RELEASE recibida: ${reason}`, "event");
-      await updateLockStateSafe("release_requested");
-
-      // apagar WA en esta PC y LIBERAR lock (sin borrarlo) para takeover inmediato
-      // best-effort: forzar logout para que WhatsApp corte la sesion anterior
-      try { if (client && typeof client.logout === "function") await client.logout(); } catch {}
-      // 1) best-effort logout: fuerza a WA a cortar la sesión en esta PC
-      try { if (client && typeof client.logout === "function") await client.logout(); } catch {}
-      // 2) destruir hard si existe helper, sino destroy normal
-      try {
-        if (client && typeof destroyClientHard === "function") await destroyClientHard(client);
-        else if (client) await client.destroy();
-      } catch {}
-      try { client = null; } catch {}
-      clientStarted = false;
-     // detener timers locales (no deben seguir marcando estados ni consumir acciones)
-      try { if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; } } catch {}
-      try { if (actionTimer) { clearInterval(actionTimer); actionTimer = null; } } catch {}
-
-      // 3) detener timers locales (evita que siga marcando estados o procesando acciones)
-      try { if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; } } catch {}
-      try { if (actionTimer) { clearInterval(actionTimer); actionTimer = null; } } catch {}
-
-      // 4) liberar lock y dejar stale inmediato para takeover
-      try { await forceReleaseLock("offline"); } catch {}
-   
-      isOwner = false;
-      return "released";
-    }
-
-    if (action === "restart") {
-      EscribirLog(`Accion RESTART recibida: ${reason}`, "event");
-      await updateLockStateSafe("restarting");
-
-      try { if (client) await client.destroy(); } catch {}
-      clientStarted = false;
-
-      // si seguimos siendo owner, reiniciamos
-      isOwner = true;
-      await startClientInitialize();
-      return "restarted";
-    }
-
-    if (action === "resetauth") {
-      // La limpieza de auth remota (GridFS) normalmente se hace del lado servidor admin,
-      // acá solo liberamos para forzar nuevo QR en la próxima inicialización.
-      EscribirLog(`Accion RESET AUTH recibida: ${reason}`, "event");
-      await updateLockStateSafe("reset_auth_requested");
-      try { if (client) await client.destroy(); } catch {}
-      clientStarted = false;
-      try { await forceReleaseLock(); } catch {}
-      isOwner = false;
-      
-      return "reset_auth_requested";
-    }
-
-    return "ignored";
-  } catch (e) {
-    EscribirLog(`Error manejando accion ${action}: ${e?.message || e}`, "error");
-    return "error";
-  }
-}
-
-async function pollActionsOnce() {
-  if (actionBusy) return;
-  if (!isOwner) return;
-  if (!lockId) return;
-  if (!await ensureMongo()) return;
-  if (!ActionModel) return;
-
-  actionBusy = true;
-  try {
-    // Tomar 1 acción pendiente (doneAt no seteado), por lockId
-    const doc = await ActionModel.findOneAndUpdate(
-      { lockId, doneAt: { $exists: false } },
-      { $set: { doneAt: new Date(), doneBy: instanceId } },
-      { sort: { requestedAt: 1 }, new: true }
-    ).lean();
-
-    if (!doc) return;
-    // ✅ Ignorar acciones viejas (pendientes de un owner anterior).
-    // Si se ejecutan, pueden llamar forceReleaseLock() y dejar lastSeenAt=Date(0),
-    // haciendo que el panel muestre "Inactiva/offline" aunque el proceso esté vivo.
-    try {
-     const reqAt = doc.requestedAt ? new Date(doc.requestedAt) : null;
-      if (lockAcquiredAt && reqAt && reqAt.getTime() < lockAcquiredAt.getTime()) {
-        await ActionModel.updateOne(
-          { _id: doc._id },
-          { $set: { result: "stale_ignored" } }
-        );
-        return;
-      }
-    } catch {}
-
-
-    const result = await handleActionDoc(doc);
-    await ActionModel.updateOne({ _id: doc._id }, { $set: { result } });
-  } catch (e) {
-    // si algo falló, liberamos busy y seguimos
-  } finally {
-    actionBusy = false;
-  }
-}
-
-function startActionPoller() {
-  if (actionTimer) return;
-  actionTimer = setInterval(pollActionsOnce, 4000);
-}
 
 
 async function gracefulShutdown(signal) {
   try { sessionLog(`[SHUTDOWN] ${signal} -> cerrando WhatsApp...`); } catch {}
   try { if (autoUpdateTimer) { clearInterval(autoUpdateTimer); autoUpdateTimer = null; } } catch {}
-   try { if (client) { try { await client.destroy(); } catch {} } } catch {}
-  // IMPORTANTE: liberamos el lock para takeover inmediato (sin esperar lease_ms)
-  try { await forceReleaseLock(); } catch {}
+  try { if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; } } catch {}
+  try { if (actionTimer) { clearInterval(actionTimer); actionTimer = null; } } catch {}
+  try { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } } catch {}
+  try { if (client) { try { await client.destroy(); } catch {} } } catch {}
   try { isOwner = false; } catch {}
- 
+
   process.exit(0);
 
 }
@@ -1783,7 +1251,7 @@ function attachClientHandlers() {
 
 client.on('message', async message => {
 
-if (message.from=='5493462514448@c.us'   ){
+
 
   var indice_telefono = indexOf2d(message.from);
 
@@ -1966,7 +1434,7 @@ EscribirLog(message.from +' '+message.to+' '+message.type+' '+message.body ,"eve
       procesar_mensaje(jsonGlobal[indice_telefono][2], message);
 
      }
-}  //
+//}  //
 
 });
 
