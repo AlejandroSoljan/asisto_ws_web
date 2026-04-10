@@ -1,4 +1,4 @@
-{"name":"whatsapp-api","version":"4.00.02",
+{"name":"whatsapp-api","version":"4.00.05",
 "script":"Script_Asisto",
 "description":"Whatsapp api",
 "main":"app_asisto_ws.js",
@@ -26,4 +26,4 @@
 "utf8":"^3.0.0",
 "whatsapp-web.js":"v1.34.6",
 "wwebjs-mongo":"^1.1.0"},
-"devDependencies":{"nodemon":"^2.0.22","npm-run-all":"^4.1.5"},"version_cliente":{"version":"^4.00.02","script":"app_asisto_ws.js"}}
+"devDependencies":{"nodemon":"^2.0.22","npm-run-all":"^4.1.5"},"version_cliente":{"version":"^4.00.05","script":"app_asisto_ws.js"}}
