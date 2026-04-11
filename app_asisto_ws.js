@@ -1,5 +1,5 @@
-﻿/*script:app_asisto*/
-/*version:4.06.08   10/04/2026*/
+/*script:app_asisto*/
+/*version:1.06.02   11/07/2025*/
 
 // =========================
 // FIXES 2026-01:
@@ -80,50 +80,56 @@ function readBootstrapFromFile() {
 function applyTenantConfig(conf) {
   if (!conf || typeof conf !== "object") return;
 
+  const hasValue = (v) => v !== undefined && v !== null && !(typeof v === "string" && v.trim() === "");
+  const asNumber = (v, current) => {
+    if (!hasValue(v)) return current;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : current;
+  };
+  const asString = (v, current = "") => {
+    if (!hasValue(v)) return current;
+    return String(v).trim();
+  };
+
   // Core
-  if (conf.puerto !== undefined && conf.puerto !== null && conf.puerto !== "") {
-    port = Number(conf.puerto) || port;
-  }
+  if (hasValue(conf.puerto)) port = asNumber(conf.puerto, port);
   if (conf.headless !== undefined) {
-    headless = conf.headless;
-    if (typeof headless === "string") headless = headless.toLowerCase().trim() === "true";
-    else headless = !!headless;
+    headless = parseBoolLike(conf.headless, !!headless);
   }
-  if (!numero && (conf.numero || conf.NUMERO)) numero = String(conf.numero || conf.NUMERO).trim();
-  if (conf.status_token !== undefined) status_token = String(conf.status_token || status_token || "").trim();
+  if (!numero && (conf.numero || conf.NUMERO)) numero = asString(conf.numero || conf.NUMERO, numero);
+  if (conf.status_token !== undefined) status_token = asString(conf.status_token, status_token);
 
   // Lock/lease
-  if (conf.lease_ms !== undefined) lease_ms = Number(conf.lease_ms) || lease_ms;
-  if (conf.heartbeat_ms !== undefined) heartbeat_ms = Number(conf.heartbeat_ms) || heartbeat_ms;
-  if (conf.backup_every_ms !== undefined) backup_every_ms = Number(conf.backup_every_ms) || backup_every_ms;
+  lease_ms = asNumber(conf.lease_ms, lease_ms);
+  heartbeat_ms = asNumber(conf.heartbeat_ms, heartbeat_ms);
+  backup_every_ms = asNumber(conf.backup_every_ms, backup_every_ms);
   if (conf.auth_base_path !== undefined || conf.auth_path !== undefined) {
-    auth_base_path = String(conf.auth_base_path || conf.auth_path || auth_base_path || "").trim();
+    auth_base_path = asString(conf.auth_base_path || conf.auth_path, auth_base_path);
   }
   // En Windows el backup (zip) puede bloquear el event loop varios segundos.
   // Si lease_ms es muy bajo, otra PC toma el lock aunque esta siga viva.
   if (!Number.isFinite(lease_ms) || lease_ms < MIN_LEASE_MS) lease_ms = MIN_LEASE_MS;
-
 
   if (conf.auth_mode !== undefined && conf.auth_mode !== null && String(conf.auth_mode).trim() !== '') {
     auth_mode = String(conf.auth_mode).trim().toLowerCase();
   }
 
   // Mensajes / límites
-  if (conf.seg_desde !== undefined) seg_desde = conf.seg_desde;
-  if (conf.seg_hasta !== undefined) seg_hasta = conf.seg_hasta;
-  if (conf.dsn !== undefined) dsn = conf.dsn;
-  if (conf.seg_msg !== undefined) seg_msg = conf.seg_msg;
-  if (conf.seg_tele !== undefined) seg_tele = conf.seg_tele;
-  if (conf.api !== undefined) api = conf.api;
-  if (conf.msg_inicio !== undefined) msg_inicio = conf.msg_inicio;
-  if (conf.msg_fin !== undefined) msg_fin = conf.msg_fin;
-  if (conf.cant_lim !== undefined) cant_lim = conf.cant_lim;
-  if (conf.msg_lim !== undefined) msg_lim = conf.msg_lim;
-  if (conf.time_cad !== undefined) time_cad = conf.time_cad;
-  if (conf.msg_cad !== undefined) msg_cad = conf.msg_cad;
-  if (conf.msg_can !== undefined) msg_can = conf.msg_can;
-  if (conf.nom_emp !== undefined) nom_chatbot = conf.nom_emp;
-  if (conf.nom_chatbot !== undefined) nom_chatbot = conf.nom_chatbot;
+  seg_desde = asNumber(conf.seg_desde, seg_desde);
+  seg_hasta = asNumber(conf.seg_hasta, seg_hasta);
+  if (conf.dsn !== undefined) dsn = String(conf.dsn);
+  seg_msg = asNumber(conf.seg_msg, seg_msg);
+  seg_tele = asNumber(conf.seg_tele, seg_tele);
+  if (conf.api !== undefined) api = String(conf.api);
+  if (conf.msg_inicio !== undefined) msg_inicio = String(conf.msg_inicio ?? "");
+  if (conf.msg_fin !== undefined) msg_fin = String(conf.msg_fin ?? "");
+  cant_lim = asNumber(conf.cant_lim, cant_lim);
+  if (conf.msg_lim !== undefined) msg_lim = String(conf.msg_lim ?? "");
+  time_cad = asNumber(conf.time_cad, time_cad);
+  if (conf.msg_cad !== undefined) msg_cad = String(conf.msg_cad ?? "");
+  if (conf.msg_can !== undefined) msg_can = String(conf.msg_can ?? "");
+  if (conf.nom_emp !== undefined) nom_chatbot = String(conf.nom_emp);
+  if (conf.nom_chatbot !== undefined) nom_chatbot = String(conf.nom_chatbot);
 
   applyAutoUpdateConfig(conf);
 }
@@ -164,6 +170,86 @@ async function loadTenantConfigFromDb() {
 function sessionLog(msg) {
   try { console.log(msg); } catch {}
   try { EscribirLog(msg, "event"); } catch {}
+}
+
+function arDatePartsForStats(date) {
+  try {
+    const parts = new Intl.DateTimeFormat('sv-SE', {
+      timeZone: AR_TZ,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+      hour12: false
+    }).formatToParts(date || new Date());
+
+    const map = {};
+    for (const p of (parts || [])) {
+      if (p && p.type) map[p.type] = p.value;
+    }
+    const y = map.year || '0000';
+    const m = map.month || '00';
+    const d = map.day || '00';
+    const hh = map.hour || '00';
+    const mm = map.minute || '00';
+    const ss = map.second || '00';
+    return {
+      dayKey: `${y}-${m}-${d}`,
+      atLocal: `${y}-${m}-${d}T${hh}:${mm}:${ss}`
+    };
+  } catch {
+    const dt = date || new Date();
+    const iso = dt.toISOString();
+    return { dayKey: iso.slice(0, 10), atLocal: iso.slice(0, 19) };
+  }
+}
+
+async function logMessageStat(direction, contact, payload) {
+  try {
+    if (!tenantId || !numero) return;
+    if (!await ensureMongo()) return;
+    if (!MessageLogModel) return;
+
+    const dir = String(direction || '').trim().toLowerCase();
+    if (dir !== 'in' && dir !== 'out') return;
+
+    const now = new Date();
+    const parts = arDatePartsForStats(now);
+
+    let messageType = 'text';
+    let hasMedia = false;
+    let body = '';
+
+    if (typeof payload === 'string') {
+      body = payload;
+      messageType = 'text';
+    } else if (payload && typeof payload === 'object') {
+      if (typeof payload.body === 'string') body = payload.body;
+      if (typeof payload.caption === 'string' && !body) body = payload.caption;
+      if (payload.type) messageType = String(payload.type);
+      if (payload.mimetype || payload.filename || payload.data) hasMedia = true;
+      if (payload.hasMedia === true) hasMedia = true;
+      if (!messageType || messageType === 'undefined') messageType = hasMedia ? 'media' : 'text';
+    }
+
+    body = String(body || '');
+    const cleanContact = String(contact || '').replace(/@c\.us$/i, '').trim();
+    if (!cleanContact) return;
+
+    await MessageLogModel.create({
+      tenantId: String(tenantId || ''),
+      numero: String(numero || ''),
+      contact: cleanContact,
+      direction: dir,
+      messageType: messageType || (hasMedia ? 'media' : 'text'),
+      body,
+      bodyLength: body.length,
+      hasMedia: !!hasMedia,
+      at: now,
+      atLocal: parts.atLocal,
+      dayKey: parts.dayKey
+    });
+  } catch (e) {
+    try { EscribirLog('logMessageStat error: ' + String(e?.message || e), 'error'); } catch {}
+  }
 }
 
 
@@ -442,6 +528,7 @@ let startingNow = false;       // evita inicializaciones concurrentes (doble Chr
 let lastQrRaw = null;
 let lastQrDataUrl = null;
 let lastQrAt = null;
+let localWsPanelState = 'idle';
 // Cache liviano: si la política marca disabled=true, no inicializamos WhatsApp.
 let lastPolicyDisabled = null;
 let mongoReady = false;
@@ -449,10 +536,14 @@ let LockModel = null;
 let ActionModel = null;
 let PolicyModel = null;      // wa_wweb_policies
 let HistoryModel = null;     // wa_wweb_history
+let MessageLogModel = null;  // wa_wweb_message_log
 let heartbeatTimer = null;
+let actionTimer = null;
 let pollTimer = null;
+let actionBusy = false;
+let heartbeatBusy = false;
 var a = 0;
-//var port = 8002
+var port = Number(process.env.PORT || 8002);
 var headless = true;
 var seg_desde = 80000;
 var seg_hasta = 10000;
@@ -620,18 +711,10 @@ function initMongoModelsIfNeeded() {
       const PolicySchema = new mongoose.Schema(
         {
           _id: { type: String },
-          // Compat: algunos deployments antiguos guardaban tenantid.
           tenantid: { type: String },
-          // Canonical: lo usamos para filtrar desde el panel.
           tenantId: { type: String, index: true },
           numero: { type: String, index: true },
-          // Nuevo: si disabled=true, el script no inicializa WhatsApp (queda "habilitado/bloqueado" desde el panel)
-          disabled: { type: Boolean, default: false },
-          mode: { type: String, default: "any" },          // any | pinned
-          pinnedHost: { type: String, default: "" },       // hostname permitido (si mode=pinned)
-          blockedHosts: { type: [String], default: [] },   // hostnames bloqueados
-          updatedAt: { type: Date },
-          updatedBy: { type: String }
+          disabled: { type: Boolean, default: false }
         },
         { collection: "wa_wweb_policies" }
       );
@@ -642,7 +725,7 @@ function initMongoModelsIfNeeded() {
       const HistorySchema = new mongoose.Schema(
         {
           lockId: { type: String, index: true },
-          event: { type: String, index: true },            // startup|standby|lock_acquired|qr|ready|policy_blocked|policy_pinned|release|...
+          event: { type: String, index: true },
           host: { type: String },
           pid: { type: Number },
           detail: { type: mongoose.Schema.Types.Mixed },
@@ -678,15 +761,38 @@ function initMongoModelsIfNeeded() {
       const ActionSchema = new mongoose.Schema(
         {
           lockId: { type: String, index: true },
-          action: { type: String, index: true },           // release | restart | logout
+          action: { type: String, index: true },
           reason: { type: String },
           requestedBy: { type: String },
           requestedAt: { type: Date, default: Date.now, index: true },
-          consumedAt: { type: Date }
+          consumedAt: { type: Date },
+          doneAt: { type: Date, index: true },
+          doneBy: { type: String },
+          result: { type: String }
         },
         { collection: "wa_wweb_actions" }
       );
       ActionModel = mongoose.models.WaWwebAction || mongoose.model("WaWwebAction", ActionSchema);
+    }
+
+    if (!MessageLogModel) {
+      const MessageLogSchema = new mongoose.Schema(
+        {
+          tenantId: { type: String, index: true },
+          numero: { type: String, index: true },
+          contact: { type: String, index: true },
+          direction: { type: String, index: true },
+          messageType: { type: String, index: true },
+          body: { type: String },
+          bodyLength: { type: Number },
+          hasMedia: { type: Boolean, default: false },
+          at: { type: Date, default: Date.now, index: true },
+          atLocal: { type: String },
+          dayKey: { type: String, index: true }
+        },
+        { collection: "wa_wweb_message_log" }
+      );
+      MessageLogModel = mongoose.models.WaWwebMessageLog || mongoose.model("WaWwebMessageLog", MessageLogSchema);
     }
   } catch {}
 }
@@ -718,6 +824,10 @@ async function loadTenantConfigFromDbMinimal() {
     }
 
     const conf = (doc && doc.configuracion && typeof doc.configuracion === "object") ? doc.configuracion : doc;
+
+    // Mantener la config completa del tenant en memoria y aplicarla al runtime.
+    tenantConfig = conf;
+    applyTenantConfig(conf);
 
     // Aplicar SOLO si vienen valores definidos (no pisar con vacíos)
     if (!numero && conf.numero) numero = String(conf.numero).trim();
@@ -772,6 +882,8 @@ async function loadTenantConfigFromDbMinimal() {
 }
 
 
+
+
 async function refreshTenantConfigFromDbPerMessage() {
   try {
     if (!tenantId || !mongo_uri) return tenantConfig;
@@ -796,13 +908,11 @@ async function refreshTenantConfigFromDbPerMessage() {
   return null;
 }
 
-
-
 async function pushHistory(event, detail) {
   try {
-    if (!HistoryModel) return;
-    if (!lockId) return;
-    await HistoryModel.create({
+    if (!await ensureMongo()) return null;
+    if (!HistoryModel || !lockId) return null;
+    return await HistoryModel.create({
       lockId,
       event: String(event || ""),
       host: os.hostname(),
@@ -810,13 +920,15 @@ async function pushHistory(event, detail) {
       detail: detail || null,
       at: new Date()
     });
-  } catch {}
+  } catch {
+    return null;
+  }
 }
 
 async function getPolicySafe() {
   try {
+    if (!await ensureMongo()) return null;
     if (!PolicyModel) return null;
-    // El panel guarda políticas por {tenantId, numero}. Mantener fallback por _id por compat.
     if (tenantId && numero) {
       const p = await PolicyModel.findOne({ tenantId: String(tenantId), numero: String(numero) }).lean();
       if (p) return p;
@@ -831,18 +943,84 @@ async function getPolicySafe() {
   }
 }
 
+async function heartbeatTick() {
+  try {
+    if (heartbeatBusy) return;
+    heartbeatBusy = true;
+
+    if (!isOwner || !lockId) return;
+
+    await updateLockStateSafe(localWsPanelState || 'online').catch(() => {});
+
+    const pol = await getPolicySafe();
+    const disabled = !!(pol && pol.disabled === true);
+
+    if (disabled) {
+      lastPolicyDisabled = true;
+      if (clientStarted || localWsPanelState !== 'disabled') {
+        try { await updateLockStateSafe('disabled'); } catch {}
+      }
+      if (clientStarted) {
+        try {
+          if (client && typeof destroyClientHard === "function") await destroyClientHard(client);
+          else if (client) await client.destroy();
+        } catch {}
+        try { client = null; } catch {}
+        clientStarted = false;
+      }
+      return;
+    }
+
+    if (lastPolicyDisabled === true) {
+      lastPolicyDisabled = false;
+      if (isOwner && !clientStarted && !startingNow) {
+        try { await startClientInitialize(); } catch {}
+      }
+    }
+  } catch {}
+  finally {
+    heartbeatBusy = false;
+  }
+}
+
+function startHeartbeat() {
+  try { if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; } } catch {}
+
+  const intervalMs = Math.max(5000, Number(heartbeat_ms) || 5000);
+
+  heartbeatTick().catch(() => {});
+
+  heartbeatTimer = setInterval(() => {
+    heartbeatTick().catch(() => {});
+  }, intervalMs);
+}
+
 function hostName() {
   return os.hostname();
 }
 
 async function getLockDocSafe() {
   try {
-    if (!await ensureMongo()) return null;
-    if (!lockId) return null;
-    return await LockModel.findById(lockId).lean();
-  } catch {
-    return null;
-  }
+    if (await ensureMongo() && LockModel && lockId) {
+      const doc = await LockModel.findById(lockId).lean();
+      if (doc) return doc;
+    }
+  } catch {}
+
+  return {
+    _id: lockId || `${tenantId}:${numero}`,
+    tenantId,
+    tenantid: tenantId,
+    numero,
+    holderId: instanceId,
+    host: os.hostname(),
+    pid: process.pid,
+    state: localWsPanelState,
+    startedAt: lockAcquiredAt || null,
+    lastSeenAt: new Date(),
+    lastQrAt,
+    lastQrDataUrl
+  };
 }
 
 app.get("/status", requireStatusToken, async (req, res) => {
@@ -889,17 +1067,13 @@ app.get("/status/qr", requireStatusToken, async (req, res) => {
 });
 
 app.post("/control/release", requireStatusToken, async (req, res) => {
-  // Libera el lock y apaga el cliente en esta PC (standby manual).
   try {
-    if (!isOwner) return res.status(409).json({ ok: false, error: "not_owner" });
-
-    // best-effort: apagar WA
-    try { if (clientStarted) await client.destroy(); } catch {}
+    try { if (clientStarted && client) await client.destroy(); } catch {}
     clientStarted = false;
-
-    await forceReleaseLock();
+    localWsPanelState = 'offline';
+    try { if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; } } catch {}
+    await updateLockStateSafe('offline');
     isOwner = false;
-
     return res.json({ ok: true, released: true });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e?.message || e) });
@@ -925,8 +1099,8 @@ app.post("/control/release", requireStatusToken, async (req, res) => {
     startAutoUpdateScheduler();
 
     bootstrapWithLock().catch(e => {
-      console.log('bootstrapWithLock error:', e?.message || e);
-      EscribirLog('bootstrapWithLock error: ' + String(e?.message || e), 'error');
+      console.log('bootstrap inicio directo error:', e?.message || e);
+      EscribirLog('bootstrap inicio directo error: ' + String(e?.message || e), 'error');
     });
   } catch (e) {
     console.log('FATAL bootstrap:', e?.message || e);
@@ -1039,7 +1213,14 @@ async function safeSend(to, content, opts) {
       }
        const sendOpts = (opts && typeof opts === 'object') ? { ...opts } : {};
       if (typeof sendOpts.sendSeen === 'undefined') sendOpts.sendSeen = false;
-      return await client.sendMessage(to, content, sendOpts);
+      const sent = await client.sendMessage(to, content, sendOpts);
+      try {
+        const logPayload = (content && typeof content === 'object')
+          ? { body: sendOpts.caption || '', type: content.mimetype ? 'media' : (content.type || 'text'), mimetype: content.mimetype || '', filename: content.filename || '', data: content.data ? '[data]' : '' }
+          : { body: String(content || ''), type: 'text', hasMedia: false };
+        await logMessageStat('out', to, logPayload);
+      } catch {}
+      return sent;
     } catch (e) {
       const msg = String(e && e.message ? e.message : e);
       const transient = msg.includes('Evaluation failed') ||
@@ -1058,279 +1239,71 @@ async function safeSend(to, content, opts) {
 // =========================
 async function updateLockStateSafe(state) {
   try {
-    if (!isOwner) return;
-    if (!await ensureMongo()) return;
+    localWsPanelState = String(state || localWsPanelState || 'idle');
     if (!lockId) return;
-    const now = new Date();
-    const update = { $set: { state: state || null, lastSeenAt: now, tenantId: tenantId, tenantid: tenantId } };
 
-    // Si salimos del estado QR, limpiamos el QR guardado para evitar confusión.
-    if (state && state !== "qr") {
+    const now = new Date();
+    const update = {
+      $set: {
+        tenantId: tenantId,
+        tenantid: tenantId,
+        numero: numero,
+        holderId: instanceId,
+        host: os.hostname(),
+        pid: process.pid,
+        state: localWsPanelState,
+        startedAt: lockAcquiredAt || now,
+        lastSeenAt: now
+      }
+    };
+
+    if (state && state !== 'qr') {
       update.$unset = { lastQrAt: "", lastQrDataUrl: "" };
+      lastQrAt = null;
+      lastQrDataUrl = null;
     }
 
-    await LockModel.updateOne({ _id: lockId, holderId: instanceId }, update);
+    if (!await ensureMongo()) return;
+    if (!LockModel) return;
+    await LockModel.updateOne({ _id: lockId }, update, { upsert: true });
   } catch {}
 }
 
 // Guarda el último QR en el lock para poder verlo desde el panel admin (/admin/wweb)
 async function updateLockQrDataSafe(qrDataUrl, qrAtIso) {
   try {
-    if (!isOwner) return;
-    if (!qrDataUrl) return;
-    if (!await ensureMongo()) return;
-    if (!lockId) return;
-    // OJO: este helper corre en el handler de QR. No debe depender de variables
-    // locales de otras funciones (por ej. "staleNow"), porque si falla queda el
-    // panel sin lastQrDataUrl y el botón "Ver QR" se deshabilita.
-    const now = new Date();
+    if (qrDataUrl) lastQrDataUrl = String(qrDataUrl);
+    if (qrAtIso) lastQrAt = String(qrAtIso);
+    localWsPanelState = 'qr';
 
+    if (!lockId) return;
+    if (!await ensureMongo()) return;
+    if (!LockModel) return;
+
+    const now = new Date();
     await LockModel.updateOne(
-      { _id: lockId, holderId: instanceId },
+      { _id: lockId },
       {
         $set: {
-          state: "qr",
           tenantId: tenantId,
-          // Mantener heartbeat "vivo" mientras se espera el escaneo.
+          tenantid: tenantId,
+          numero: numero,
+          holderId: instanceId,
+          host: os.hostname(),
+          pid: process.pid,
+          state: 'qr',
+          startedAt: lockAcquiredAt || now,
           lastSeenAt: now,
           lastQrAt: String(qrAtIso || ""),
-          lastQrDataUrl: String(qrDataUrl),
-        },
-      }
+          lastQrDataUrl: String(qrDataUrl || "")
+        }
+      },
+      { upsert: true }
     );
   } catch {}
 }
 
-async function tryAcquireLock() {
-  // Para Opción B necesitamos tenantId + numero + mongo_uri
-  if (!tenantId || !numero || !mongo_uri) {
-    console.log("ERROR: Falta tenantId/numero/mongo_uri en configuracion.json. No se inicia WhatsApp.");
-    EscribirLog("ERROR: Falta tenantId/numero/mongo_uri en configuracion.json. No se inicia WhatsApp.", "error");
-    return false;
-  }
-
-  // Normalizar tenantId (consistencia en Mongo / evitar dobles locks)
-  tenantId = String(tenantId || '').trim();
-  if (tenantId) tenantId = tenantId.toUpperCase();
-
-  lockId = `${tenantId}:${numero}`;
-
-  const okMongo = await ensureMongo();
-  if (!okMongo || !LockModel) {
-    console.log("ERROR: No se pudo conectar a Mongo. No se inicia WhatsApp.");
-    EscribirLog("ERROR: No se pudo conectar a Mongo. No se inicia WhatsApp.", "error");
-    return false;
-  }
-
-  
-  // Aplicar política de sesión (bloqueos / pin por PC) antes de intentar lock
-  const pol = await getPolicySafe();
-  const hn = hostName();
-  if (pol) {
-    const blocked = Array.isArray(pol.blockedHosts) && pol.blockedHosts.includes(hn);
-    const pinned =
-     String(pol.mode || "any") === "pinned" &&
-      String(pol.pinnedHost || "").trim() &&
-      String(pol.pinnedHost || "").trim() !== hn;
-
-    if (blocked) {
-      isOwner = false;
-      await updateLockStateSafe("standby");
-      await pushHistory("policy_blocked", { host: hn, policy: pol });
-      console.log(`POLICY: Esta PC (${hn}) está BLOQUEADA para ${lockId}. STANDBY.`);
-      EscribirLog(`POLICY: PC bloqueada (${hn}) para ${lockId}.`, "event");
-      return false;
-    }
-    if (pinned) {
-      isOwner = false;
-      await updateLockStateSafe("standby");
-      await pushHistory("policy_pinned", { host: hn, pinnedHost: pol.pinnedHost, policy: pol });
-      console.log(`POLICY: Sesión fijada a otra PC (${pol.pinnedHost}). Esta PC (${hn}) queda en STANDBY.`);
-      EscribirLog(`POLICY: Sesión fijada a ${pol.pinnedHost}. Esta PC (${hn}) standby.`, "event");
-      return false;
-    }
-  }
-
-const now = new Date();
-  const stale = new Date(now.getTime() - (Number(lease_ms) || 30000));
-
-  // ------------------------------------------------------------
-  // FIX: Evitar que DOS PCs "ganen" el lock en el arranque.
-  // Antes se hacía upsert sobre {_id} y podía pisar holderId si otra PC insertaba justo antes.
-  // Ahora: intentamos INSERT primero (solo 1 puede ganar). Si hay duplicate key, seguimos con el flujo normal.
-  // ------------------------------------------------------------
-  try {
-    await LockModel.create({
-      _id: lockId,
-      tenantId,
-      tenantid: tenantId,
-      numero,
-      holderId: instanceId,
-      host: os.hostname(),
-      pid: process.pid,
-      state: "standby",
-      startedAt: now,
-      lastSeenAt: now
-    });
-
-    isOwner = true;
-    lockAcquiredAt = now;
-    try { console.log(`[LOCK] INSERT -> owner lockId=${lockId} holderId=${instanceId} host=${os.hostname()} pid=${process.pid}`); } catch {}
-    return true;
-  } catch (e) {
-    const code = e && (e.code || e?.errorResponse?.code);
-    const msg = String(e?.message || e || "");
-    const dup = code === 11000 || msg.toLowerCase().includes("duplicate key");
-    if (!dup) {
-      try { console.log("tryAcquireLock insert error:", msg); } catch {}
-      EscribirLog("tryAcquireLock insert error: " + msg, "error");
-      return false;
-    }
-    // duplicate key: ya existe lock -> seguimos
-  }
-  // 1) Si ya existe un lock y NO está stale y NO es mío -> standby (sin upsert)
-  const existing = await LockModel.findById(lockId).lean();
-   if (!existing) {
-    isOwner = false;
-    return false;
-  }
-
-  const last = existing.lastSeenAt ? new Date(existing.lastSeenAt) : null;
-  const isStale = !last || last < stale;
-   const st = String(existing.state || "");
-   // IMPORTANTE:
-   // No permitimos takeover SOLO por state=offline (el panel a veces muestra "inactiva" aunque la sesión siga viva).
-   // El takeover se controla exclusivamente por lease_ms (stale).
-   const isOffline = ["offline", "release_requested", "reset_auth_requested"].includes(st);
-   const isMine = existing.holderId === instanceId;
-   const canTakeover = isStale;
-
-
-  if (!isMine && !canTakeover) {
-    try {
-      const ageMs = last ? (now.getTime() - last.getTime()) : null;
-      console.log(`[LOCK] OCUPADO -> standby lockId=${lockId} holderId=${existing.holderId} host=${existing.host || ''} lastSeenAt=${last ? last.toISOString() : 'null'} ageMs=${ageMs}`);
-    } catch {}
-    isOwner = false;
-    return false;
-  }
-  if (!isMine && canTakeover) {
-    try {
-      const ageMs = last ? (now.getTime() - last.getTime()) : null;
-      const reason = isOffline ? `state=${st}` : `ageMs=${ageMs} lease_ms=${lease_ms}`;
-      console.log(`[LOCK] STALE -> takeover permitido lockId=${lockId} holderId=${existing.holderId} host=${existing.host || ''} lastSeenAt=${last ? last.toISOString() : 'null'} ${reason}`);
-
-    } catch {}
-  }
-
-  if (isMine) {
-    try { console.log(`[LOCK] REENTRY -> ya soy holder lockId=${lockId}`); } catch {}
-  }
-
-  // 2) Existe y es mío o está stale: intentamos tomarlo SIN upsert
-
-  // 3) No existe: lo creo con upsert
-  const doc = await LockModel.findOneAndUpdate(
-   
-    {
-      _id: lockId,
-      $or: [
-        { holderId: instanceId },
-        { lastSeenAt: { $lt: stale } },
-         { lastSeenAt: { $exists: false } },
-        
-      ]
-    },
-    {
-      $set: {
-        tenantId,
-        holderId: instanceId,
-        numero,
-        holderId: instanceId,
-        host: os.hostname(),
-        pid: process.pid,
-        state: "standby",
-        startedAt: now,
-        lastSeenAt: now
-      }
-    },
-    { upsert: false, new: true }
-  ).lean();
-
-  isOwner = !!(doc && doc.holderId === instanceId);
-  if (isOwner) {
-    // Si el doc tiene startedAt lo usamos, sino usamos "now"
-    try { lockAcquiredAt = (doc && doc.startedAt) ? new Date(doc.startedAt) : now; } catch { lockAcquiredAt = now; }
-  }
-  return isOwner;
-}
-
-
-function startHeartbeat() {
-  if (heartbeatTimer) return;
-  heartbeatTimer = setInterval(async () => {
-    try {
-      if (!isOwner) return;
-      if (!await ensureMongo()) return;
-      if (!lockId) return;
-
-      // Política: permitir bloquear/habilitar desde el panel.
-      // Si disabled=true: apagamos el cliente (si estaba) y dejamos el lock vivo con state=disabled.
-      try {
-        const pol = await getPolicySafe();
-        const disabled = !!(pol && pol.disabled === true);
-        if (disabled && lastPolicyDisabled !== true) {
-          lastPolicyDisabled = true;
-          await pushHistory("policy_disabled", { disabled: true, by: "panel" });
-        }
-        if (!disabled && lastPolicyDisabled === true) {
-          lastPolicyDisabled = false;
-          await pushHistory("policy_disabled", { disabled: false, by: "panel" });
-        }
-
-        if (disabled && clientStarted) {
-          try { if (client) await client.destroy(); } catch {}
-          clientStarted = false;
-        }
-      } catch {}
-
-      const desiredState = (lastPolicyDisabled === true)
-        ? "disabled"
-        : (clientStarted ? "online" : (lastQrDataUrl ? "qr" : "starting"));
-
-
-      const r = await LockModel.updateOne(
-        { _id: lockId, holderId: instanceId },
-        {
-          $set: {
-            lastSeenAt: new Date(),
-            // Mantener el panel "ONLINE" mientras esta instancia vive y tiene el lock.
-             state: desiredState,
-            host: os.hostname(),
-            pid: process.pid
-          }
-        }
-      );
-      if (!r || r.matchedCount === 0) {
-        // perdimos el lock
-        isOwner = false;
-        sessionLog(`[LOCK] LOST -> otra PC tomó el lockId=${lockId}`);
-        if (clientStarted) {
-          try { await client.destroy(); } catch {}
-          clientStarted = false;
-        }
-      }
-
-      // Si acaba de habilitarse desde el panel y todavía no iniciamos, intentamos arrancar.
-      try {
-        if (isOwner && lastPolicyDisabled !== true && !clientStarted && !startingNow) {
-          startClientInitialize();
-        }
-      } catch {}
-
-    } catch {}
-  }, heartbeat_ms || 10000);
-}
+// Lock/lease multi-PC removido en modo simplificado.
 
 
 async function startClientInitialize() {
@@ -1393,160 +1366,122 @@ async function startClientInitialize() {
   }
 }
 async function bootstrapWithLock() {
-  // intenta adquirir
-  const ok = await tryAcquireLock();
-  if (ok) {
+  // Modo simplificado:
+  // - NO usa standby
+  // - NO espera takeover de otra PC
+  // - inicia WhatsApp apenas corre el script
+  try {
+    lockId = `${tenantId}:${numero}`;
     isOwner = true;
+    if (!lockAcquiredAt) lockAcquiredAt = new Date();
+
     try { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } } catch {}
+    try { if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; } } catch {}
+    try { if (actionTimer) { clearInterval(actionTimer); actionTimer = null; } } catch {}
+
+    await updateLockStateSafe('starting');
     startHeartbeat();
     startActionPoller();
+
+    console.log("Inicio directo sin standby -> inicializando WhatsApp...");
+    EscribirLog("Inicio directo sin standby -> inicializando WhatsApp...", "event");
+
     await startClientInitialize();
-    return;
-  }
-
-  // standby
-  console.log(`STANDBY: sesión activa en otra PC (${lockId}). No se inicializa WhatsApp acá.`);
-  pushHistory('standby_other_pc', { lockId }).catch(()=>{});
-  EscribirLog(`STANDBY: sesión activa en otra PC (${lockId}).`, "event");
-
-  if (!pollTimer) {
-    pollTimer = setInterval(async () => {
-      try {
-        const ok2 = await tryAcquireLock();
-        if (ok2) {
-          // Ya tomamos el lock: frenamos el poll para no inicializar 2 veces.
-          try { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } } catch {}
-          console.log("LOCK TOMADO (otra PC cayó) -> iniciando...");
-          EscribirLog("LOCK TOMADO (otra PC cayó) -> iniciando...", "event");
-          // IMPORTANTÍSIMO: si no seteamos isOwner, NO corre el heartbeat y el panel queda "inactiva"
-          isOwner = true;
-          startHeartbeat();
-          startActionPoller();
-          await startClientInitialize();
-        }
-      } catch {}
-    }, 8000);
+    return true;
+  } catch (e) {
+    console.log("bootstrap directo error:", e?.message || e);
+    EscribirLog("bootstrap directo error: " + String(e?.message || e), "error");
+    return false;
   }
 }
 
 
 async function forceReleaseLock(finalState) {
-  // Libera el lock SIN borrarlo (así el panel sigue viéndolo) y permite takeover inmediato.
-  // finalState: estado a dejar (ej: 'offline', 'release_requested', 'reset_auth_requested')
   const st = String(finalState || 'offline');
   try {
     if (!await ensureMongo()) return;
-    if (!lockId) return;
-    // Forzamos "stale inmediato" para permitir takeover sin esperar lease_ms.
-    const staleNow = new Date(0);
-    // Solo el holder actual puede soltar el lock.
+    if (!lockId || !LockModel) return;
+
     await LockModel.updateOne(
-      { _id: lockId, holderId: instanceId },
+      { _id: lockId },
       {
         $set: {
+          tenantId,
+          tenantid: tenantId,
+          numero,
+          holderId: instanceId,
+          host: os.hostname(),
+          pid: process.pid,
           state: st,
-          // Dejamos stale inmediato SOLO cuando liberamos explícitamente.
-          lastSeenAt: staleNow,
+          lastSeenAt: new Date(),
           releasedAt: new Date(),
-          releasedBy: instanceId,
-          lastOwnerHost: os.hostname(),
-        },
-        // IMPORTANTE:
-        // NO hacemos unset de holderId/host/pid porque eso deja el lock "sin dueño"
-        // y otra PC lo toma aunque esta siga viva (panel lo ve como inactiva).
-        // El takeover se controla con lastSeenAt + lease_ms.
-      }
+          releasedBy: instanceId
+        }
+      },
+      { upsert: true }
     );
-
-    isOwner = false;
-    return 'released';
   } catch (e) {
-    try { EscribirLog(`forceReleaseLock error: ${e?.message || e}`, 'error'); } catch {}
+    try { EscribirLog('forceReleaseLock error: ' + String(e?.message || e), 'error'); } catch {}
   }
 }
 
-async function releaseLock() {
-  try {
-    if (!isOwner) return;
-    if (!await ensureMongo()) return;
-    if (!lockId) return;
-    await LockModel.updateOne(
-      { _id: lockId, holderId: instanceId },
-      { $set: { state: "offline", lastSeenAt: new Date() } }
-    );
-  } catch {}
-}
-
-
-
-let actionTimer = null;
-let actionBusy = false;
-
 async function handleActionDoc(doc) {
-  const action = String(doc?.action || "").toLowerCase();
-  const reason = String(doc?.reason || "");
-  try {
-    if (action === "release") {
-      EscribirLog(`Accion RELEASE recibida: ${reason}`, "event");
-      await updateLockStateSafe("release_requested");
+  const action = String(doc?.action || '').toLowerCase();
+  const reason = String(doc?.reason || '');
 
-      // apagar WA en esta PC y LIBERAR lock (sin borrarlo) para takeover inmediato
-      // best-effort: forzar logout para que WhatsApp corte la sesion anterior
-      try { if (client && typeof client.logout === "function") await client.logout(); } catch {}
-      // 1) best-effort logout: fuerza a WA a cortar la sesión en esta PC
-      try { if (client && typeof client.logout === "function") await client.logout(); } catch {}
-      // 2) destruir hard si existe helper, sino destroy normal
+  try {
+    if (action === 'restart') {
+      EscribirLog('Accion RESTART recibida: ' + reason, 'event');
+      await updateLockStateSafe('restarting');
+
       try {
         if (client && typeof destroyClientHard === "function") await destroyClientHard(client);
         else if (client) await client.destroy();
       } catch {}
       try { client = null; } catch {}
       clientStarted = false;
-     // detener timers locales (no deben seguir marcando estados ni consumir acciones)
-      try { if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; } } catch {}
-      try { if (actionTimer) { clearInterval(actionTimer); actionTimer = null; } } catch {}
 
-      // 3) detener timers locales (evita que siga marcando estados o procesando acciones)
-      try { if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; } } catch {}
-      try { if (actionTimer) { clearInterval(actionTimer); actionTimer = null; } } catch {}
-
-      // 4) liberar lock y dejar stale inmediato para takeover
-      try { await forceReleaseLock("offline"); } catch {}
-   
-      isOwner = false;
-      return "released";
+      if (isOwner && !startingNow) {
+        await startClientInitialize();
+      }
+      return 'restarted';
     }
 
-    if (action === "restart") {
-      EscribirLog(`Accion RESTART recibida: ${reason}`, "event");
-      await updateLockStateSafe("restarting");
-
-      try { if (client) await client.destroy(); } catch {}
+    if (action === 'release') {
+      EscribirLog('Accion RELEASE recibida: ' + reason, 'event');
+      try {
+        if (client && typeof destroyClientHard === "function") await destroyClientHard(client);
+        else if (client) await client.destroy();
+      } catch {}
+      try { client = null; } catch {}
       clientStarted = false;
-
-      // si seguimos siendo owner, reiniciamos
-      isOwner = true;
-      await startClientInitialize();
-      return "restarted";
-    }
-
-    if (action === "resetauth") {
-      // La limpieza de auth remota (GridFS) normalmente se hace del lado servidor admin,
-      // acá solo liberamos para forzar nuevo QR en la próxima inicialización.
-      EscribirLog(`Accion RESET AUTH recibida: ${reason}`, "event");
-      await updateLockStateSafe("reset_auth_requested");
-      try { if (client) await client.destroy(); } catch {}
-      clientStarted = false;
-      try { await forceReleaseLock(); } catch {}
+      localWsPanelState = 'offline';
+      await forceReleaseLock('offline');
       isOwner = false;
-      
-      return "reset_auth_requested";
+      return 'released';
     }
 
-    return "ignored";
+    if (action === 'resetauth') {
+      EscribirLog('Accion RESET AUTH recibida: ' + reason, 'event');
+      try {
+        if (client && typeof client.logout === 'function') await client.logout();
+      } catch {}
+      try {
+        if (client && typeof destroyClientHard === "function") await destroyClientHard(client);
+        else if (client) await client.destroy();
+      } catch {}
+      try { client = null; } catch {}
+      clientStarted = false;
+      localWsPanelState = 'offline';
+      await forceReleaseLock('offline');
+      isOwner = false;
+      return 'reset_auth_requested';
+    }
+
+    return 'ignored';
   } catch (e) {
-    EscribirLog(`Error manejando accion ${action}: ${e?.message || e}`, "error");
-    return "error";
+    try { EscribirLog('Error manejando accion ' + action + ': ' + String(e?.message || e), 'error'); } catch {}
+    return 'error';
   }
 }
 
@@ -1559,52 +1494,52 @@ async function pollActionsOnce() {
 
   actionBusy = true;
   try {
-    // Tomar 1 acción pendiente (doneAt no seteado), por lockId
     const doc = await ActionModel.findOneAndUpdate(
       { lockId, doneAt: { $exists: false } },
       { $set: { doneAt: new Date(), doneBy: instanceId } },
-      { sort: { requestedAt: 1 }, new: true }
+      { sort: { requestedAt: 1 }, returnDocument: 'after' }
     ).lean();
 
     if (!doc) return;
-    // ✅ Ignorar acciones viejas (pendientes de un owner anterior).
-    // Si se ejecutan, pueden llamar forceReleaseLock() y dejar lastSeenAt=Date(0),
-    // haciendo que el panel muestre "Inactiva/offline" aunque el proceso esté vivo.
+
     try {
-     const reqAt = doc.requestedAt ? new Date(doc.requestedAt) : null;
+      const reqAt = doc.requestedAt ? new Date(doc.requestedAt) : null;
       if (lockAcquiredAt && reqAt && reqAt.getTime() < lockAcquiredAt.getTime()) {
-        await ActionModel.updateOne(
-          { _id: doc._id },
-          { $set: { result: "stale_ignored" } }
-        );
+        await ActionModel.updateOne({ _id: doc._id }, { $set: { result: 'stale_ignored' } });
         return;
       }
     } catch {}
 
-
     const result = await handleActionDoc(doc);
     await ActionModel.updateOne({ _id: doc._id }, { $set: { result } });
   } catch (e) {
-    // si algo falló, liberamos busy y seguimos
+    try { EscribirLog('pollActionsOnce error: ' + String(e?.message || e), 'error'); } catch {}
   } finally {
     actionBusy = false;
   }
 }
 
 function startActionPoller() {
-  if (actionTimer) return;
-  actionTimer = setInterval(pollActionsOnce, 4000);
+  try { if (actionTimer) { clearInterval(actionTimer); actionTimer = null; } } catch {}
+  actionTimer = setInterval(() => {
+    pollActionsOnce().catch(() => {});
+  }, 4000);
 }
+
 
 
 async function gracefulShutdown(signal) {
   try { sessionLog(`[SHUTDOWN] ${signal} -> cerrando WhatsApp...`); } catch {}
   try { if (autoUpdateTimer) { clearInterval(autoUpdateTimer); autoUpdateTimer = null; } } catch {}
-   try { if (client) { try { await client.destroy(); } catch {} } } catch {}
-  // IMPORTANTE: liberamos el lock para takeover inmediato (sin esperar lease_ms)
-  try { await forceReleaseLock(); } catch {}
+  try { if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; } } catch {}
+  try { if (actionTimer) { clearInterval(actionTimer); actionTimer = null; } } catch {}
+  try { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } } catch {}
+  try { if (client) { try { await client.destroy(); } catch {} } } catch {}
+  try { localWsPanelState = 'offline'; } catch {}
+  try { await updateLockStateSafe('offline'); } catch {}
+  try { await forceReleaseLock('offline'); } catch {}
   try { isOwner = false; } catch {}
- 
+
   process.exit(0);
 
 }
@@ -1808,12 +1743,8 @@ function attachClientHandlers() {
 
 client.on('message', async message => {
 
-  try {
-    await refreshTenantConfigFromDbPerMessage();
-  } catch {}
-  try {
-    RecuperarJsonConfMensajes();
-  } catch {}
+  try { await refreshTenantConfigFromDbPerMessage(); } catch {}
+  try { RecuperarJsonConfMensajes(); } catch {}
 
 //if (message.from=='5493462514448@c.us'   ){
 
@@ -1879,6 +1810,10 @@ EscribirLog(message.from +' '+message.to+' '+message.type+' '+message.body ,"eve
       console.log("message.from VACIO");
       return
     }
+
+    try {
+      await logMessageStat('in', telefonoFrom, { body: message.body || '', type: message.type || 'chat', hasMedia: !!message.hasMedia });
+    } catch {}
     console.log("mensaje");
    
       //////////////////////////////////////////////////////////
