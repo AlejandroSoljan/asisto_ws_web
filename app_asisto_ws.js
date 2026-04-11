@@ -1,7 +1,12 @@
 /*script:app_asisto*/
-/*version:4.00.10   11/04/2026*/
+/*version:1.06.02   11/07/2025*/
 
-
+// =========================
+// FIXES 2026-01:
+// - Evitar takeover por state=offline si NO está stale (solo por lease_ms)
+// - Evitar que el prune borre el backup mientras otra PC lo está restaurando (pin)
+// - Backup seguro: upload temp -> rename -> prune
+// =========================
 
 
 //const chatbot = require("./funciones_asisto.js")
@@ -535,8 +540,6 @@ let MessageLogModel = null;  // wa_wweb_message_log
 let heartbeatTimer = null;
 let actionTimer = null;
 let pollTimer = null;
-let actionBusy = false;
-let heartbeatBusy = false;
 var a = 0;
 var port = Number(process.env.PORT || 8002);
 var headless = true;
@@ -938,55 +941,19 @@ async function getPolicySafe() {
   }
 }
 
-async function heartbeatTick() {
-  try {
-    if (heartbeatBusy) return;
-    heartbeatBusy = true;
-
-    if (!isOwner || !lockId) return;
-
-    await updateLockStateSafe(localWsPanelState || 'online').catch(() => {});
-
-    const pol = await getPolicySafe();
-    const disabled = !!(pol && pol.disabled === true);
-
-    if (disabled) {
-      lastPolicyDisabled = true;
-      if (clientStarted || localWsPanelState !== 'disabled') {
-        try { await updateLockStateSafe('disabled'); } catch {}
-      }
-      if (clientStarted) {
-        try {
-          if (client && typeof destroyClientHard === "function") await destroyClientHard(client);
-          else if (client) await client.destroy();
-        } catch {}
-        try { client = null; } catch {}
-        clientStarted = false;
-      }
-      return;
-    }
-
-    if (lastPolicyDisabled === true) {
-      lastPolicyDisabled = false;
-      if (isOwner && !clientStarted && !startingNow) {
-        try { await startClientInitialize(); } catch {}
-      }
-    }
-  } catch {}
-  finally {
-    heartbeatBusy = false;
-  }
-}
-
 function startHeartbeat() {
   try { if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; } } catch {}
 
   const intervalMs = Math.max(5000, Number(heartbeat_ms) || 5000);
 
-  heartbeatTick().catch(() => {});
+  // refresco inmediato para que el panel vea la sesión enseguida
+  updateLockStateSafe(localWsPanelState || 'starting').catch(() => {});
 
   heartbeatTimer = setInterval(() => {
-    heartbeatTick().catch(() => {});
+    try {
+      if (!isOwner || !lockId) return;
+      updateLockStateSafe(localWsPanelState || 'online').catch(() => {});
+    } catch {}
   }, intervalMs);
 }
 
@@ -1082,6 +1049,15 @@ app.post("/control/release", requireStatusToken, async (req, res) => {
   // Bootstrap: configuracion.json (tenantId/mongo_uri/mongo_db) + tenant_config (resto)
   try {
     RecuperarJsonConf();
+
+    // Tomar auto_update desde configuracion.json (bootstrap local)
+    try {
+      const boot = readBootstrapFromFile();
+      applyAutoUpdateConfig(boot);
+    } catch (e) {
+      try { console.log('applyAutoUpdateConfig bootstrap error:', e?.message || e); } catch {}
+      try { EscribirLog('applyAutoUpdateConfig bootstrap error: ' + String(e?.message || e), 'error'); } catch {}
+    }
 
     // Cargar resto de configuración desde Mongo (numero/puerto/headless/etc.)
     await loadTenantConfigFromDbMinimal();
@@ -1376,7 +1352,6 @@ async function bootstrapWithLock() {
 
     await updateLockStateSafe('starting');
     startHeartbeat();
-    startActionPoller();
 
     console.log("Inicio directo sin standby -> inicializando WhatsApp...");
     EscribirLog("Inicio directo sin standby -> inicializando WhatsApp...", "event");
@@ -1391,135 +1366,7 @@ async function bootstrapWithLock() {
 }
 
 
-async function forceReleaseLock(finalState) {
-  const st = String(finalState || 'offline');
-  try {
-    if (!await ensureMongo()) return;
-    if (!lockId || !LockModel) return;
-
-    await LockModel.updateOne(
-      { _id: lockId },
-      {
-        $set: {
-          tenantId,
-          tenantid: tenantId,
-          numero,
-          holderId: instanceId,
-          host: os.hostname(),
-          pid: process.pid,
-          state: st,
-          lastSeenAt: new Date(),
-          releasedAt: new Date(),
-          releasedBy: instanceId
-        }
-      },
-      { upsert: true }
-    );
-  } catch (e) {
-    try { EscribirLog('forceReleaseLock error: ' + String(e?.message || e), 'error'); } catch {}
-  }
-}
-
-async function handleActionDoc(doc) {
-  const action = String(doc?.action || '').toLowerCase();
-  const reason = String(doc?.reason || '');
-
-  try {
-    if (action === 'restart') {
-      EscribirLog('Accion RESTART recibida: ' + reason, 'event');
-      await updateLockStateSafe('restarting');
-
-      try {
-        if (client && typeof destroyClientHard === "function") await destroyClientHard(client);
-        else if (client) await client.destroy();
-      } catch {}
-      try { client = null; } catch {}
-      clientStarted = false;
-
-      if (isOwner && !startingNow) {
-        await startClientInitialize();
-      }
-      return 'restarted';
-    }
-
-    if (action === 'release') {
-      EscribirLog('Accion RELEASE recibida: ' + reason, 'event');
-      try {
-        if (client && typeof destroyClientHard === "function") await destroyClientHard(client);
-        else if (client) await client.destroy();
-      } catch {}
-      try { client = null; } catch {}
-      clientStarted = false;
-      localWsPanelState = 'offline';
-      await forceReleaseLock('offline');
-      isOwner = false;
-      return 'released';
-    }
-
-    if (action === 'resetauth') {
-      EscribirLog('Accion RESET AUTH recibida: ' + reason, 'event');
-      try {
-        if (client && typeof client.logout === 'function') await client.logout();
-      } catch {}
-      try {
-        if (client && typeof destroyClientHard === "function") await destroyClientHard(client);
-        else if (client) await client.destroy();
-      } catch {}
-      try { client = null; } catch {}
-      clientStarted = false;
-      localWsPanelState = 'offline';
-      await forceReleaseLock('offline');
-      isOwner = false;
-      return 'reset_auth_requested';
-    }
-
-    return 'ignored';
-  } catch (e) {
-    try { EscribirLog('Error manejando accion ' + action + ': ' + String(e?.message || e), 'error'); } catch {}
-    return 'error';
-  }
-}
-
-async function pollActionsOnce() {
-  if (actionBusy) return;
-  if (!isOwner) return;
-  if (!lockId) return;
-  if (!await ensureMongo()) return;
-  if (!ActionModel) return;
-
-  actionBusy = true;
-  try {
-    const doc = await ActionModel.findOneAndUpdate(
-      { lockId, doneAt: { $exists: false } },
-      { $set: { doneAt: new Date(), doneBy: instanceId } },
-      { sort: { requestedAt: 1 }, returnDocument: 'after' }
-    ).lean();
-
-    if (!doc) return;
-
-    try {
-      const reqAt = doc.requestedAt ? new Date(doc.requestedAt) : null;
-      if (lockAcquiredAt && reqAt && reqAt.getTime() < lockAcquiredAt.getTime()) {
-        await ActionModel.updateOne({ _id: doc._id }, { $set: { result: 'stale_ignored' } });
-        return;
-      }
-    } catch {}
-
-    const result = await handleActionDoc(doc);
-    await ActionModel.updateOne({ _id: doc._id }, { $set: { result } });
-  } catch (e) {
-    try { EscribirLog('pollActionsOnce error: ' + String(e?.message || e), 'error'); } catch {}
-  } finally {
-    actionBusy = false;
-  }
-}
-
-function startActionPoller() {
-  try { if (actionTimer) { clearInterval(actionTimer); actionTimer = null; } } catch {}
-  actionTimer = setInterval(() => {
-    pollActionsOnce().catch(() => {});
-  }, 4000);
-}
+// Release/acciones remotas removidas en modo simplificado.
 
 
 
@@ -1532,7 +1379,6 @@ async function gracefulShutdown(signal) {
   try { if (client) { try { await client.destroy(); } catch {} } } catch {}
   try { localWsPanelState = 'offline'; } catch {}
   try { await updateLockStateSafe('offline'); } catch {}
-  try { await forceReleaseLock('offline'); } catch {}
   try { isOwner = false; } catch {}
 
   process.exit(0);
