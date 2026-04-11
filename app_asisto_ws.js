@@ -1,12 +1,7 @@
 /*script:app_asisto*/
-/*version:1.06.02   11/07/2025*/
+/*version:4.00.10   11/04/2026*/
 
-// =========================
-// FIXES 2026-01:
-// - Evitar takeover por state=offline si NO está stale (solo por lease_ms)
-// - Evitar que el prune borre el backup mientras otra PC lo está restaurando (pin)
-// - Backup seguro: upload temp -> rename -> prune
-// =========================
+
 
 
 //const chatbot = require("./funciones_asisto.js")
