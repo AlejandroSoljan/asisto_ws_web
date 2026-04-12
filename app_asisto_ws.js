@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version:4.00.13   11/04/2026*/
+/*version:4.00.15   12/04/2026*/
 
 
 
@@ -265,6 +265,7 @@ let auto_update_enabled = String(process.env.AUTO_UPDATE_ENABLED || '').trim().t
 let auto_update_repo_path = String(process.env.AUTO_UPDATE_REPO_PATH || process.cwd()).trim() || process.cwd();
 let auto_update_remote = String(process.env.AUTO_UPDATE_REMOTE || 'origin').trim() || 'origin';
 let auto_update_branch = String(process.env.AUTO_UPDATE_BRANCH || '').trim();
+let auto_update_source = String(process.env.AUTO_UPDATE_SOURCE || 'tag_or_branch').trim().toLowerCase() || 'tag_or_branch'; // tag | branch | tag_or_branch
 let auto_update_check_every_ms = Number(process.env.AUTO_UPDATE_CHECK_EVERY_MS || 10 * 60_000);
 let auto_update_startup_delay_ms = Number(process.env.AUTO_UPDATE_STARTUP_DELAY_MS || 120_000);
 let auto_update_restart_on_apply = String(process.env.AUTO_UPDATE_RESTART_ON_APPLY || 'true').trim().toLowerCase() !== 'false';
@@ -321,6 +322,10 @@ function applyAutoUpdateConfig(conf) {
     const v = String(au.branch || au.auto_update_branch || '').trim();
     if (v) auto_update_branch = v;
   }
+  if (au.auto_update_source !== undefined || au.source !== undefined || au.mode !== undefined) {
+    const v = String(au.source || au.mode || au.auto_update_source || '').trim().toLowerCase();
+    if (v) auto_update_source = v;
+  }
   if (au.auto_update_check_every_ms !== undefined || au.check_every_ms !== undefined) {
     const n = Number(au.check_every_ms !== undefined ? au.check_every_ms : au.auto_update_check_every_ms);
     if (!Number.isNaN(n) && n > 0) auto_update_check_every_ms = n;
@@ -346,6 +351,7 @@ function applyAutoUpdateConfig(conf) {
   if (!Number.isFinite(auto_update_startup_delay_ms) || auto_update_startup_delay_ms < 0) auto_update_startup_delay_ms = 0;
   auto_update_repo_path = auto_update_repo_path || process.cwd();
   auto_update_remote = auto_update_remote || 'origin';
+  if (!['tag', 'branch', 'tag_or_branch'].includes(auto_update_source)) auto_update_source = 'tag_or_branch';
 }
 
 function autoUpdateLog(msg, type = 'event') {
@@ -413,6 +419,88 @@ async function autoUpdateGetBranch(repoPath) {
   return String(out.stdout || '').trim() || 'main';
 }
 
+function normalizeTagSortValue(tag) {
+  const clean = String(tag || '').trim().replace(/^refs\/tags\//i, '').replace(/^v/i, '');
+  return clean.split('.').map((p) => {
+    const n = Number(String(p).replace(/[^0-9].*$/, ''));
+    return Number.isFinite(n) ? n : -1;
+  });
+}
+
+function compareSemverLikeTagsDesc(a, b) {
+  const pa = normalizeTagSortValue(a);
+  const pb = normalizeTagSortValue(b);
+  const len = Math.max(pa.length, pb.length, 3);
+  for (let i = 0; i < len; i++) {
+    const av = i < pa.length ? pa[i] : 0;
+    const bv = i < pb.length ? pb[i] : 0;
+    if (av !== bv) return bv - av;
+  }
+  return String(b || '').localeCompare(String(a || ''), 'en', { sensitivity: 'base' });
+}
+
+async function autoUpdateGetLatestTag(repoPath, remote) {
+  await runCommand('git', ['fetch', remote, '--tags', '--prune'], { cwd: repoPath, timeout: 120_000 });
+
+  let tags = [];
+  try {
+    const tagOut = await runCommand('git', ['tag', '--list'], { cwd: repoPath, timeout: 20_000 });
+    tags = String(tagOut.stdout || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  } catch {}
+
+  const semverLike = tags.filter((t) => /^v?\d+(?:\.\d+){1,}$/.test(String(t || '').trim()));
+  if (semverLike.length) {
+    semverLike.sort(compareSemverLikeTagsDesc);
+    return semverLike[0];
+  }
+
+  try {
+    const out = await runCommand('git', ['for-each-ref', '--sort=-creatordate', '--format=%(refname:short)', 'refs/tags'], { cwd: repoPath, timeout: 20_000 });
+    const byDate = String(out.stdout || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    if (byDate.length) return byDate[0];
+  } catch {}
+
+  return '';
+}
+
+async function autoUpdateResolveTarget(repoPath) {
+  const remote = auto_update_remote || 'origin';
+  const source = String(auto_update_source || 'tag_or_branch').trim().toLowerCase();
+
+  if (source !== 'branch') {
+    const latestTag = await autoUpdateGetLatestTag(repoPath, remote);
+    if (latestTag) {
+      const headOut = await runCommand('git', ['rev-list', '-n', '1', latestTag], { cwd: repoPath, timeout: 15_000 });
+      const tagHead = String(headOut.stdout || '').trim();
+      if (tagHead) {
+        return {
+          source: 'tag',
+          ref: latestTag,
+          head: tagHead
+        };
+      }
+    }
+    if (source === 'tag') {
+      throw new Error('git_latest_tag_not_found');
+    }
+  }
+
+  const branch = await autoUpdateGetBranch(repoPath);
+  await runCommand('git', ['fetch', remote, branch, '--prune'], { cwd: repoPath, timeout: 120_000 });
+  const remoteRef = `${remote}/${branch}`;
+  const remoteHeadOut = await runCommand('git', ['rev-parse', remoteRef], { cwd: repoPath, timeout: 15_000 });
+  const remoteHead = String(remoteHeadOut.stdout || '').trim();
+  if (!remoteHead) throw new Error('git_remote_head_empty');
+
+  return {
+    source: 'branch',
+    ref: remoteRef,
+    head: remoteHead,
+    branch
+  };
+}
+
+
 async function autoUpdateCheckAndApply(reason = 'interval') {
   if (!auto_update_enabled || autoUpdateRunning || autoUpdateRestarting) return;
   autoUpdateRunning = true;
@@ -430,8 +518,6 @@ async function autoUpdateCheckAndApply(reason = 'interval') {
 
     await runCommand('git', ['rev-parse', '--is-inside-work-tree'], { cwd: repoPath, timeout: 15_000 });
 
-    const branch = await autoUpdateGetBranch(repoPath);
-    const remote = auto_update_remote || 'origin';
 
     if (auto_update_require_clean) {
       const statusOut = await runCommand('git', ['status', '--porcelain'], { cwd: repoPath, timeout: 20_000 });
@@ -445,24 +531,22 @@ async function autoUpdateCheckAndApply(reason = 'interval') {
     const localHead = String(headOut.stdout || '').trim();
     if (!localHead) throw new Error('git_local_head_empty');
 
-    await runCommand('git', ['fetch', remote, branch, '--prune'], { cwd: repoPath, timeout: 120_000 });
+    const target = await autoUpdateResolveTarget(repoPath);
+    const targetHead = String(target?.head || '').trim();
+    if (!targetHead) throw new Error('git_target_head_empty');
 
-    const remoteRef = `${remote}/${branch}`;
-    const remoteHeadOut = await runCommand('git', ['rev-parse', remoteRef], { cwd: repoPath, timeout: 15_000 });
-    const remoteHead = String(remoteHeadOut.stdout || '').trim();
-    if (!remoteHead) throw new Error('git_remote_head_empty');
-
-    if (remoteHead === localHead) {
-      autoUpdateLog(`[AUTO_UPDATE] ok (${reason}): sin cambios (${localHead.slice(0, 7)})`, 'event');
+    if (targetHead === localHead) {
+      autoUpdateLog(`[AUTO_UPDATE] ok (${reason}): sin cambios (${localHead.slice(0, 7)}) target=${target.source}:${target.ref}`, 'event');
       return;
     }
 
-    autoUpdateLog(`[AUTO_UPDATE] update (${reason}): ${localHead.slice(0, 7)} -> ${remoteHead.slice(0, 7)}`, 'event');
+    autoUpdateLog(`[AUTO_UPDATE] update (${reason}): ${localHead.slice(0, 7)} -> ${targetHead.slice(0, 7)} target=${target.source}:${target.ref}`, 'event');
 
-    const changedOut = await runCommand('git', ['diff', '--name-only', `${localHead}..${remoteRef}`], { cwd: repoPath, timeout: 30_000 });
+    const changedOut = await runCommand('git', ['diff', '--name-only', `${localHead}..${targetHead}`], { cwd: repoPath, timeout: 30_000 });
+
     const changedFiles = String(changedOut.stdout || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
 
-    await runCommand('git', ['reset', '--hard', remoteRef], { cwd: repoPath, timeout: 120_000 });
+    await runCommand('git', ['reset', '--hard', targetHead], { cwd: repoPath, timeout: 120_000 });
 
     if (auto_update_run_npm_install) {
       const needsNpm = changedFiles.some((name) => /(^|\/)(package\.json|package-lock\.json)$/i.test(name));
@@ -503,7 +587,7 @@ function startAutoUpdateScheduler() {
   if (autoUpdateTimer) return;
 
   const repoPath = path.resolve(auto_update_repo_path || process.cwd());
-  autoUpdateLog(`[AUTO_UPDATE] activado repo=${repoPath} remote=${auto_update_remote} branch=${auto_update_branch || '(auto)'} every=${auto_update_check_every_ms}ms startupDelay=${auto_update_startup_delay_ms}ms`, 'event');
+  autoUpdateLog(`[AUTO_UPDATE] activado repo=${repoPath} remote=${auto_update_remote} source=${auto_update_source} branch=${auto_update_branch || '(auto)'} every=${auto_update_check_every_ms}ms startupDelay=${auto_update_startup_delay_ms}ms`, 'event');
 
   setTimeout(() => {
     autoUpdateCheckAndApply('startup').catch(() => {});
