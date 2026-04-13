@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version:4.00.19   12/04/2026   SOLO PRUEBAS TEL HARCORDEADO*/
+/*version:4.00.21   13/04/2026   */
 
 
 
@@ -244,6 +244,73 @@ async function logMessageStat(direction, contact, payload) {
     });
   } catch (e) {
     try { EscribirLog('logMessageStat error: ' + String(e?.message || e), 'error'); } catch {}
+  }
+}
+
+
+function getOutgoingStatMessageId(messageLike) {
+  try {
+    if (!messageLike) return '';
+    if (typeof messageLike === 'string') return String(messageLike || '').trim();
+    const serialized = messageLike?.id?._serialized || messageLike?._data?.id?.id || messageLike?.id?.id || messageLike?.ackId;
+    return String(serialized || '').trim();
+  } catch {
+    return '';
+  }
+}
+
+const recentOutgoingStatIds = new Map();
+
+function rememberOutgoingStatLogged(messageLike) {
+  try {
+    const id = getOutgoingStatMessageId(messageLike);
+    if (!id) return;
+    const now = Date.now();
+    recentOutgoingStatIds.set(id, now);
+    for (const [k, ts] of recentOutgoingStatIds.entries()) {
+      if (!ts || (now - ts) > 10 * 60 * 1000) recentOutgoingStatIds.delete(k);
+    }
+  } catch {}
+}
+
+function wasOutgoingStatLogged(messageLike) {
+  try {
+    const id = getOutgoingStatMessageId(messageLike);
+    if (!id) return false;
+   const ts = recentOutgoingStatIds.get(id);
+    if (!ts) return false;
+    if ((Date.now() - ts) > 10 * 60 * 1000) {
+      recentOutgoingStatIds.delete(id);
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function logOutgoingFromMessageFallback(messageLike) {
+  try {
+    if (!messageLike) return false;
+    if (messageLike.fromMe !== true) return false;
+    if (wasOutgoingStatLogged(messageLike)) return false;
+
+    const to = String(messageLike.to || messageLike.from || '').trim();
+    if (!to) return false;
+
+    const payload = {
+      body: typeof messageLike.body === 'string' ? messageLike.body : '',
+      caption: typeof messageLike.caption === 'string' ? messageLike.caption : (typeof messageLike._data?.caption === 'string' ? messageLike._data.caption : ''),
+      type: messageLike.type || messageLike._data?.type || 'text',
+      hasMedia: !!(messageLike.hasMedia || messageLike._data?.mediaKey || messageLike._data?.isViewOnce)
+    };
+
+    await logMessageStat('out', to, payload);
+    rememberOutgoingStatLogged(messageLike);
+    return true;
+  } catch (e) {
+    try { EscribirLog('logOutgoingFromMessageFallback error: ' + String(e?.message || e), 'error'); } catch {}
+    return false;
   }
 }
 
@@ -1386,6 +1453,7 @@ async function safeSend(to, content, opts) {
           ? { body: sendOpts.caption || '', type: content.mimetype ? 'media' : (content.type || 'text'), mimetype: content.mimetype || '', filename: content.filename || '', data: content.data ? '[data]' : '' }
           : { body: String(content || ''), type: 'text', hasMedia: false };
         await logMessageStat('out', to, logPayload);
+        rememberOutgoingStatLogged(sent);
       } catch {}
       return sent;
     } catch (e) {
@@ -1922,6 +1990,15 @@ async function ConsultaApiMensajes(){
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 function attachClientHandlers() {
+
+client.on('message_create', async message => {
+  try {
+    if (message && message.fromMe === true) {
+      await logOutgoingFromMessageFallback(message);
+    }
+  } catch {}
+});
+
 
 client.on('message', async message => {
 
