@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version:4.00.16   12/04/2026*/
+/*version:4.00.18   12/04/2026*/
 
 
 
@@ -266,6 +266,7 @@ let auto_update_repo_path = String(process.env.AUTO_UPDATE_REPO_PATH || process.
 let auto_update_remote = String(process.env.AUTO_UPDATE_REMOTE || 'origin').trim() || 'origin';
 let auto_update_branch = String(process.env.AUTO_UPDATE_BRANCH || '').trim();
 let auto_update_source = String(process.env.AUTO_UPDATE_SOURCE || 'tag_or_branch').trim().toLowerCase() || 'tag_or_branch'; // tag | branch | tag_or_branch
+let auto_update_target_tag = String(process.env.AUTO_UPDATE_TARGET_TAG || '').trim();
 let auto_update_check_every_ms = Number(process.env.AUTO_UPDATE_CHECK_EVERY_MS || 10 * 60_000);
 let auto_update_startup_delay_ms = Number(process.env.AUTO_UPDATE_STARTUP_DELAY_MS || 120_000);
 let auto_update_restart_on_apply = String(process.env.AUTO_UPDATE_RESTART_ON_APPLY || 'true').trim().toLowerCase() !== 'false';
@@ -322,6 +323,17 @@ function applyAutoUpdateConfig(conf) {
     const v = String(au.branch || au.auto_update_branch || '').trim();
     if (v) auto_update_branch = v;
   }
+  if (au.auto_update_target_tag !== undefined || au.target_tag !== undefined || au.desired_tag !== undefined || au.release_tag !== undefined || au.version_tag !== undefined) {
+    const v = String(
+      au.target_tag ??
+      au.desired_tag ??
+      au.release_tag ??
+      au.version_tag ??
+      au.auto_update_target_tag ??
+      ''
+    ).trim();
+    auto_update_target_tag = v;
+  }
   if (au.auto_update_source !== undefined || au.source !== undefined || au.mode !== undefined) {
     const v = String(au.source || au.mode || au.auto_update_source || '').trim().toLowerCase();
     if (v) auto_update_source = v;
@@ -352,6 +364,38 @@ function applyAutoUpdateConfig(conf) {
   auto_update_repo_path = auto_update_repo_path || process.cwd();
   auto_update_remote = auto_update_remote || 'origin';
   if (!['tag', 'branch', 'tag_or_branch'].includes(auto_update_source)) auto_update_source = 'tag_or_branch';
+}
+
+function getConfiguredTargetTag(conf) {
+  try {
+    if (!conf || typeof conf !== 'object') return '';
+    const au = normalizeAutoUpdateConfig(conf);
+    const v = au.target_tag ?? au.desired_tag ?? au.release_tag ?? au.version_tag ?? au.auto_update_target_tag ?? '';
+    return String(v || '').trim();
+  } catch {
+    return '';
+  }
+}
+
+function getRuntimeScriptVersion() {
+  try {
+    const head = fs.readFileSync(__filename, 'utf8').slice(0, 512);
+    const m = head.match(/\/\*version:([^\n*]+)/i);
+    return m ? String(m[1] || '').trim() : '';
+  } catch {
+    return '';
+  }
+}
+
+function getCurrentRuntimeInfo() {
+  const currentVersion = getRuntimeScriptVersion();
+  const desiredTag = String(auto_update_target_tag || '').trim();
+  return {
+    currentVersion,
+    desiredTag,
+    autoUpdateSource: String(auto_update_source || ''),
+    autoUpdateEnabled: !!auto_update_enabled
+  };
 }
 
 function autoUpdateLog(msg, type = 'event') {
@@ -466,19 +510,30 @@ async function autoUpdateGetLatestTag(repoPath, remote) {
 async function autoUpdateResolveTarget(repoPath) {
   const remote = auto_update_remote || 'origin';
   const source = String(auto_update_source || 'tag_or_branch').trim().toLowerCase();
+  const desiredTag = String(auto_update_target_tag || '').trim();
 
   if (source !== 'branch') {
-    const latestTag = await autoUpdateGetLatestTag(repoPath, remote);
-    if (latestTag) {
-      const headOut = await runCommand('git', ['rev-list', '-n', '1', latestTag], { cwd: repoPath, timeout: 15_000 });
+    let selectedTag = desiredTag;
+    if (!selectedTag) {
+      selectedTag = await autoUpdateGetLatestTag(repoPath, remote);
+    } else {
+      await runCommand('git', ['fetch', remote, '--tags', '--prune'], { cwd: repoPath, timeout: 120_000 });
+    }
+
+    if (selectedTag) {
+      const headOut = await runCommand('git', ['rev-list', '-n', '1', selectedTag], { cwd: repoPath, timeout: 15_000 });
       const tagHead = String(headOut.stdout || '').trim();
       if (tagHead) {
         return {
-          source: 'tag',
-          ref: latestTag,
-          head: tagHead
+          source: desiredTag ? 'target_tag' : 'tag',
+          ref: selectedTag,
+          head: tagHead,
+          desiredTag: selectedTag
         };
       }
+    }
+    if (desiredTag) {
+      throw new Error(`git_target_tag_not_found:${desiredTag}`);
     }
     if (source === 'tag') {
       throw new Error('git_latest_tag_not_found');
@@ -587,7 +642,7 @@ function startAutoUpdateScheduler() {
   if (autoUpdateTimer) return;
 
   const repoPath = path.resolve(auto_update_repo_path || process.cwd());
-  autoUpdateLog(`[AUTO_UPDATE] activado repo=${repoPath} remote=${auto_update_remote} source=${auto_update_source} branch=${auto_update_branch || '(auto)'} every=${auto_update_check_every_ms}ms startupDelay=${auto_update_startup_delay_ms}ms`, 'event');
+  autoUpdateLog(`[AUTO_UPDATE] activado repo=${repoPath} remote=${auto_update_remote} source=${auto_update_source} targetTag=${auto_update_target_tag || '(auto)'} branch=${auto_update_branch || '(auto)'} every=${auto_update_check_every_ms}ms startupDelay=${auto_update_startup_delay_ms}ms`, 'event');
 
   setTimeout(() => {
     autoUpdateCheckAndApply('startup').catch(() => {});
@@ -951,7 +1006,7 @@ async function loadTenantConfigFromDbMinimal() {
 
     applyAutoUpdateConfig(conf);
 
-    try { console.log(`[CONFIG] tenantId=${tenantId} numero=${numero} puerto=${port} headless=${headless} auth_mode=${auth_mode || 'local'} lease_ms=${lease_ms} heartbeat_ms=${heartbeat_ms}`); } catch {}
+    try { console.log(`[CONFIG] tenantId=${tenantId} numero=${numero} puerto=${port} headless=${headless} auth_mode=${auth_mode || 'local'} lease_ms=${lease_ms} heartbeat_ms=${heartbeat_ms} desiredTag=${auto_update_target_tag || '(auto)'}`); } catch {}
     return conf;
   } catch (e) {
     try { console.log("loadTenantConfigFromDbMinimal error:", e?.message || e); } catch {}
@@ -1093,6 +1148,7 @@ async function getLockDocSafe() {
     }
   } catch {}
 
+  const runtimeInfo = getCurrentRuntimeInfo();
   return {
     _id: lockId || `${tenantId}:${numero}`,
     tenantId,
@@ -1105,7 +1161,11 @@ async function getLockDocSafe() {
     startedAt: lockAcquiredAt || null,
     lastSeenAt: new Date(),
     lastQrAt,
-    lastQrDataUrl
+    lastQrDataUrl,
+    runtimeVersion: runtimeInfo.currentVersion || '',
+    desiredTag: runtimeInfo.desiredTag || '',
+    autoUpdateSource: runtimeInfo.autoUpdateSource || '',
+    autoUpdateEnabled: !!runtimeInfo.autoUpdateEnabled
   };
 }
 
@@ -1114,6 +1174,7 @@ app.get("/status", requireStatusToken, async (req, res) => {
   let waState = null;
   try { if (client) waState = await client.getState(); } catch {}
 
+  const runtimeInfo = getCurrentRuntimeInfo();
   return res.json({
     ok: true,
     now: nowArgentinaISO(),
@@ -1125,13 +1186,14 @@ app.get("/status", requireStatusToken, async (req, res) => {
     clientStarted,
     waState,
     telefono_qr,
+    runtimeInfo,
     lock
   });
 });
 
 app.get("/status/lock", requireStatusToken, async (req, res) => {
   const lock = await getLockDocSafe();
-  return res.json({ ok: true, lockId, lock });
+  return res.json({ ok: true, lockId, runtimeInfo: getCurrentRuntimeInfo(), lock });
 });
 
 app.get("/status/qr", requireStatusToken, async (req, res) => {
@@ -1148,7 +1210,8 @@ app.get("/status/qr", requireStatusToken, async (req, res) => {
     clientStarted,
     lastQrAt,
     lastQrRaw,
-    lastQrDataUrl
+    lastQrDataUrl,
+    runtimeInfo: getCurrentRuntimeInfo()
   });
 });
 
@@ -1185,6 +1248,15 @@ app.post("/control/release", requireStatusToken, async (req, res) => {
 
     // Cargar resto de configuración desde Mongo (numero/puerto/headless/etc.)
     await loadTenantConfigFromDbMinimal();
+
+    // Si el tenant pide una TAG concreta, validar al iniciar antes de levantar WhatsApp.
+    try {
+      await autoUpdateCheckAndApply('boot_target_tag');
+      if (autoUpdateRestarting) return;
+    } catch (e) {
+      try { console.log('boot_target_tag auto-update error:', e?.message || e); } catch {}
+      try { EscribirLog('boot_target_tag auto-update error: ' + String(e?.message || e), 'error'); } catch {}
+    }
 
     server.listen(port, function() {
       console.log('App running on *: ' + port);
@@ -1338,6 +1410,7 @@ async function updateLockStateSafe(state) {
     if (!lockId) return;
 
     const now = new Date();
+    const runtimeInfo = getCurrentRuntimeInfo();
     const update = {
       $set: {
         tenantId: tenantId,
@@ -1348,7 +1421,11 @@ async function updateLockStateSafe(state) {
         pid: process.pid,
         state: localWsPanelState,
         startedAt: lockAcquiredAt || now,
-        lastSeenAt: now
+        lastSeenAt: now,
+        runtimeVersion: runtimeInfo.currentVersion || '',
+        desiredTag: runtimeInfo.desiredTag || '',
+        autoUpdateSource: runtimeInfo.autoUpdateSource || '',
+        autoUpdateEnabled: !!runtimeInfo.autoUpdateEnabled
       }
     };
 
@@ -1376,6 +1453,7 @@ async function updateLockQrDataSafe(qrDataUrl, qrAtIso) {
     if (!LockModel) return;
 
     const now = new Date();
+    const runtimeInfo = getCurrentRuntimeInfo();
     await LockModel.updateOne(
       { _id: lockId },
       {
@@ -1390,7 +1468,11 @@ async function updateLockQrDataSafe(qrDataUrl, qrAtIso) {
           startedAt: lockAcquiredAt || now,
           lastSeenAt: now,
           lastQrAt: String(qrAtIso || ""),
-          lastQrDataUrl: String(qrDataUrl || "")
+          lastQrDataUrl: String(qrDataUrl || ""),
+          runtimeVersion: runtimeInfo.currentVersion || '',
+          desiredTag: runtimeInfo.desiredTag || '',
+          autoUpdateSource: runtimeInfo.autoUpdateSource || '',
+          autoUpdateEnabled: !!runtimeInfo.autoUpdateEnabled
         }
       },
       { upsert: true }
@@ -1497,6 +1579,7 @@ async function forceReleaseLock(finalState) {
     if (!await ensureMongo()) return;
     if (!lockId || !LockModel) return;
 
+    const runtimeInfo = getCurrentRuntimeInfo();
     await LockModel.updateOne(
       { _id: lockId },
       {
@@ -1510,7 +1593,11 @@ async function forceReleaseLock(finalState) {
           state: st,
           lastSeenAt: new Date(),
           releasedAt: new Date(),
-          releasedBy: instanceId
+          releasedBy: instanceId,
+          runtimeVersion: runtimeInfo.currentVersion || '',
+          desiredTag: runtimeInfo.desiredTag || '',
+          autoUpdateSource: runtimeInfo.autoUpdateSource || '',
+          autoUpdateEnabled: !!runtimeInfo.autoUpdateEnabled
         }
       },
       { upsert: true }
