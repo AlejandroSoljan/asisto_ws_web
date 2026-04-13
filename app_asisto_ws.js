@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version:4.00.18   12/04/2026*/
+/*version:4.00.19   12/04/2026   SOLO PRUEBAS TEL HARCORDEADO*/
 
 
 
