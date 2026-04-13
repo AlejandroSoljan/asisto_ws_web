@@ -551,7 +551,7 @@ function compareSemverLikeTagsDesc(a, b) {
 }
 
 async function autoUpdateGetLatestTag(repoPath, remote) {
-  await runCommand('git', ['fetch', remote, '--tags', '--prune'], { cwd: repoPath, timeout: 120_000 });
+  await runCommand('git', ['fetch', remote, '--tags', '--force', '--prune'], { cwd: repoPath, timeout: 120_000 });
 
   let tags = [];
   try {
@@ -584,11 +584,12 @@ async function autoUpdateResolveTarget(repoPath) {
     if (!selectedTag) {
       selectedTag = await autoUpdateGetLatestTag(repoPath, remote);
     } else {
-      await runCommand('git', ['fetch', remote, '--tags', '--prune'], { cwd: repoPath, timeout: 120_000 });
+      await runCommand('git', ['fetch', remote, '--tags', '--force', '--prune'], { cwd: repoPath, timeout: 120_000 });
     }
 
     if (selectedTag) {
-      const headOut = await runCommand('git', ['rev-list', '-n', '1', selectedTag], { cwd: repoPath, timeout: 15_000 });
+      const tagRef = `refs/tags/${selectedTag}`;
+      const headOut = await runCommand('git', ['rev-list', '-n', '1', tagRef], { cwd: repoPath, timeout: 15_000 });
       const tagHead = String(headOut.stdout || '').trim();
       if (tagHead) {
         return {
