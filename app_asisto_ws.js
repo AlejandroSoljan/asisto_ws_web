@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version:4.00.28   13/04/2026   */
+/*version:4.00.29   13/04/2026   */
 
 
 
@@ -62,8 +62,18 @@ let tenantConfig = null; // config cargada desde Mongo
 
 function readBootstrapFromFile() {
   try {
-    const p = path.join(process.cwd(), "configuracion.json");
-    if (!fs.existsSync(p)) return {};
+    const candidates = [
+      path.join(__dirname, "configuracion.json"),
+      path.join(process.cwd(), "configuracion.json"),
+    ];
+    let p = null;
+    for (const candidate of candidates) {
+      if (fs.existsSync(candidate)) {
+        p = candidate;
+        break;
+      }
+    }
+    if (!p) return {};
     const raw = JSON.parse(fs.readFileSync(p, "utf8"));
     const obj = (raw && raw.configuracion && typeof raw.configuracion === "object") ? raw.configuracion : raw;
     return obj && typeof obj === "object" ? obj : {};
@@ -329,7 +339,7 @@ let auth_mode = String(process.env.ASISTO_AUTH_MODE || '').trim().toLowerCase();
 // Por seguridad, viene DESACTIVADO por defecto y solo se habilita por config/env.
 // =========================
 let auto_update_enabled = String(process.env.AUTO_UPDATE_ENABLED || '').trim().toLowerCase() === 'true';
-let auto_update_repo_path = String(process.env.AUTO_UPDATE_REPO_PATH || process.cwd()).trim() || process.cwd();
+let auto_update_repo_path = String(process.env.AUTO_UPDATE_REPO_PATH || __dirname).trim() || __dirname;
 let auto_update_remote = String(process.env.AUTO_UPDATE_REMOTE || 'origin').trim() || 'origin';
 let auto_update_branch = String(process.env.AUTO_UPDATE_BRANCH || '').trim();
 let auto_update_source = String(process.env.AUTO_UPDATE_SOURCE || 'tag_or_branch').trim().toLowerCase() || 'tag_or_branch'; // tag | branch | tag_or_branch
@@ -380,7 +390,7 @@ function applyAutoUpdateConfig(conf) {
   }
   if (au.auto_update_repo_path !== undefined || au.repo_path !== undefined || au.path !== undefined) {
     const v = String(au.repo_path || au.path || au.auto_update_repo_path || '').trim();
-    if (v) auto_update_repo_path = v;
+    if (v) auto_update_repo_path = path.isAbsolute(v) ? v : path.resolve(__dirname, v);
   }
   if (au.auto_update_remote !== undefined || au.remote !== undefined) {
     const v = String(au.remote || au.auto_update_remote || '').trim();
@@ -428,7 +438,7 @@ function applyAutoUpdateConfig(conf) {
 
   if (!Number.isFinite(auto_update_check_every_ms) || auto_update_check_every_ms < 60_000) auto_update_check_every_ms = 60_000;
   if (!Number.isFinite(auto_update_startup_delay_ms) || auto_update_startup_delay_ms < 0) auto_update_startup_delay_ms = 0;
-  auto_update_repo_path = auto_update_repo_path || process.cwd();
+  auto_update_repo_path = auto_update_repo_path || __dirname;
   auto_update_remote = auto_update_remote || 'origin';
   if (!['tag', 'branch', 'tag_or_branch'].includes(auto_update_source)) auto_update_source = 'tag_or_branch';
 }
