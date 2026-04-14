@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version:4.00.26   13/04/2026   */
+/*version:4.00.27   13/04/2026   */
 
 
 
@@ -623,6 +623,78 @@ async function autoUpdateResolveTarget(repoPath) {
   };
 }
 
+async function autoUpdateForceTargetTagOnBoot(reason = 'boot_target_tag_force') {
+  const desiredTag = String(auto_update_target_tag || '').trim();
+  if (!desiredTag) {
+    autoUpdateLog(`[AUTO_UPDATE] skip (${reason}): tenant sin targetTag configurado`, 'event');
+    return false;
+  }
+
+  const repoPath = path.resolve(auto_update_repo_path || process.cwd());
+  if (!fs.existsSync(repoPath)) {
+    autoUpdateLog(`[AUTO_UPDATE] skip (${reason}): repo_path inexistente -> ${repoPath}`, 'error');
+    return false;
+  }
+  if (!fs.existsSync(path.join(repoPath, '.git'))) {
+    autoUpdateLog(`[AUTO_UPDATE] skip (${reason}): ${repoPath} no es un repositorio git`, 'event');
+    return false;
+  }
+
+  await runCommand('git', ['rev-parse', '--is-inside-work-tree'], { cwd: repoPath, timeout: 15_000 });
+
+  const localHeadOut = await runCommand('git', ['rev-parse', 'HEAD'], { cwd: repoPath, timeout: 15_000 });
+  const localHead = String(localHeadOut.stdout || '').trim();
+  if (!localHead) throw new Error('git_local_head_empty');
+
+  // Refresca tags aunque la misma tag haya sido movida o recreada en remoto.
+  await runCommand('git', ['fetch', auto_update_remote || 'origin', '--tags', '--force', '--prune'], { cwd: repoPath, timeout: 120_000 });
+
+  const tagRef = `refs/tags/${desiredTag}`;
+  const targetHeadOut = await runCommand('git', ['rev-list', '-n', '1', tagRef], { cwd: repoPath, timeout: 15_000 });
+  const targetHead = String(targetHeadOut.stdout || '').trim();
+  if (!targetHead) throw new Error(`git_target_tag_not_found:${desiredTag}`);
+
+  if (targetHead === localHead) {
+    autoUpdateLog(`[AUTO_UPDATE] ok (${reason}): sin cambios (${localHead.slice(0, 7)}) target=target_tag:${desiredTag}`, 'event');
+    return false;
+  }
+
+  autoUpdateLog(`[AUTO_UPDATE] FORCE update (${reason}): ${localHead.slice(0, 7)} -> ${targetHead.slice(0, 7)} target=target_tag:${desiredTag}`, 'event');
+
+  const changedOut = await runCommand('git', ['diff', '--name-only', `${localHead}..${targetHead}`], { cwd: repoPath, timeout: 30_000 });
+  const changedFiles = String(changedOut.stdout || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+
+  // En arranque forzado ignoramos working tree local: reemplazamos sí o sí.
+  await runCommand('git', ['reset', '--hard', targetHead], { cwd: repoPath, timeout: 120_000 });
+  await runCommand('git', ['clean', '-fd'], { cwd: repoPath, timeout: 120_000 });
+
+  if (auto_update_run_npm_install) {
+    const needsNpm = changedFiles.some((name) => /(^|\/)(package\.json|package-lock\.json)$/i.test(name));
+    if (needsNpm) {
+      autoUpdateLog('[AUTO_UPDATE] package*.json cambió, ejecutando npm install --omit=dev', 'event');
+      await runCommand('npm', ['install', '--omit=dev'], { cwd: repoPath, timeout: 10 * 60_000 });
+    }
+  }
+
+  if (auto_update_post_update_cmd) {
+    autoUpdateLog(`[AUTO_UPDATE] ejecutando post_update_cmd: ${auto_update_post_update_cmd}`, 'event');
+    if (process.platform === 'win32') {
+      await runCommand('cmd', ['/c', auto_update_post_update_cmd], { cwd: repoPath, timeout: 10 * 60_000, shell: false });
+    } else {
+      await runCommand('sh', ['-lc', auto_update_post_update_cmd], { cwd: repoPath, timeout: 10 * 60_000, shell: false });
+    }
+  }
+
+  autoUpdateLog(`[AUTO_UPDATE] cambios forzados aplicados en ${repoPath}`, 'event');
+
+  if (auto_update_restart_on_apply) {
+    autoUpdateRestarting = true;
+    autoUpdateLog('[AUTO_UPDATE] reiniciando proceso para aplicar actualización forzada...', 'event');
+    setTimeout(() => { gracefulShutdown('AUTO_UPDATE_FORCE_BOOT'); }, 1200);
+  }
+  return true;
+}
+ 
 
 async function autoUpdateCheckAndApply(reason = 'interval') {
   if (!auto_update_enabled || autoUpdateRunning || autoUpdateRestarting) return;
@@ -712,11 +784,17 @@ function startAutoUpdateScheduler() {
   const repoPath = path.resolve(auto_update_repo_path || process.cwd());
   autoUpdateLog(`[AUTO_UPDATE] activado repo=${repoPath} remote=${auto_update_remote} source=${auto_update_source} targetTag=${auto_update_target_tag || '(auto)'} branch=${auto_update_branch || '(auto)'} every=${auto_update_check_every_ms}ms startupDelay=${auto_update_startup_delay_ms}ms`, 'event');
 
-  setTimeout(() => {
+  setTimeout(async () => {
+    try { await loadTenantConfigFromDbMinimal(); } catch (e) {
+      try { autoUpdateLog(`[AUTO_UPDATE] refresh config startup error: ${e?.message || e}`, 'error'); } catch {}
+    }
     autoUpdateCheckAndApply('startup').catch(() => {});
   }, Math.max(0, Number(auto_update_startup_delay_ms) || 0));
 
-  autoUpdateTimer = setInterval(() => {
+  autoUpdateTimer = setInterval(async () => {
+    try { await loadTenantConfigFromDbMinimal(); } catch (e) {
+      try { autoUpdateLog(`[AUTO_UPDATE] refresh config interval error: ${e?.message || e}`, 'error'); } catch {}
+    }
     autoUpdateCheckAndApply('interval').catch(() => {});
   }, Math.max(60_000, Number(auto_update_check_every_ms) || 600_000));
 }
@@ -1319,11 +1397,11 @@ app.post("/control/release", requireStatusToken, async (req, res) => {
 
     // Si el tenant pide una TAG concreta, validar al iniciar antes de levantar WhatsApp.
     try {
-      await autoUpdateCheckAndApply('boot_target_tag');
+      await autoUpdateForceTargetTagOnBoot('boot_target_tag_force');
       if (autoUpdateRestarting) return;
     } catch (e) {
-      try { console.log('boot_target_tag auto-update error:', e?.message || e); } catch {}
-      try { EscribirLog('boot_target_tag auto-update error: ' + String(e?.message || e), 'error'); } catch {}
+       try { console.log('boot_target_tag_force auto-update error:', e?.message || e); } catch {}
+      try { EscribirLog('boot_target_tag_force auto-update error: ' + String(e?.message || e), 'error'); } catch {}
     }
 
     server.listen(port, function() {
