@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version:4.00.29   13/04/2026   */
+/*version:4.00.30   13/04/2026   */
 
 
 
