@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version:4.00.30   13/04/2026   */
+/*version: 4.00.34  23/04/2026   */
 
 
 
@@ -832,6 +832,10 @@ let actionTimer = null;
 let pollTimer = null;
 let actionBusy = false;
 let heartbeatBusy = false;
+let restartInFlight = false;
+let authReadyWatchdogTimer = null;
+let authReadyWatchdogSeq = 0;
+const AUTH_READY_WATCHDOG_MS = Math.max(30000, Number(process.env.AUTH_READY_WATCHDOG_MS || 90000));
 var a = 0;
 var port = Number(process.env.PORT || 8002);
 var headless = true;
@@ -1640,11 +1644,137 @@ async function updateLockQrDataSafe(qrDataUrl, qrAtIso) {
 // Lock/lease multi-PC removido en modo simplificado.
 
 
+function clearAuthReadyWatchdog(reason = '') {
+  try {
+    authReadyWatchdogSeq += 1;
+    if (authReadyWatchdogTimer) {
+      clearTimeout(authReadyWatchdogTimer);
+      authReadyWatchdogTimer = null;
+    }
+  } catch {}
+}
+
+function resetClientRuntimeFlags(reason = '') {
+  try { clientStarted = false; } catch {}
+  try { startingNow = false; } catch {}
+  try { authFailureHandling = false; } catch {}
+  try { clearAuthReadyWatchdog(reason); } catch {}
+}
+
+async function restartClientSession(reason = 'restart', waitMs = 6500) {
+  if (restartInFlight) {
+    try { EscribirLog('[RESTART] ya hay un reinicio en curso: ' + String(reason || ''), 'event'); } catch {}
+    return false;
+  }
+
+  restartInFlight = true;
+  const delay = Math.max(3500, Number(waitMs) || 6500);
+
+ try {
+    try { EscribirLog('[RESTART] inicio -> ' + String(reason || ''), 'event'); } catch {}
+    try { await updateLockStateSafe('restarting'); } catch {}
+
+    clearAuthReadyWatchdog('restart:' + String(reason || ''));
+
+    try {
+      if (client && typeof destroyClientHard === 'function') await destroyClientHard(client);
+      else if (client) await client.destroy();
+    } catch (e) {
+      try { EscribirLog('[RESTART] destroy error: ' + String(e?.message || e), 'error'); } catch {}
+    }
+
+    try { client = null; } catch {}
+    resetClientRuntimeFlags('restart:' + String(reason || ''));
+
+    await sleep(delay);
+
+    if (!isOwner) {
+      try { EscribirLog('[RESTART] cancelado porque la instancia ya no es owner', 'event'); } catch {}
+      return false;
+    }
+
+    await startClientInitialize();
+    return true;
+  } catch (e) {
+   try { EscribirLog('[RESTART] error: ' + String(e?.message || e), 'error'); } catch {}
+    return false;
+  } finally {
+    restartInFlight = false;
+  }
+}
+
+function armAuthReadyWatchdog(source = 'authenticated', waitMs = AUTH_READY_WATCHDOG_MS) {
+  clearAuthReadyWatchdog('rearm:' + String(source || ''));
+  const seq = ++authReadyWatchdogSeq;
+  const delay = Math.max(30000, Number(waitMs) || AUTH_READY_WATCHDOG_MS);
+
+  authReadyWatchdogTimer = setTimeout(async () => {
+    try {
+      if (seq !== authReadyWatchdogSeq) return;
+      authReadyWatchdogTimer = null;
+
+      if (!isOwner) return;
+      if (localWsPanelState === 'online') return;
+      if (restartInFlight) return;
+
+      const currentState = String(localWsPanelState || '');
+      if (currentState !== 'authenticated' && currentState !== 'starting' && currentState !== 'restarting') return;
+
+      try { EscribirLog('[WATCHDOG] autenticado sin ready -> reiniciando (' + String(source || '') + ')', 'event'); } catch {}
+      await restartClientSession('watchdog_' + String(source || ''), 7000);
+    } catch (e) {
+      try { EscribirLog('[WATCHDOG] error: ' + String(e?.message || e), 'error'); } catch {}
+    }
+  }, delay);
+}
+
+
+async function ensureTenantVersionBeforeWhatsAppStart(reason = 'before_whatsapp_start') {
+  try {
+    await loadTenantConfigFromDbMinimal();
+  } catch (e) {
+    try { EscribirLog('ensureTenantVersionBeforeWhatsAppStart config error: ' + String(e?.message || e), 'error'); } catch {}
+  }
+
+  const desiredTag = String(auto_update_target_tag || '').trim();
+  if (!desiredTag) return { checked: false, desiredTag: '', changed: false, restartScheduled: false };
+
+  try {
+    const changed = await autoUpdateForceTargetTagOnBoot(reason);
+    return {
+      checked: true,
+      desiredTag,
+      changed: !!changed,
+     restartScheduled: !!autoUpdateRestarting
+    };
+  } catch (e) {
+    try { EscribirLog('ensureTenantVersionBeforeWhatsAppStart update error: ' + String(e?.message || e), 'error'); } catch {}
+    throw e;
+  }
+}
+
+
 async function startClientInitialize() {
   // Inicializa WhatsApp SOLO si esta instancia es dueña del lock.
   if (clientStarted) return;
   if (!isOwner) return;
+  clearAuthReadyWatchdog('before_initialize');
 
+  // Antes de cada inicio real del cliente, refrescamos tenant_config y
+  // verificamos si la versión/tag objetivo cambió en Mongo.
+  // Si hay que actualizar el código, se aplica y el proceso se reinicia,
+  // evitando levantar WhatsApp con una versión vieja.
+  try {
+    const versionCheck = await ensureTenantVersionBeforeWhatsAppStart('before_whatsapp_start');
+    if (versionCheck?.restartScheduled) {
+      try { EscribirLog('[AUTO_UPDATE] reinicio programado antes de iniciar WhatsApp. Se cancela init actual.', 'event'); } catch {}
+      return;
+    }
+  } catch (e) {
+    console.log("Chequeo de versión antes de iniciar WhatsApp falló:", e?.message || e);
+    EscribirLog("Chequeo de versión antes de iniciar WhatsApp falló: " + String(e?.message || e), "error");
+    return;
+  }
 
   // Política: si está deshabilitado desde el panel, NO inicializamos WhatsApp.
   try {
@@ -1695,6 +1825,7 @@ async function startClientInitialize() {
     // Si la inicialización falla, limpiamos fuerte para permitir reintentos limpios
     try { await destroyClientHard(client); } catch {}
     try { client = null; } catch {}
+    clearAuthReadyWatchdog('initialize_error');
   } finally {
     startingNow = false;
   }
@@ -1771,19 +1902,8 @@ async function handleActionDoc(doc) {
   try {
     if (action === 'restart') {
       EscribirLog('Accion RESTART recibida: ' + reason, 'event');
-      await updateLockStateSafe('restarting');
-
-      try {
-        if (client && typeof destroyClientHard === "function") await destroyClientHard(client);
-        else if (client) await client.destroy();
-      } catch {}
-      try { client = null; } catch {}
-      clientStarted = false;
-
-      if (isOwner && !startingNow) {
-        await startClientInitialize();
-      }
-      return 'restarted';
+      const ok = await restartClientSession('panel_restart:' + reason, 7000);
+      return ok ? 'restarted' : 'restart_skipped';
     }
 
     if (action === 'release') {
@@ -1793,7 +1913,7 @@ async function handleActionDoc(doc) {
         else if (client) await client.destroy();
       } catch {}
       try { client = null; } catch {}
-      clientStarted = false;
+      resetClientRuntimeFlags('release');
       localWsPanelState = 'offline';
       await forceReleaseLock('offline');
       isOwner = false;
@@ -1810,7 +1930,7 @@ async function handleActionDoc(doc) {
         else if (client) await client.destroy();
       } catch {}
       try { client = null; } catch {}
-      clientStarted = false;
+      resetClientRuntimeFlags('resetauth');
       localWsPanelState = 'offline';
       await forceReleaseLock('offline');
       isOwner = false;
@@ -1873,7 +1993,9 @@ async function gracefulShutdown(signal) {
   try { if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; } } catch {}
   try { if (actionTimer) { clearInterval(actionTimer); actionTimer = null; } } catch {}
   try { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } } catch {}
-  try { if (client) { try { await client.destroy(); } catch {} } } catch {}
+  try { clearAuthReadyWatchdog('shutdown'); } catch {}
+  try { if (client) { try { await destroyClientHard(client); } catch { try { await client.destroy(); } catch {} } } } catch {}
+  try { resetClientRuntimeFlags('shutdown'); } catch {}
   try { localWsPanelState = 'offline'; } catch {}
   try { await updateLockStateSafe('offline'); } catch {}
   try { await forceReleaseLock('offline'); } catch {}
@@ -2292,6 +2414,8 @@ EscribirLog(message.from +' '+message.to+' '+message.type+' '+message.body ,"eve
 
 
 client.on('ready', async () => {
+  clearAuthReadyWatchdog('ready');
+  restartInFlight = false;
   console.log("listo ready....");
   telefono_qr = client.info.me.user
   console.log("TEL QR: "+client.info.me.user);
@@ -2310,6 +2434,7 @@ client.on('ready', async () => {
 });
 
 client.on('qr', (qr) => {
+  clearAuthReadyWatchdog('qr');
   console.log('QR RECEIVED', qr);
 pushHistory('qr', { at: new Date().toISOString() }).catch(()=>{});
   // Guardar último QR para endpoint /status/qr
@@ -2340,6 +2465,7 @@ client.on('authenticated', async () => {
   console.log('Autenticado');
   EscribirLog('Autenticado',"event");
   updateLockStateSafe('authenticated').catch(()=>{});
+  armAuthReadyWatchdog('authenticated');
 
 });
 
@@ -2350,25 +2476,21 @@ client.on('auth_failure', async function(session) {
   EnviarEmail('Chatbot error Auth failure','Auth failure: '+ String(session || '') + ' ' + client);
   EscribirLog('Error 04 - Chatbot error Auth failure', String(session || ''), "error");
   updateLockStateSafe('auth_failure').catch(()=>{});
+  clearAuthReadyWatchdog('auth_failure');
+ 
 
   // Sin backup/restore remoto: reiniciamos el cliente y dejamos que LocalAuth use solo la sesión local.
   if (isLocalAuthMode() && isOwner && !authFailureHandling) {
     authFailureHandling = true;
     setTimeout(async () => {
       try {
-        try { await destroyClientHard(client); } catch {}
-        try { client = null; } catch {}
-        clientStarted = false;
-
-        if (isOwner && !clientStarted) {
-          await startClientInitialize();
-        }
+        await restartClientSession('auth_failure', 7000);
       } catch (e) {
         EscribirLog('auth_failure recovery error: ' + String(e?.message || e), 'error');
       } finally {
         authFailureHandling = false;
       }
-    }, 2000);
+    }, 2500);
   }
 });
 
@@ -2378,13 +2500,16 @@ client.on('disconnected', async (reason) => {
   EscribirLog('Chatbot Desconectado ','Desconectando...',"event");
   updateLockStateSafe('disconnected').catch(()=>{});
 
-  try { await client.destroy(); } catch(e) {}
-  clientStarted = false;
+  clearAuthReadyWatchdog('disconnected');
+
+  try { if (client) await destroyClientHard(client); } catch(e) {}
+  try { client = null; } catch {}
+  resetClientRuntimeFlags('disconnected');
 
   // Solo reintenta si esta PC sigue siendo owner del lock.
   if (isOwner) {
     setTimeout(() => {
-      if (isOwner && !clientStarted) startClientInitialize();
+      if (isOwner && !clientStarted && !restartInFlight) restartClientSession('disconnected', 7000).catch(() => {});
     }, 2500);
   }
 });
