@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.35  23/04/2026   */
+/*version: 4.00.36  07/05/2026   */
 
 
 
@@ -864,6 +864,7 @@ var email_err = "";
 var msg_cad = "";
 var msg_can = "";
 var bandera_msg = 1;
+var caducidadMonitorStarted = false;
 var jsonGlobal = [];   //1-json, 2 -i , 3-tel, 4-hora
 var json;
 var i_global = 0;
@@ -2226,8 +2227,18 @@ client.on('message', async message => {
  }else{
  var valor_i = jsonGlobal[indice_telefono][1];
  }
- 
-EscribirLog(message.from +' '+message.to+' '+message.type+' '+message.body ,"event");
+
+  // Si había una tanda esperando S/N pero ya caducó, limpiamos antes de interpretar
+  // el mensaje actual. Así cualquier texto nuevo vuelve a iniciar conversación.
+  if(indice_telefono !== -1 && valor_i !== 0){
+    const expiredPending = await expireJsonGlobalIfNeeded(indice_telefono, true);
+    if(expiredPending){
+      indice_telefono = -1;
+      valor_i = 0;
+    }
+  }
+
+  EscribirLog(message.from +' '+message.to+' '+message.type+' '+message.body ,"event");
 
 
   console.log("mensaje "+message.from);
@@ -2399,8 +2410,12 @@ EscribirLog(message.from +' '+message.to+' '+message.type+' '+message.body ,"eve
     
 
     if(valor_i !== 0 && body == 'S'){
+      if(indice_telefono === -1 || !jsonGlobal[indice_telefono] || !jsonGlobal[indice_telefono][2]){
+        clearJsonGlobalEntry(indice_telefono);
+        return;
+      }
       console.log("continuar "+tam_json+' indice '+indice_telefono);
-      procesar_mensaje(jsonGlobal[indice_telefono][2], message);
+      await procesar_mensaje(jsonGlobal[indice_telefono][2], message);
 
      }
 //}  //
@@ -2425,6 +2440,7 @@ client.on('ready', async () => {
    EscribirLog('Whatsapp Listo!',"event");
    // Para el panel: sesión activa
   updateLockStateSafe('online').catch(()=>{});
+  startCaducidadMonitor();
   // Opcional: si querés conservar un "hito" ready en historial:
   // updateLockStateSafe('ready').catch(()=>{});
 
@@ -2574,6 +2590,80 @@ function indexOf2d(itemtofind) {
  
   }
 
+
+
+function getTimeCadMs() {
+  const raw = Number(time_cad);
+  if (!Number.isFinite(raw) || raw <= 0) return 0;
+
+  // Compatibilidad: si en Mongo se guarda 300/600/etc. lo tratamos como segundos.
+  // Si se guarda 300000/600000/etc. lo respetamos como milisegundos, como hacía el script.
+  if (raw > 0 && raw < 1000) return raw * 1000;
+  return raw;
+}
+
+function getJsonGlobalTsMs(indice) {
+  try {
+    const value = jsonGlobal?.[indice]?.[3];
+    if (!value) return 0;
+    if (value instanceof Date) return value.getTime();
+    const d = new Date(value);
+    const ms = d.getTime();
+    return Number.isFinite(ms) ? ms : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function clearJsonGlobalEntry(indice) {
+  try {
+    if (indice === -1 || !jsonGlobal?.[indice]) return;
+    jsonGlobal[indice][2] = '';
+    jsonGlobal[indice][1] = 0;
+    jsonGlobal[indice][3] = '';
+    bandera_msg = 1;
+  } catch {}
+}
+
+function isJsonGlobalExpired(indice) {
+  const cadMs = getTimeCadMs();
+  if (!cadMs) return false;
+  if (indice === -1 || !jsonGlobal?.[indice]) return false;
+  if (!jsonGlobal[indice][3]) return false;
+  if (!jsonGlobal[indice][1]) return false;
+
+  const ts = getJsonGlobalTsMs(indice);
+  if (!ts) return false;
+  return (Date.now() - ts) > cadMs;
+}
+
+async function expireJsonGlobalIfNeeded(indice, notify) {
+  if (!isJsonGlobalExpired(indice)) return false;
+  const telefono = String(jsonGlobal?.[indice]?.[0] || '');
+  const cadMs = getTimeCadMs();
+  const ts = getJsonGlobalTsMs(indice);
+  const diferencia = ts ? (Date.now() - ts) : 0;
+
+  if (notify && msg_cad !== '' && msg_cad !== undefined && msg_cad !== 0) {
+    try { await safeSend(telefono, msg_cad); } catch {}
+  }
+
+  console.log('tiempo expirado ' + telefono + ' ' + diferencia + ' ' + cadMs);
+  try { EscribirLog('tiempo expirado ' + telefono + ' ' + diferencia + ' ' + cadMs, 'event'); } catch {}
+  clearJsonGlobalEntry(indice);
+  return true;
+}
+
+function startCaducidadMonitor() {
+  if (caducidadMonitorStarted) return;
+  caducidadMonitorStarted = true;
+  controlar_hora_msg().catch((e) => {
+    caducidadMonitorStarted = false;
+    try { EscribirLog('controlar_hora_msg error: ' + String(e?.message || e), 'error'); } catch {}
+  });
+}
+
+
 /////////////////////////////////////////////////////////////////////////////////////
 // FUNCION DONDE SE PROCESA EL JSON GLOBAL DE MSG Y SE ENVIA
 ////////////////////////////////////////////////////////////////////////////////
@@ -2668,32 +2758,11 @@ async function procesar_mensaje(json, message){
 async function controlar_hora_msg(){
 
   while(a < 1){
+   try { RecuperarJsonConfMensajes(); } catch {}
+
      for(var i in jsonGlobal){
-     
-      if( jsonGlobal[i][3] !== ''){
-        var fecha = new Date();
-        var fecha_msg = jsonGlobal[i][3].getTime();
-        var fecha_msg2 = fecha.getTime();
-        var diferencia = fecha_msg2-fecha_msg;
-        if(diferencia > time_cad ){
-          if(msg_cad == '' || msg_cad  == undefined || msg_cad == 0 ){
-            
-          } else {
-            safeSend(jsonGlobal[i][0],msg_cad );
-
-          }
-          console.log("timepo expirado "+ jsonGlobal[i][0]+' '+diferencia+' '+time_cad );
-          // delete(jsonGlobal[i]);
-          let now = new Date();
-          jsonGlobal[i][3] = '';
-          jsonGlobal[i][2] = '';
-          jsonGlobal[i][1] = 0;
-          }
-        }
-
-        
-        
-    }
+       await expireJsonGlobalIfNeeded(i, true);
+     }
    
     await sleep(5000);
   }   
