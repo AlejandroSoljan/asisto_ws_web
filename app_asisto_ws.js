@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.36  07/05/2026   */
+/*version: 4.00.37  07/05/2026   */
 
 
 
@@ -130,7 +130,7 @@ function applyTenantConfig(conf) {
   if (conf.msg_fin !== undefined) msg_fin = String(conf.msg_fin ?? "");
   cant_lim = asNumber(conf.cant_lim, cant_lim);
   if (conf.msg_lim !== undefined) msg_lim = String(conf.msg_lim ?? "");
-  time_cad = asNumber(conf.time_cad, time_cad);
+  applyTimeCadConfig(conf);
   if (conf.msg_cad !== undefined) msg_cad = String(conf.msg_cad ?? "");
   if (conf.msg_can !== undefined) msg_can = String(conf.msg_can ?? "");
   if (conf.nom_emp !== undefined) nom_chatbot = String(conf.nom_emp);
@@ -860,11 +860,14 @@ var msg_fin = "";
 var cant_lim = 0;
 var msg_lim = 'Continuar? S / N';
 var time_cad = 0;
+var time_cad_raw = "";
+var caducidadMonitorStarted = false;
+var caducidadMonitorRunning = false;
+var lastCaducidadDebugAt = 0;
 var email_err = "";
 var msg_cad = "";
 var msg_can = "";
 var bandera_msg = 1;
-var caducidadMonitorStarted = false;
 var jsonGlobal = [];   //1-json, 2 -i , 3-tel, 4-hora
 var json;
 var i_global = 0;
@@ -1348,6 +1351,13 @@ app.get("/status", requireStatusToken, async (req, res) => {
     waState,
     telefono_qr,
     runtimeInfo,
+    timeCad: {
+      raw: time_cad_raw || time_cad,
+      storedValue: time_cad,
+      effectiveMs: getTimeCadMs(),
+      monitorStarted: !!caducidadMonitorStarted,
+      monitorRunning: !!caducidadMonitorRunning
+    },
     lock
   });
 });
@@ -2228,11 +2238,14 @@ client.on('message', async message => {
  var valor_i = jsonGlobal[indice_telefono][1];
  }
 
-  // Si había una tanda esperando S/N pero ya caducó, limpiamos antes de interpretar
-  // el mensaje actual. Así cualquier texto nuevo vuelve a iniciar conversación.
-  if(indice_telefono !== -1 && valor_i !== 0){
-    const expiredPending = await expireJsonGlobalIfNeeded(indice_telefono, true);
-    if(expiredPending){
+
+
+
+  // Si había una tanda esperando S/N pero ya caducó, limpiar ANTES de interpretar
+  // el mensaje actual. De esta forma cualquier texto nuevo inicia una consulta nueva.
+  if (indice_telefono !== -1 && Number(valor_i || 0) !== 0) {
+    const expiredPending = await expireJsonGlobalIfNeeded(indice_telefono, true, 'incoming_message');
+    if (expiredPending) {
       indice_telefono = -1;
       valor_i = 0;
     }
@@ -2440,6 +2453,7 @@ client.on('ready', async () => {
    EscribirLog('Whatsapp Listo!',"event");
    // Para el panel: sesión activa
   updateLockStateSafe('online').catch(()=>{});
+
   startCaducidadMonitor();
   // Opcional: si querés conservar un "hito" ready en historial:
   // updateLockStateSafe('ready').catch(()=>{});
@@ -2537,33 +2551,6 @@ client.on('disconnected', async (reason) => {
 
 
 
-function recuperar_json(a_telefono, json){
-
-  var indice =indexOf2d(a_telefono);
-
-
-  let now = new Date();
- 
-  if(indice !== -1){
-   // console.log("ESTA "+a_telefono);
-   
-    jsonGlobal[indice][0] = a_telefono;
-   // jsonGlobal[a_telefono,2] = 0;
-    jsonGlobal[indice][2] = json;
-    jsonGlobal[indice][3] = now;
-    //console.table(jsonGlobal);
- }else{
-
-    //console.log("NO ESTA "  +a_telefono);
-     
-  jsonGlobal.push([a_telefono,0,json,now])
-    
-      
- }
-
-
-}
-
 function indexOf2d(itemtofind) {
   var valor = -1
   console.table(jsonGlobal);
@@ -2592,14 +2579,90 @@ function indexOf2d(itemtofind) {
 
 
 
-function getTimeCadMs() {
-  const raw = Number(time_cad);
-  if (!Number.isFinite(raw) || raw <= 0) return 0;
+// ============================================================================
+// Caducidad de tandas pendientes S/N
+// ============================================================================
+function parseDurationToMs(value, current = 0, forcedUnit = '') {
+  if (value === undefined || value === null || value === '') return current || 0;
 
-  // Compatibilidad: si en Mongo se guarda 300/600/etc. lo tratamos como segundos.
-  // Si se guarda 300000/600000/etc. lo respetamos como milisegundos, como hacía el script.
-  if (raw > 0 && raw < 1000) return raw * 1000;
-  return raw;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || value <= 0) return 0;
+    if (forcedUnit === 'ms') return Math.trunc(value);
+    if (forcedUnit === 's') return Math.trunc(value * 1000);
+    if (forcedUnit === 'm') return Math.trunc(value * 60 * 1000);
+    // Compatibilidad:
+    // - 300, 600, etc. desde Mongo suelen representar segundos.
+    // - 300000, 600000, etc. conservan el comportamiento legacy en milisegundos.
+    return value < 1000 ? Math.trunc(value * 1000) : Math.trunc(value);
+  }
+
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return current || 0;
+
+  // HH:MM:SS o MM:SS
+  const timeParts = raw.match(/^(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?$/);
+  if (timeParts) {
+    const a = Number(timeParts[1]);
+    const b = Number(timeParts[2]);
+    const c = timeParts[3] === undefined ? null : Number(timeParts[3]);
+    if ([a, b, c ?? 0].every(Number.isFinite)) {
+      if (c === null) return Math.trunc(((a * 60) + b) * 1000); // MM:SS
+      return Math.trunc(((a * 3600) + (b * 60) + c) * 1000); // HH:MM:SS
+    }
+  }
+
+  const m = raw.match(/^(-?\d+(?:[\.,]\d+)?)\s*(ms|miliseg(?:undo)?s?|s|seg|segs|segundo?s?|m|min|mins|minuto?s?|h|hr|hrs|hora?s?)?$/i);
+  if (m) {
+    const n = Number(String(m[1]).replace(',', '.'));
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    const unit = (forcedUnit || m[2] || '').toLowerCase();
+    if (unit === 'ms' || unit.startsWith('miliseg')) return Math.trunc(n);
+    if (unit === 'm' || unit.startsWith('min')) return Math.trunc(n * 60 * 1000);
+    if (unit === 'h' || unit.startsWith('hr') || unit.startsWith('hora')) return Math.trunc(n * 60 * 60 * 1000);
+    if (unit === 's' || unit.startsWith('seg')) return Math.trunc(n * 1000);
+    return n < 1000 ? Math.trunc(n * 1000) : Math.trunc(n);
+  }
+
+  return current || 0;
+}
+
+function applyTimeCadConfig(conf) {
+  try {
+    if (!conf || typeof conf !== 'object') return;
+
+    if (conf.time_cad_ms !== undefined && conf.time_cad_ms !== null && String(conf.time_cad_ms).trim() !== '') {
+      time_cad_raw = conf.time_cad_ms;
+      time_cad = parseDurationToMs(conf.time_cad_ms, time_cad, 'ms');
+      return;
+    }
+    if (conf.time_cad_seg !== undefined && conf.time_cad_seg !== null && String(conf.time_cad_seg).trim() !== '') {
+      time_cad_raw = conf.time_cad_seg;
+      time_cad = parseDurationToMs(conf.time_cad_seg, time_cad, 's');
+      return;
+    }
+    if (conf.time_cad_sec !== undefined && conf.time_cad_sec !== null && String(conf.time_cad_sec).trim() !== '') {
+      time_cad_raw = conf.time_cad_sec;
+      time_cad = parseDurationToMs(conf.time_cad_sec, time_cad, 's');
+      return;
+    }
+    if (conf.time_cad_min !== undefined && conf.time_cad_min !== null && String(conf.time_cad_min).trim() !== '') {
+      time_cad_raw = conf.time_cad_min;
+      time_cad = parseDurationToMs(conf.time_cad_min, time_cad, 'm');
+      return;
+    }
+
+    const value = conf.time_cad ?? conf.timeCad ?? conf.time_caducidad ?? conf.caducidad_msg;
+    if (value !== undefined && value !== null && String(value).trim() !== '') {
+      time_cad_raw = value;
+      time_cad = parseDurationToMs(value, time_cad);
+    }
+  } catch (e) {
+    try { EscribirLog('applyTimeCadConfig error: ' + String(e?.message || e), 'error'); } catch {}
+  }
+}
+
+function getTimeCadMs() {
+  return parseDurationToMs(time_cad, 0);
 }
 
 function getJsonGlobalTsMs(indice) {
@@ -2630,26 +2693,29 @@ function isJsonGlobalExpired(indice) {
   if (!cadMs) return false;
   if (indice === -1 || !jsonGlobal?.[indice]) return false;
   if (!jsonGlobal[indice][3]) return false;
-  if (!jsonGlobal[indice][1]) return false;
+  if (Number(jsonGlobal[indice][1] || 0) === 0) return false;
 
   const ts = getJsonGlobalTsMs(indice);
   if (!ts) return false;
   return (Date.now() - ts) > cadMs;
 }
 
-async function expireJsonGlobalIfNeeded(indice, notify) {
-  if (!isJsonGlobalExpired(indice)) return false;
+async function expireJsonGlobalIfNeeded(indice, notify, source = 'monitor') {
+ if (!isJsonGlobalExpired(indice)) return false;
+
   const telefono = String(jsonGlobal?.[indice]?.[0] || '');
   const cadMs = getTimeCadMs();
   const ts = getJsonGlobalTsMs(indice);
   const diferencia = ts ? (Date.now() - ts) : 0;
 
-  if (notify && msg_cad !== '' && msg_cad !== undefined && msg_cad !== 0) {
+  if (notify && msg_cad !== '' && msg_cad !== undefined && msg_cad !== 0 && telefono) {
     try { await safeSend(telefono, msg_cad); } catch {}
   }
 
-  console.log('tiempo expirado ' + telefono + ' ' + diferencia + ' ' + cadMs);
-  try { EscribirLog('tiempo expirado ' + telefono + ' ' + diferencia + ' ' + cadMs, 'event'); } catch {}
+  const logLine = 'tiempo expirado ' + telefono + ' diferencia=' + diferencia + ' cadMs=' + cadMs + ' source=' + source + ' raw=' + String(time_cad_raw || time_cad || '');
+  console.log(logLine);
+  try { EscribirLog(logLine, 'event'); } catch {}
+
   clearJsonGlobalEntry(indice);
   return true;
 }
@@ -2659,9 +2725,12 @@ function startCaducidadMonitor() {
   caducidadMonitorStarted = true;
   controlar_hora_msg().catch((e) => {
     caducidadMonitorStarted = false;
+    caducidadMonitorRunning = false;
     try { EscribirLog('controlar_hora_msg error: ' + String(e?.message || e), 'error'); } catch {}
   });
 }
+
+
 
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -2757,15 +2826,31 @@ async function procesar_mensaje(json, message){
 
 async function controlar_hora_msg(){
 
-  while(a < 1){
-   try { RecuperarJsonConfMensajes(); } catch {}
+  caducidadMonitorRunning = true;
+  while(true){
+    try { RecuperarJsonConfMensajes(); } catch {}
 
-     for(var i in jsonGlobal){
-       await expireJsonGlobalIfNeeded(i, true);
+    const cadMs = getTimeCadMs();
+    const nowMs = Date.now();
+
+    // Debug liviano cada 60 segundos para confirmar el valor real leído desde Mongo.
+    if ((nowMs - lastCaducidadDebugAt) > 60000) {
+      lastCaducidadDebugAt = nowMs;
+      try {
+        console.log('[CADUCIDAD] monitor activo time_cad_raw=' + String(time_cad_raw || time_cad || '') + ' effectiveMs=' + cadMs + ' pendientes=' + jsonGlobal.filter(x => x && Number(x[1] || 0) !== 0).length);
+      } catch {}
+    }
+
+     
+        
+    for(var i in jsonGlobal){
+      await expireJsonGlobalIfNeeded(i, true, 'monitor');
      }
    
-    await sleep(5000);
-  }   
+
+     await sleep(5000);
+  
+  } 
 }
 
  
