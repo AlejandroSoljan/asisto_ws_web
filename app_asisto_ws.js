@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.37  07/05/2026   */
+/*version: 4.00.35  23/04/2026   */
 
 
 
@@ -130,7 +130,7 @@ function applyTenantConfig(conf) {
   if (conf.msg_fin !== undefined) msg_fin = String(conf.msg_fin ?? "");
   cant_lim = asNumber(conf.cant_lim, cant_lim);
   if (conf.msg_lim !== undefined) msg_lim = String(conf.msg_lim ?? "");
-  applyTimeCadConfig(conf);
+  time_cad = asNumber(conf.time_cad, time_cad);
   if (conf.msg_cad !== undefined) msg_cad = String(conf.msg_cad ?? "");
   if (conf.msg_can !== undefined) msg_can = String(conf.msg_can ?? "");
   if (conf.nom_emp !== undefined) nom_chatbot = String(conf.nom_emp);
@@ -207,6 +207,130 @@ function arDatePartsForStats(date) {
   }
 }
 
+// WhatsApp Web puede entregar remotos como @lid, sobre todo en Linux/nuevas sesiones.
+// Para el API y las estadísticas necesitamos el teléfono real cuando whatsapp-web.js
+// lo puede resolver desde el contacto.
+const waContactPhoneCache = new Map();
+
+function stripWhatsappSuffix(value) {
+  return String(value || '')
+    .replace(/^whatsapp:/i, '')
+    .replace(/@c\.us$/i, '')
+    .replace(/@s\.whatsapp\.net$/i, '')
+    .trim();
+}
+
+function onlyDigits(value) {
+  return String(value || '').replace(/\D/g, '');
+}
+
+function looksLikeLid(value) {
+  return /@lid$/i.test(String(value || '').trim());
+}
+
+function rememberContactPhone(rawId, phone) {
+  try {
+    const p = onlyDigits(stripWhatsappSuffix(phone));
+    if (!p || p.length < 8) return '';
+
+    const raw = String(rawId || '').trim();
+    const cleanRaw = stripWhatsappSuffix(raw);
+
+    if (raw) waContactPhoneCache.set(raw, p);
+    if (cleanRaw) waContactPhoneCache.set(cleanRaw, p);
+    waContactPhoneCache.set(p, p);
+    waContactPhoneCache.set(p + '@c.us', p);
+
+    return p;
+  } catch {
+    return '';
+  }
+}
+
+async function resolvePhoneFromContactId(contactId) {
+  const raw = String(contactId || '').trim();
+  if (!raw) return '';
+
+  const cleanRaw = stripWhatsappSuffix(raw);
+  const cached = waContactPhoneCache.get(raw) || waContactPhoneCache.get(cleanRaw);
+ if (cached) return cached;
+
+  // Si ya vino como teléfono real, no hace falta consultar.
+  if (!looksLikeLid(raw)) {
+    const digits = onlyDigits(cleanRaw);
+    if (digits && digits.length >= 8) {
+     return rememberContactPhone(raw, digits);
+    }
+  }
+
+  // Si vino como @lid, intentamos resolverlo desde whatsapp-web.js.
+  try {
+    if (client && typeof client.getContactById === 'function') {
+      const c = await client.getContactById(raw);
+      const number = onlyDigits(c?.number || '');
+      if (number && number.length >= 8) {
+        return rememberContactPhone(raw, number);
+      }
+
+      const idUser = String(c?.id?.user || '').trim();
+      const serialized = String(c?.id?._serialized || '').trim();
+      if (idUser && !looksLikeLid(serialized)) {
+        const idDigits = onlyDigits(idUser);
+        if (idDigits && idDigits.length >= 8) {
+          return rememberContactPhone(raw, idDigits);
+        }
+      }
+    }
+  } catch (e) {
+    try { EscribirLog('resolvePhoneFromContactId no pudo resolver ' + raw + ': ' + String(e?.message || e), 'event'); } catch {}
+  }
+
+  return '';
+}
+
+async function resolvePhoneFromIncomingMessage(message) {
+  try {
+    if (!message) return '';
+    const from = String(message.from || '').trim();
+    if (from === 'status@broadcast') return from;
+
+    try {
+      if (typeof message.getContact === 'function') {
+        const c = await message.getContact();
+        const number = onlyDigits(c?.number || '');
+        if (number && number.length >= 8) {
+          return rememberContactPhone(from, number);
+        }
+      }
+    } catch {}
+
+    const byId = await resolvePhoneFromContactId(from);
+    if (byId) return byId;
+
+    // Último fallback: si era @lid, no inventamos teléfono.
+    // Sin resolver el número real, no conviene mandarlo al API como si fuera teléfono.
+    if (looksLikeLid(from)) return '';
+    return stripWhatsappSuffix(from);
+  } catch {
+    return stripWhatsappSuffix(message?.from || '');
+  }
+}
+
+async function normalizeContactForStats(contact) {
+  const raw = String(contact || '').trim();
+  if (!raw) return '';
+
+  const resolved = await resolvePhoneFromContactId(raw);
+  if (resolved) return resolved;
+
+  // Si quedó @lid sin resolver, lo dejamos explícito para poder detectarlo.
+  // No lo mezclamos con teléfonos reales porque no es el número del cliente.
+  if (looksLikeLid(raw)) return raw;
+  return stripWhatsappSuffix(raw);
+}
+
+
+
 async function logMessageStat(direction, contact, payload) {
   try {
     if (!tenantId || !numero) return;
@@ -236,7 +360,7 @@ async function logMessageStat(direction, contact, payload) {
     }
 
     body = String(body || '');
-    const cleanContact = String(contact || '').replace(/@c\.us$/i, '').trim();
+    const cleanContact = await normalizeContactForStats(contact);
     if (!cleanContact) return;
 
     await MessageLogModel.create({
@@ -305,7 +429,9 @@ async function logOutgoingFromMessageFallback(messageLike) {
     if (messageLike.fromMe !== true) return false;
     if (wasOutgoingStatLogged(messageLike)) return false;
 
-    const to = String(messageLike.to || messageLike.from || '').trim();
+    const toRaw = String(messageLike.to || messageLike.from || '').trim();
+    if (!toRaw) return false;
+    const to = await normalizeContactForStats(toRaw);
     if (!to) return false;
 
     const payload = {
@@ -860,10 +986,6 @@ var msg_fin = "";
 var cant_lim = 0;
 var msg_lim = 'Continuar? S / N';
 var time_cad = 0;
-var time_cad_raw = "";
-var caducidadMonitorStarted = false;
-var caducidadMonitorRunning = false;
-var lastCaducidadDebugAt = 0;
 var email_err = "";
 var msg_cad = "";
 var msg_can = "";
@@ -1351,13 +1473,6 @@ app.get("/status", requireStatusToken, async (req, res) => {
     waState,
     telefono_qr,
     runtimeInfo,
-    timeCad: {
-      raw: time_cad_raw || time_cad,
-      storedValue: time_cad,
-      effectiveMs: getTimeCadMs(),
-      monitorStarted: !!caducidadMonitorStarted,
-      monitorRunning: !!caducidadMonitorRunning
-    },
     lock
   });
 });
@@ -2237,21 +2352,8 @@ client.on('message', async message => {
  }else{
  var valor_i = jsonGlobal[indice_telefono][1];
  }
-
-
-
-
-  // Si había una tanda esperando S/N pero ya caducó, limpiar ANTES de interpretar
-  // el mensaje actual. De esta forma cualquier texto nuevo inicia una consulta nueva.
-  if (indice_telefono !== -1 && Number(valor_i || 0) !== 0) {
-    const expiredPending = await expireJsonGlobalIfNeeded(indice_telefono, true, 'incoming_message');
-    if (expiredPending) {
-      indice_telefono = -1;
-      valor_i = 0;
-    }
-  }
-
-  EscribirLog(message.from +' '+message.to+' '+message.type+' '+message.body ,"event");
+ 
+EscribirLog(message.from +' '+message.to+' '+message.type+' '+message.body ,"event");
 
 
   console.log("mensaje "+message.from);
@@ -2271,15 +2373,19 @@ client.on('message', async message => {
    var telefonoTo = message.to;
   // var telefonoFrom = message.from;
 
-      const contact = await client.getContactById(message.from); // ej: '1203...@lid'
-      console.log(contact.id._serialized); // '1203...@lid'
-      console.log(contact.number); 
-//tel_from = contact.number;
-      var telefonoFrom = contact.number;  
+      const remoteFrom = String(message.from || '').trim();
+      var telefonoFrom = await resolvePhoneFromIncomingMessage(message);
+      if (remoteFrom && telefonoFrom && telefonoFrom !== stripWhatsappSuffix(remoteFrom)) {
+        console.log('[LID] remitente resuelto: ' + remoteFrom + ' -> ' + telefonoFrom);
+        try { EscribirLog('[LID] remitente resuelto: ' + remoteFrom + ' -> ' + telefonoFrom, 'event'); } catch {}
+      } else if (looksLikeLid(remoteFrom)) {
+        console.log('[LID] no se pudo resolver teléfono real para ' + remoteFrom);
+        try { EscribirLog('[LID] no se pudo resolver teléfono real para ' + remoteFrom, 'error'); } catch {}
+      }
     //var telefonoFrom = '5493425472992@c.us' 
    // var telefonoTo = '5493424293943@c.us'
 
-    telefonoTo = telefonoTo.replace('@c.us','');
+    telefonoTo = stripWhatsappSuffix(telefonoTo);
 
    // telefonoFrom = telefonoFrom.replace('@c.us','');
    
@@ -2302,6 +2408,12 @@ client.on('message', async message => {
 
     if(message.from == ''|| message.from == null){
       console.log("message.from VACIO");
+      return
+    }
+
+    if(!telefonoFrom){
+      console.log("telefonoFrom VACIO");
+      try { EscribirLog("telefonoFrom VACIO para remote " + String(message.from || ""), "error"); } catch {}
       return
     }
 
@@ -2423,12 +2535,8 @@ client.on('message', async message => {
     
 
     if(valor_i !== 0 && body == 'S'){
-      if(indice_telefono === -1 || !jsonGlobal[indice_telefono] || !jsonGlobal[indice_telefono][2]){
-        clearJsonGlobalEntry(indice_telefono);
-        return;
-      }
       console.log("continuar "+tam_json+' indice '+indice_telefono);
-      await procesar_mensaje(jsonGlobal[indice_telefono][2], message);
+      procesar_mensaje(jsonGlobal[indice_telefono][2], message);
 
      }
 //}  //
@@ -2453,8 +2561,6 @@ client.on('ready', async () => {
    EscribirLog('Whatsapp Listo!',"event");
    // Para el panel: sesión activa
   updateLockStateSafe('online').catch(()=>{});
-
-  startCaducidadMonitor();
   // Opcional: si querés conservar un "hito" ready en historial:
   // updateLockStateSafe('ready').catch(()=>{});
 
@@ -2551,6 +2657,33 @@ client.on('disconnected', async (reason) => {
 
 
 
+function recuperar_json(a_telefono, json){
+
+  var indice =indexOf2d(a_telefono);
+
+
+  let now = new Date();
+ 
+  if(indice !== -1){
+   // console.log("ESTA "+a_telefono);
+   
+    jsonGlobal[indice][0] = a_telefono;
+   // jsonGlobal[a_telefono,2] = 0;
+    jsonGlobal[indice][2] = json;
+    jsonGlobal[indice][3] = now;
+    //console.table(jsonGlobal);
+ }else{
+
+    //console.log("NO ESTA "  +a_telefono);
+     
+  jsonGlobal.push([a_telefono,0,json,now])
+    
+      
+ }
+
+
+}
+
 function indexOf2d(itemtofind) {
   var valor = -1
   console.table(jsonGlobal);
@@ -2576,162 +2709,6 @@ function indexOf2d(itemtofind) {
   //return [].concat.apply([], ([].concat.apply([], myArray))).indexOf(itemtofind) ;
  
   }
-
-
-
-// ============================================================================
-// Caducidad de tandas pendientes S/N
-// ============================================================================
-function parseDurationToMs(value, current = 0, forcedUnit = '') {
-  if (value === undefined || value === null || value === '') return current || 0;
-
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value) || value <= 0) return 0;
-    if (forcedUnit === 'ms') return Math.trunc(value);
-    if (forcedUnit === 's') return Math.trunc(value * 1000);
-    if (forcedUnit === 'm') return Math.trunc(value * 60 * 1000);
-    // Compatibilidad:
-    // - 300, 600, etc. desde Mongo suelen representar segundos.
-    // - 300000, 600000, etc. conservan el comportamiento legacy en milisegundos.
-    return value < 1000 ? Math.trunc(value * 1000) : Math.trunc(value);
-  }
-
-  const raw = String(value || '').trim().toLowerCase();
-  if (!raw) return current || 0;
-
-  // HH:MM:SS o MM:SS
-  const timeParts = raw.match(/^(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?$/);
-  if (timeParts) {
-    const a = Number(timeParts[1]);
-    const b = Number(timeParts[2]);
-    const c = timeParts[3] === undefined ? null : Number(timeParts[3]);
-    if ([a, b, c ?? 0].every(Number.isFinite)) {
-      if (c === null) return Math.trunc(((a * 60) + b) * 1000); // MM:SS
-      return Math.trunc(((a * 3600) + (b * 60) + c) * 1000); // HH:MM:SS
-    }
-  }
-
-  const m = raw.match(/^(-?\d+(?:[\.,]\d+)?)\s*(ms|miliseg(?:undo)?s?|s|seg|segs|segundo?s?|m|min|mins|minuto?s?|h|hr|hrs|hora?s?)?$/i);
-  if (m) {
-    const n = Number(String(m[1]).replace(',', '.'));
-    if (!Number.isFinite(n) || n <= 0) return 0;
-    const unit = (forcedUnit || m[2] || '').toLowerCase();
-    if (unit === 'ms' || unit.startsWith('miliseg')) return Math.trunc(n);
-    if (unit === 'm' || unit.startsWith('min')) return Math.trunc(n * 60 * 1000);
-    if (unit === 'h' || unit.startsWith('hr') || unit.startsWith('hora')) return Math.trunc(n * 60 * 60 * 1000);
-    if (unit === 's' || unit.startsWith('seg')) return Math.trunc(n * 1000);
-    return n < 1000 ? Math.trunc(n * 1000) : Math.trunc(n);
-  }
-
-  return current || 0;
-}
-
-function applyTimeCadConfig(conf) {
-  try {
-    if (!conf || typeof conf !== 'object') return;
-
-    if (conf.time_cad_ms !== undefined && conf.time_cad_ms !== null && String(conf.time_cad_ms).trim() !== '') {
-      time_cad_raw = conf.time_cad_ms;
-      time_cad = parseDurationToMs(conf.time_cad_ms, time_cad, 'ms');
-      return;
-    }
-    if (conf.time_cad_seg !== undefined && conf.time_cad_seg !== null && String(conf.time_cad_seg).trim() !== '') {
-      time_cad_raw = conf.time_cad_seg;
-      time_cad = parseDurationToMs(conf.time_cad_seg, time_cad, 's');
-      return;
-    }
-    if (conf.time_cad_sec !== undefined && conf.time_cad_sec !== null && String(conf.time_cad_sec).trim() !== '') {
-      time_cad_raw = conf.time_cad_sec;
-      time_cad = parseDurationToMs(conf.time_cad_sec, time_cad, 's');
-      return;
-    }
-    if (conf.time_cad_min !== undefined && conf.time_cad_min !== null && String(conf.time_cad_min).trim() !== '') {
-      time_cad_raw = conf.time_cad_min;
-      time_cad = parseDurationToMs(conf.time_cad_min, time_cad, 'm');
-      return;
-    }
-
-    const value = conf.time_cad ?? conf.timeCad ?? conf.time_caducidad ?? conf.caducidad_msg;
-    if (value !== undefined && value !== null && String(value).trim() !== '') {
-      time_cad_raw = value;
-      time_cad = parseDurationToMs(value, time_cad);
-    }
-  } catch (e) {
-    try { EscribirLog('applyTimeCadConfig error: ' + String(e?.message || e), 'error'); } catch {}
-  }
-}
-
-function getTimeCadMs() {
-  return parseDurationToMs(time_cad, 0);
-}
-
-function getJsonGlobalTsMs(indice) {
-  try {
-    const value = jsonGlobal?.[indice]?.[3];
-    if (!value) return 0;
-    if (value instanceof Date) return value.getTime();
-    const d = new Date(value);
-    const ms = d.getTime();
-    return Number.isFinite(ms) ? ms : 0;
-  } catch {
-    return 0;
-  }
-}
-
-function clearJsonGlobalEntry(indice) {
-  try {
-    if (indice === -1 || !jsonGlobal?.[indice]) return;
-    jsonGlobal[indice][2] = '';
-    jsonGlobal[indice][1] = 0;
-    jsonGlobal[indice][3] = '';
-    bandera_msg = 1;
-  } catch {}
-}
-
-function isJsonGlobalExpired(indice) {
-  const cadMs = getTimeCadMs();
-  if (!cadMs) return false;
-  if (indice === -1 || !jsonGlobal?.[indice]) return false;
-  if (!jsonGlobal[indice][3]) return false;
-  if (Number(jsonGlobal[indice][1] || 0) === 0) return false;
-
-  const ts = getJsonGlobalTsMs(indice);
-  if (!ts) return false;
-  return (Date.now() - ts) > cadMs;
-}
-
-async function expireJsonGlobalIfNeeded(indice, notify, source = 'monitor') {
- if (!isJsonGlobalExpired(indice)) return false;
-
-  const telefono = String(jsonGlobal?.[indice]?.[0] || '');
-  const cadMs = getTimeCadMs();
-  const ts = getJsonGlobalTsMs(indice);
-  const diferencia = ts ? (Date.now() - ts) : 0;
-
-  if (notify && msg_cad !== '' && msg_cad !== undefined && msg_cad !== 0 && telefono) {
-    try { await safeSend(telefono, msg_cad); } catch {}
-  }
-
-  const logLine = 'tiempo expirado ' + telefono + ' diferencia=' + diferencia + ' cadMs=' + cadMs + ' source=' + source + ' raw=' + String(time_cad_raw || time_cad || '');
-  console.log(logLine);
-  try { EscribirLog(logLine, 'event'); } catch {}
-
-  clearJsonGlobalEntry(indice);
-  return true;
-}
-
-function startCaducidadMonitor() {
-  if (caducidadMonitorStarted) return;
-  caducidadMonitorStarted = true;
-  controlar_hora_msg().catch((e) => {
-    caducidadMonitorStarted = false;
-    caducidadMonitorRunning = false;
-    try { EscribirLog('controlar_hora_msg error: ' + String(e?.message || e), 'error'); } catch {}
-  });
-}
-
-
-
 
 /////////////////////////////////////////////////////////////////////////////////////
 // FUNCION DONDE SE PROCESA EL JSON GLOBAL DE MSG Y SE ENVIA
@@ -2826,31 +2803,36 @@ async function procesar_mensaje(json, message){
 
 async function controlar_hora_msg(){
 
-  caducidadMonitorRunning = true;
-  while(true){
-    try { RecuperarJsonConfMensajes(); } catch {}
-
-    const cadMs = getTimeCadMs();
-    const nowMs = Date.now();
-
-    // Debug liviano cada 60 segundos para confirmar el valor real leído desde Mongo.
-    if ((nowMs - lastCaducidadDebugAt) > 60000) {
-      lastCaducidadDebugAt = nowMs;
-      try {
-        console.log('[CADUCIDAD] monitor activo time_cad_raw=' + String(time_cad_raw || time_cad || '') + ' effectiveMs=' + cadMs + ' pendientes=' + jsonGlobal.filter(x => x && Number(x[1] || 0) !== 0).length);
-      } catch {}
-    }
-
+  while(a < 1){
+     for(var i in jsonGlobal){
      
-        
-    for(var i in jsonGlobal){
-      await expireJsonGlobalIfNeeded(i, true, 'monitor');
-     }
-   
+      if( jsonGlobal[i][3] !== ''){
+        var fecha = new Date();
+        var fecha_msg = jsonGlobal[i][3].getTime();
+        var fecha_msg2 = fecha.getTime();
+        var diferencia = fecha_msg2-fecha_msg;
+        if(diferencia > time_cad ){
+          if(msg_cad == '' || msg_cad  == undefined || msg_cad == 0 ){
+            
+          } else {
+            safeSend(jsonGlobal[i][0],msg_cad );
 
-     await sleep(5000);
-  
-  } 
+          }
+          console.log("timepo expirado "+ jsonGlobal[i][0]+' '+diferencia+' '+time_cad );
+          // delete(jsonGlobal[i]);
+          let now = new Date();
+          jsonGlobal[i][3] = '';
+          jsonGlobal[i][2] = '';
+          jsonGlobal[i][1] = 0;
+          }
+        }
+
+        
+        
+    }
+   
+    await sleep(5000);
+  }   
 }
 
  
