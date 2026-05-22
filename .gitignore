@@ -3,6 +3,7 @@ npm-debug.log*
 logs/
 *.log
 *.bat
+*.bash
 
 .session/
 auth_info/

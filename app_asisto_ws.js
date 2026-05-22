@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.39  22/05/2026   */
+/*version: 4.00.40  22/05/2026   */
 
 
 
@@ -397,6 +397,8 @@ async function resolvePhoneFromIncomingMessage(message) {
         if (number) return rememberContactPhone(from, number);
       }
     } catch {}
+    const deep = await resolvePhoneFromMessageDeep(message);
+    if (deep) return rememberContactPhone(from, deep);
 
     const byId = await resolvePhoneFromContactId(from);
     if (byId) return byId;
@@ -545,6 +547,115 @@ async function logOutgoingFromMessageFallback(messageLike) {
     return false;
   }
 }
+
+// Dedupe de entrada: en algunas sesiones Linux/MD, whatsapp-web.js puede entregar
+// entrantes por message_create en vez de message, o por ambos. Procesamos el primero
+// y saltamos duplicados para no llamar dos veces al API.
+const recentIncomingProcessIds = new Map();
+
+function getMessageStableId(message) {
+  try {
+    const id = message?.id?._serialized || message?._data?.id?._serialized || message?._data?.id?.id || message?.id?.id || '';
+    if (id) return String(id);
+    const from = String(message?.from || message?._data?.from || '');
+    const to = String(message?.to || message?._data?.to || '');
+    const body = String(message?.body || message?._data?.body || '');
+    const ts = String(message?.timestamp || message?._data?.t || '');
+    return [from, to, ts, body].join('|');
+  } catch {
+    return '';
+  }
+}
+
+function shouldProcessIncomingMessage(message, source) {
+  try {
+    if (!message) return false;
+    if (message.fromMe === true) return false;
+
+    const id = getMessageStableId(message);
+    if (!id) return true;
+
+    const now = Date.now();
+    for (const [k, ts] of recentIncomingProcessIds.entries()) {
+      if (!ts || (now - ts) > 2 * 60 * 1000) recentIncomingProcessIds.delete(k);
+    }
+
+    if (recentIncomingProcessIds.has(id)) {
+      try { console.log('[INCOMING] duplicado skip source=' + String(source || '') + ' id=' + id); } catch {}
+      return false;
+    }
+
+    recentIncomingProcessIds.set(id, now);
+    return true;
+  } catch {
+    return true;
+  }
+}
+
+function maybeRememberLidPhoneFromRaw(rawId, candidate) {
+  try {
+    const ok = validPhoneCandidateForRaw(rawId, candidate);
+    if (!ok) return '';
+    return rememberContactPhone(rawId, ok);
+  } catch {
+    return '';
+  }
+}
+
+function collectPhoneCandidatesFromObject(rawId, obj, out, depth = 0, seen = new Set()) {
+  try {
+    if (!obj || depth > 4 || out.length >= 20) return;
+    if (typeof obj !== 'object') return;
+    if (seen.has(obj)) return;
+    seen.add(obj);
+
+    for (const [k, v] of Object.entries(obj)) {
+      if (out.length >= 20) return;
+      const key = String(k || '').toLowerCase();
+
+     if (typeof v === 'string' || typeof v === 'number') {
+        const sv = String(v || '').trim();
+        if (!sv) continue;
+        const keyLooksPhone = /phone|tel|number|numero|user|wid|participant|author|from|sender|remote|id/.test(key);
+        const valLooksPhone = /@c\.us$|@s\.whatsapp\.net$|^\+?\d{8,}$/.test(sv);
+        if (keyLooksPhone || valLooksPhone) {
+          const ok = validPhoneCandidateForRaw(rawId, sv);
+          if (ok) out.push(ok);
+        }
+      } else if (v && typeof v === 'object') {
+        collectPhoneCandidatesFromObject(rawId, v, out, depth + 1, seen);
+      }
+    }
+  } catch {}
+}
+
+async function resolvePhoneFromMessageDeep(message) {
+  try {
+    if (!message) return '';
+    const raw = String(message.from || message?._data?.from || '').trim();
+    if (!looksLikeLid(raw)) return '';
+
+    const candidates = [];
+    collectPhoneCandidatesFromObject(raw, message, candidates);
+    collectPhoneCandidatesFromObject(raw, message?._data, candidates);
+    collectPhoneCandidatesFromObject(raw, message?.id, candidates);
+
+    try {
+      if (typeof message.getChat === 'function') {
+        const chat = await message.getChat();
+        collectPhoneCandidatesFromObject(raw, chat, candidates);
+        collectPhoneCandidatesFromObject(raw, chat?._data, candidates);
+      }
+    } catch {}
+
+    for (const c of candidates) {
+      const ok = maybeRememberLidPhoneFromRaw(raw, c);
+      if (ok) return ok;
+    }
+  } catch {}
+  return '';
+}
+
 
 
 // Lease/heartbeat configurables (ms)
@@ -2424,16 +2535,14 @@ async function ConsultaApiMensajes(){
 
 function attachClientHandlers() {
 
-client.on('message_create', async message => {
-  try {
-    if (message && message.fromMe === true) {
-      await logOutgoingFromMessageFallback(message);
-    }
-  } catch {}
-});
+async function processIncomingAsistoMessage(message, source) {
+ 
+  if (!shouldProcessIncomingMessage(message, source)) return;
 
 
-client.on('message', async message => {
+  try { console.log('[INCOMING] source=' + String(source || 'message') + ' from=' + String(message?.from || '') + ' type=' + String(message?.type || '')); } catch {}
+  try { EscribirLog('[INCOMING] source=' + String(source || 'message') + ' from=' + String(message?.from || '') + ' type=' + String(message?.type || ''), 'event'); } catch {}
+
 
   try { await refreshTenantConfigFromDbPerMessage(); } catch {}
   try { RecuperarJsonConfMensajes(); } catch {}
@@ -2607,7 +2716,7 @@ EscribirLog(message.from +' '+message.to+' '+message.type+' '+message.body ,"eve
 ////////////////////
     };
    
-    var body = message.body;
+    var body = String(message.body || '');
     body = body.trim();
     body = body.toUpperCase();
 
@@ -2643,7 +2752,30 @@ EscribirLog(message.from +' '+message.to+' '+message.type+' '+message.body ,"eve
 
      }
 //}  //
+}
 
+client.on('message_create', async message => {
+  try {
+    if (message && message.fromMe === true) {
+      await logOutgoingFromMessageFallback(message);
+      return;
+    }
+    // Fallback clave para Linux/WhatsApp MD: algunos entrantes llegan por
+    // message_create y no disparan client.on('message').
+    await processIncomingAsistoMessage(message, 'message_create');
+  } catch (e) {
+    try { console.log('[message_create] incoming error:', e?.message || e); } catch {}
+    try { EscribirLog('[message_create] incoming error: ' + String(e?.message || e), 'error'); } catch {}
+  }
+});
+
+client.on('message', async message => {
+  try {
+    await processIncomingAsistoMessage(message, 'message');
+  } catch (e) {
+    try { console.log('[message] incoming error:', e?.message || e); } catch {}
+    try { EscribirLog('[message] incoming error: ' + String(e?.message || e), 'error'); } catch {}
+  }
 });
 
 
