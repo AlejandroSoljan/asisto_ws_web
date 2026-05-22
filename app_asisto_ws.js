@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.40  22/05/2026   */
+/*version: 4.00.41  22/05/2026   */
 
 
 
@@ -236,15 +236,40 @@ function lidDigitsFromRaw(value) {
   return onlyDigits(stripWhatsappSuffix(value));
 }
 
+function expectedApiPhonePrefix() {
+  try {
+    const configured = onlyDigits(
+      tenantConfig?.api_phone_country_prefix ||
+      tenantConfig?.apiPhoneCountryPrefix ||
+      tenantConfig?.phone_country_prefix ||
+      process.env.API_PHONE_COUNTRY_PREFIX ||
+      ''
+    );
+    if (configured) return configured;
+
+    // Si el WhatsApp del tenant es argentino, no aceptamos candidatos que no
+    // empiecen con 54. Esto evita tomar IDs internos de WhatsApp como teléfono.
+    const own = onlyDigits(numero || telefono_qr || '');
+    if (own.startsWith('54')) return '54';
+  } catch {}
+  return '';
+}
+
 function validPhoneCandidateForRaw(rawId, candidate) {
   const p = onlyDigits(stripWhatsappSuffix(candidate));
-  if (!p || p.length < 8) return '';
+  // Teléfonos E.164: máximo 15 dígitos. Menos de 10 suele ser dato incompleto.
+  if (!p || p.length < 10 || p.length > 15) return '';
 
-  // CLAVE: cuando WhatsApp entrega @lid, whatsapp-web.js a veces devuelve
+  // CLAVE: cuando WhatsApp entrega @lid, whatsapp-web.js puede devolver
+ 
   // c.number = "150607..." que NO es teléfono, es el mismo LID sin sufijo.
-  // Ese valor no debe entrar nunca al API como Tel_Origen.
+  
   const lidDigits = lidDigitsFromRaw(rawId);
   if (lidDigits && p === lidDigits) return '';
+  // En tus tenants argentinos, Tel_Origen debe entrar con prefijo país 54.
+  // Si alguna vez tenés otro país, podés configurar api_phone_country_prefix.
+  const prefix = expectedApiPhonePrefix();
+  if (prefix && !p.startsWith(prefix)) return '';
 
   return p;
 }
@@ -397,8 +422,8 @@ async function resolvePhoneFromIncomingMessage(message) {
         if (number) return rememberContactPhone(from, number);
       }
     } catch {}
-    const deep = await resolvePhoneFromMessageDeep(message);
-    if (deep) return rememberContactPhone(from, deep);
+    // No revisar recursivamente message._data/message.id/chat._data: ahí aparecen
+    // IDs internos de WhatsApp que pueden parecer números pero NO son teléfonos.
 
     const byId = await resolvePhoneFromContactId(from);
     if (byId) return byId;
@@ -552,6 +577,7 @@ async function logOutgoingFromMessageFallback(messageLike) {
 // entrantes por message_create en vez de message, o por ambos. Procesamos el primero
 // y saltamos duplicados para no llamar dos veces al API.
 const recentIncomingProcessIds = new Map();
+const incomingCreateFallbackTimers = new Map();
 
 function getMessageStableId(message) {
   try {
@@ -586,73 +612,55 @@ function shouldProcessIncomingMessage(message, source) {
     }
 
     recentIncomingProcessIds.set(id, now);
-    return true;
-  } catch {
-    return true;
-  }
-}
-
-function maybeRememberLidPhoneFromRaw(rawId, candidate) {
-  try {
-    const ok = validPhoneCandidateForRaw(rawId, candidate);
-    if (!ok) return '';
-    return rememberContactPhone(rawId, ok);
-  } catch {
-    return '';
-  }
-}
-
-function collectPhoneCandidatesFromObject(rawId, obj, out, depth = 0, seen = new Set()) {
-  try {
-    if (!obj || depth > 4 || out.length >= 20) return;
-    if (typeof obj !== 'object') return;
-    if (seen.has(obj)) return;
-    seen.add(obj);
-
-    for (const [k, v] of Object.entries(obj)) {
-      if (out.length >= 20) return;
-      const key = String(k || '').toLowerCase();
-
-     if (typeof v === 'string' || typeof v === 'number') {
-        const sv = String(v || '').trim();
-        if (!sv) continue;
-        const keyLooksPhone = /phone|tel|number|numero|user|wid|participant|author|from|sender|remote|id/.test(key);
-        const valLooksPhone = /@c\.us$|@s\.whatsapp\.net$|^\+?\d{8,}$/.test(sv);
-        if (keyLooksPhone || valLooksPhone) {
-          const ok = validPhoneCandidateForRaw(rawId, sv);
-          if (ok) out.push(ok);
-        }
-      } else if (v && typeof v === 'object') {
-        collectPhoneCandidatesFromObject(rawId, v, out, depth + 1, seen);
-      }
+    const pendingTimer = incomingCreateFallbackTimers.get(id);
+    if (pendingTimer) {
+      try { clearTimeout(pendingTimer); } catch {}
+      incomingCreateFallbackTimers.delete(id);
     }
-  } catch {}
+    return true;
+  } catch {
+    return true;
+  }
 }
 
+function scheduleIncomingFromMessageCreate(message, handler) {
+  try {
+    if (!message || message.fromMe === true) return;
+   const id = getMessageStableId(message);
+    const delay = Math.max(500, Number(
+      tenantConfig?.message_create_fallback_ms ||
+      tenantConfig?.messageCreateFallbackMs ||
+      process.env.MESSAGE_CREATE_FALLBACK_MS ||
+      1500
+    ));
+
+    // message tiene prioridad. message_create queda solo como fallback demorado.
+    if (!id) {
+      setTimeout(() => handler(message, 'message_create_fallback').catch(() => {}), delay);
+      return;
+     
+    }
+    if (recentIncomingProcessIds.has(id) || incomingCreateFallbackTimers.has(id)) return;
+    const timer = setTimeout(async () => {
+      incomingCreateFallbackTimers.delete(id);
+      if (recentIncomingProcessIds.has(id)) {
+        try { console.log('[INCOMING] message_create fallback skip id=' + id); } catch {}
+        return;
+      }
+     await handler(message, 'message_create_fallback');
+        }, delay);
+
+    incomingCreateFallbackTimers.set(id, timer);
+  } catch (e) {
+    try { console.log('[message_create] schedule error:', e?.message || e); } catch {}
+  }
+}
+
+// No usar heurísticas sobre message._data/chat._data para resolver @lid.
+// Esos objetos traen IDs internos de WhatsApp que parecen números, pero no son
+// teléfonos reales. El API solo debe recibir teléfono obtenido de contacto real
+// o de un mapeo explícito LID -> teléfono.
 async function resolvePhoneFromMessageDeep(message) {
-  try {
-    if (!message) return '';
-    const raw = String(message.from || message?._data?.from || '').trim();
-    if (!looksLikeLid(raw)) return '';
-
-    const candidates = [];
-    collectPhoneCandidatesFromObject(raw, message, candidates);
-    collectPhoneCandidatesFromObject(raw, message?._data, candidates);
-    collectPhoneCandidatesFromObject(raw, message?.id, candidates);
-
-    try {
-      if (typeof message.getChat === 'function') {
-        const chat = await message.getChat();
-        collectPhoneCandidatesFromObject(raw, chat, candidates);
-        collectPhoneCandidatesFromObject(raw, chat?._data, candidates);
-      }
-    } catch {}
-
-    for (const c of candidates) {
-      const ok = maybeRememberLidPhoneFromRaw(raw, c);
-      if (ok) return ok;
-    }
-  } catch {}
   return '';
 }
 
@@ -2621,14 +2629,13 @@ EscribirLog(message.from +' '+message.to+' '+message.type+' '+message.body ,"eve
       try { EscribirLog("telefonoFrom VACIO para remote " + String(message.from || ""), "error"); } catch {}
       return
     }
-    // Guardia final: si el remoto original era @lid y telefonoFrom terminó siendo
-    // el mismo LID sin sufijo, NO llamar al API. Ese valor no es teléfono real.
-    if (looksLikeLid(remoteFrom) && onlyDigits(telefonoFrom) === lidDigitsFromRaw(remoteFrom)) {
-      console.log('[LID] bloqueado API: telefonoFrom coincide con LID interno ' + remoteFrom + ' -> ' + telefonoFrom);
-      try { EscribirLog('[LID] bloqueado API: telefonoFrom coincide con LID interno ' + remoteFrom + ' -> ' + telefonoFrom, 'error'); } catch {}
+    const telefonoFromApi = validPhoneCandidateForRaw(remoteFrom, telefonoFrom);
+    if (!telefonoFromApi) {
+      console.log('[LID] bloqueado API: candidato no es teléfono real ' + remoteFrom + ' -> ' + telefonoFrom);
+      try { EscribirLog('[LID] bloqueado API: candidato no es teléfono real ' + remoteFrom + ' -> ' + telefonoFrom, 'error'); } catch {}
       return
     }
-
+telefonoFrom = telefonoFromApi;
     try {
       await logMessageStat('in', telefonoFrom, { body: message.body || '', type: message.type || 'chat', hasMedia: !!message.hasMedia });
     } catch {}
@@ -2760,9 +2767,9 @@ client.on('message_create', async message => {
       await logOutgoingFromMessageFallback(message);
       return;
     }
-    // Fallback clave para Linux/WhatsApp MD: algunos entrantes llegan por
-    // message_create y no disparan client.on('message').
-    await processIncomingAsistoMessage(message, 'message_create');
+    // No procesar inmediatamente message_create: puede traer datos internos y
+    // duplicar el evento message. Se agenda solo como fallback si message no llega.
+    scheduleIncomingFromMessageCreate(message, processIncomingAsistoMessage);
   } catch (e) {
     try { console.log('[message_create] incoming error:', e?.message || e); } catch {}
     try { EscribirLog('[message_create] incoming error: ' + String(e?.message || e), 'error'); } catch {}
