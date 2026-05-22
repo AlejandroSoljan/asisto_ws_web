@@ -1,5 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.00.35  23/04/2026   */
+/*version: 4.00.39  22/05/2026   */
+
+
 
 
 
@@ -228,10 +230,103 @@ function looksLikeLid(value) {
   return /@lid$/i.test(String(value || '').trim());
 }
 
+
+function lidDigitsFromRaw(value) {
+  if (!looksLikeLid(value)) return '';
+  return onlyDigits(stripWhatsappSuffix(value));
+}
+
+function validPhoneCandidateForRaw(rawId, candidate) {
+  const p = onlyDigits(stripWhatsappSuffix(candidate));
+  if (!p || p.length < 8) return '';
+
+  // CLAVE: cuando WhatsApp entrega @lid, whatsapp-web.js a veces devuelve
+  // c.number = "150607..." que NO es teléfono, es el mismo LID sin sufijo.
+  // Ese valor no debe entrar nunca al API como Tel_Origen.
+  const lidDigits = lidDigitsFromRaw(rawId);
+  if (lidDigits && p === lidDigits) return '';
+
+  return p;
+}
+
+function readPhoneFromConfiguredLidMap(rawId) {
+  try {
+    if (!looksLikeLid(rawId)) return '';
+    const raw = String(rawId || '').trim();
+    const lid = stripWhatsappSuffix(raw);
+    const candidates = [
+      tenantConfig?.lid_phone_map,
+      tenantConfig?.lidPhoneMap,
+      tenantConfig?.wa_lid_phone_map,
+      tenantConfig?.waLidPhoneMap
+    ].filter(Boolean);
+
+    for (const map of candidates) {
+      if (Array.isArray(map)) {
+        for (const row of map) {
+          if (!row || typeof row !== 'object') continue;
+          const rowLid = String(row.lid || row.waLid || row.remote || row.id || '').trim();
+          if (!rowLid) continue;
+          if (rowLid === raw || stripWhatsappSuffix(rowLid) === lid) {
+            const phone = row.phone || row.telefono || row.numero || row.phoneNumber || row.number || '';
+            const ok = validPhoneCandidateForRaw(raw, phone);
+            if (ok) return ok;
+          }
+        }
+      } else if (map && typeof map === 'object') {
+        const phone = map[raw] || map[lid] || map[raw.toLowerCase()] || map[lid.toLowerCase()] || '';
+        const ok = validPhoneCandidateForRaw(raw, phone);
+        if (ok) return ok;
+      }
+    }
+  } catch {}
+  return '';
+}
+
+async function readPhoneFromMongoLidMap(rawId) {
+  try {
+    if (!looksLikeLid(rawId)) return '';
+   if (!await ensureMongo()) return '';
+    if (!mongoose?.connection?.db) return '';
+
+    const raw = String(rawId || '').trim();
+    const lid = stripWhatsappSuffix(raw);
+    const coll = mongoose.connection.db.collection('wa_lid_phone_map');
+    const tenant = String(tenantId || '').trim();
+
+    const baseOr = [
+      { lid: raw },
+      { lid },
+      { waLid: raw },
+      { waLid: lid },
+      { remote: raw },
+      { remote: lid }
+    ];
+
+    let doc = null;
+    if (tenant) {
+     doc = await coll.findOne({
+        $and: [
+          { $or: [{ tenantId: tenant }, { tenantid: tenant }] },
+          { $or: baseOr }
+        ]
+      });
+    }
+    if (!doc) doc = await coll.findOne({ $or: baseOr });
+
+    const phone = doc?.phone || doc?.telefono || doc?.numero || doc?.phoneNumber || doc?.number || '';
+    return validPhoneCandidateForRaw(raw, phone);
+  } catch (e) {
+    try { EscribirLog('readPhoneFromMongoLidMap error: ' + String(e?.message || e), 'error'); } catch {}
+    return '';
+  }
+}
+
+
 function rememberContactPhone(rawId, phone) {
   try {
-    const p = onlyDigits(stripWhatsappSuffix(phone));
-    if (!p || p.length < 8) return '';
+    const p = validPhoneCandidateForRaw(rawId, phone);
+    if (!p) return '';
 
     const raw = String(rawId || '').trim();
     const cleanRaw = stripWhatsappSuffix(raw);
@@ -257,33 +352,34 @@ async function resolvePhoneFromContactId(contactId) {
 
   // Si ya vino como teléfono real, no hace falta consultar.
   if (!looksLikeLid(raw)) {
-    const digits = onlyDigits(cleanRaw);
-    if (digits && digits.length >= 8) {
-     return rememberContactPhone(raw, digits);
-    }
+    const digits = validPhoneCandidateForRaw(raw, cleanRaw);
+    if (digits) return rememberContactPhone(raw, digits);
   }
+  // Mapeo manual opcional: permite resolver LID -> teléfono desde tenant_config.
+  const configured = readPhoneFromConfiguredLidMap(raw);
+  if (configured) return rememberContactPhone(raw, configured);
 
   // Si vino como @lid, intentamos resolverlo desde whatsapp-web.js.
   try {
     if (client && typeof client.getContactById === 'function') {
       const c = await client.getContactById(raw);
-      const number = onlyDigits(c?.number || '');
-      if (number && number.length >= 8) {
-        return rememberContactPhone(raw, number);
-      }
+
+      const number = validPhoneCandidateForRaw(raw, c?.number || '');
+      if (number) return rememberContactPhone(raw, number);
 
       const idUser = String(c?.id?.user || '').trim();
       const serialized = String(c?.id?._serialized || '').trim();
       if (idUser && !looksLikeLid(serialized)) {
-        const idDigits = onlyDigits(idUser);
-        if (idDigits && idDigits.length >= 8) {
-          return rememberContactPhone(raw, idDigits);
-        }
+        const idDigits = validPhoneCandidateForRaw(raw, idUser);
+        if (idDigits) return rememberContactPhone(raw, idDigits);
       }
     }
   } catch (e) {
     try { EscribirLog('resolvePhoneFromContactId no pudo resolver ' + raw + ': ' + String(e?.message || e), 'event'); } catch {}
   }
+  // Mapeo manual opcional desde Mongo: colección wa_lid_phone_map.
+  const fromMongo = await readPhoneFromMongoLidMap(raw);
+  if (fromMongo) return rememberContactPhone(raw, fromMongo);
 
   return '';
 }
@@ -297,10 +393,8 @@ async function resolvePhoneFromIncomingMessage(message) {
     try {
       if (typeof message.getContact === 'function') {
         const c = await message.getContact();
-        const number = onlyDigits(c?.number || '');
-        if (number && number.length >= 8) {
-          return rememberContactPhone(from, number);
-        }
+        const number = validPhoneCandidateForRaw(from, c?.number || '');
+        if (number) return rememberContactPhone(from, number);
       }
     } catch {}
 
@@ -312,7 +406,9 @@ async function resolvePhoneFromIncomingMessage(message) {
     if (looksLikeLid(from)) return '';
     return stripWhatsappSuffix(from);
   } catch {
-    return stripWhatsappSuffix(message?.from || '');
+    const from = String(message?.from || '');
+    if (looksLikeLid(from)) return '';
+    return stripWhatsappSuffix(from);
   }
 }
 
@@ -323,9 +419,9 @@ async function normalizeContactForStats(contact) {
   const resolved = await resolvePhoneFromContactId(raw);
   if (resolved) return resolved;
 
-  // Si quedó @lid sin resolver, lo dejamos explícito para poder detectarlo.
-  // No lo mezclamos con teléfonos reales porque no es el número del cliente.
-  if (looksLikeLid(raw)) return raw;
+  // Si quedó @lid sin resolver, no lo guardamos como contacto porque duplica
+  // estadísticas y no representa el teléfono real del cliente.
+  if (looksLikeLid(raw)) return '';
   return stripWhatsappSuffix(raw);
 }
 
@@ -2414,6 +2510,13 @@ EscribirLog(message.from +' '+message.to+' '+message.type+' '+message.body ,"eve
     if(!telefonoFrom){
       console.log("telefonoFrom VACIO");
       try { EscribirLog("telefonoFrom VACIO para remote " + String(message.from || ""), "error"); } catch {}
+      return
+    }
+    // Guardia final: si el remoto original era @lid y telefonoFrom terminó siendo
+    // el mismo LID sin sufijo, NO llamar al API. Ese valor no es teléfono real.
+    if (looksLikeLid(remoteFrom) && onlyDigits(telefonoFrom) === lidDigitsFromRaw(remoteFrom)) {
+      console.log('[LID] bloqueado API: telefonoFrom coincide con LID interno ' + remoteFrom + ' -> ' + telefonoFrom);
+      try { EscribirLog('[LID] bloqueado API: telefonoFrom coincide con LID interno ' + remoteFrom + ' -> ' + telefonoFrom, 'error'); } catch {}
       return
     }
 
