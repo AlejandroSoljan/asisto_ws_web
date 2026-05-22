@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.41  22/05/2026   */
+/*version: 4.00.42  22/05/2026   */
 
 
 
@@ -128,6 +128,41 @@ function applyTenantConfig(conf) {
   seg_msg = asNumber(conf.seg_msg, seg_msg);
   seg_tele = asNumber(conf.seg_tele, seg_tele);
   if (conf.api !== undefined) api = String(conf.api);
+
+  // Consulta API de mensajes salientes (opcional, por tenant)
+  if (conf.api2 !== undefined || conf.api_consulta_mensajes !== undefined || conf.apiConsultaMensajes !== undefined) {
+    api2 = asString(conf.api2 ?? conf.api_consulta_mensajes ?? conf.apiConsultaMensajes, api2);
+  }
+ if (conf.api3 !== undefined || conf.api_actualiza_mensajes !== undefined || conf.apiActualizaMensajes !== undefined) {
+    api3 = asString(conf.api3 ?? conf.api_actualiza_mensajes ?? conf.apiActualizaMensajes, api3);
+  }
+  if (conf.key !== undefined || conf.api_key !== undefined || conf.apiKey !== undefined || conf.api_mensajes_key !== undefined || conf.apiMensajesKey !== undefined) {
+    key = asString(conf.key ?? conf.api_key ?? conf.apiKey ?? conf.api_mensajes_key ?? conf.apiMensajesKey, key);
+  }
+  if (
+    conf.habilitar_consulta_mensajes !== undefined ||
+    conf.habilitarConsultaMensajes !== undefined ||
+    conf.consulta_api_mensajes_habilitado !== undefined ||
+    conf.consultaApiMensajesHabilitado !== undefined ||
+    conf.consulta_api_mensajes_enabled !== undefined ||
+    conf.consultaApiMensajesEnabled !== undefined ||
+    conf.envio_mensajes_habilitado !== undefined ||
+    conf.envioMensajesHabilitado !== undefined
+  ) {
+    consulta_api_mensajes_habilitado = parseBoolLike(
+      conf.habilitar_consulta_mensajes ??
+      conf.habilitarConsultaMensajes ??
+      conf.consulta_api_mensajes_habilitado ??
+      conf.consultaApiMensajesHabilitado ??
+      conf.consulta_api_mensajes_enabled ??
+      conf.consultaApiMensajesEnabled ??
+      conf.envio_mensajes_habilitado ??
+      conf.envioMensajesHabilitado,
+      consulta_api_mensajes_habilitado
+    );
+  }
+
+
   if (conf.msg_inicio !== undefined) msg_inicio = String(conf.msg_inicio ?? "");
   if (conf.msg_fin !== undefined) msg_fin = String(conf.msg_fin ?? "");
   cant_lim = asNumber(conf.cant_lim, cant_lim);
@@ -1192,10 +1227,16 @@ var tel_array = [];
 var ver_whatsapp = "0";
 var dsn = "msm_manager";
 var api = "http://managermsm.ddns.net:2002/v200/api/Api_Chat_Cab/ProcesarMensajePost";
-//var api2 = "http://managermsm.ddns.net:2002/v200/api/Api_Mensajes/Consulta?key=1";
-var api2 = "http://managermsm.ddns.net:2002/v200/api/Api_Mensajes/Consulta_no_enviados"//key={{key}}&nro_tel_from={{nro_tel_from}}";
-var api3 = "http://managermsm.ddns.net:2002/v200/api/Api_Mensajes/Actualiza_mensaje"//?key={{key}}&nro_tel_from={{nro_tel_from}}"//key={{key}}&nro_tel_from={{nro_tel_from}}";
-var key = 'FMM0325*';
+// API de consulta/envío de mensajes salientes. Por defecto queda deshabilitada
+// hasta activarla en tenant_config o por variables de entorno.
+var api2 = String(process.env.API_MENSAJES_CONSULTA || process.env.API2 || "http://managermsm.ddns.net:2002/v200/api/Api_Mensajes/Consulta_no_enviados");
+var api3 = String(process.env.API_MENSAJES_ACTUALIZA || process.env.API3 || "http://managermsm.ddns.net:2002/v200/api/Api_Mensajes/Actualiza_mensaje");
+var key = String(process.env.API_MENSAJES_KEY || process.env.API_KEY || process.env.KEY || 'FMM0325*');
+var consulta_api_mensajes_habilitado = parseBoolLike(
+  process.env.HABILITAR_CONSULTA_MENSAJES || process.env.CONSULTA_API_MENSAJES_ENABLED || process.env.ENABLE_CONSULTA_API_MENSAJES,
+  false
+);
+var consultaApiMensajesRunning = false;
 var msg_inicio = "";
 var msg_fin = "";
 var cant_lim = 0;
@@ -2356,186 +2397,243 @@ process.on("SIGBREAK", () => { gracefulShutdown("SIGBREAK"); });
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 async function ConsultaApiMensajes(){
-  console.log("Consultando a API ");
-  let url =  api2+'?key='+key+'&nro_tel_from='+telefono_qr;
-  let url_confirma_msg = api3+'?key='+key+'&nro_tel_from='+telefono_qr;
-  var a= 0;
-  console.log("Conectando a API "+url);
-  EscribirLog("Conectando a API "+url,"event");
+  if (consultaApiMensajesRunning) {
+    console.log("ConsultaApiMensajes ya está corriendo");
+    return;
+  }
+
+  consultaApiMensajesRunning = true;
+  console.log("Consultando a API de mensajes salientes");
+  EscribirLog("Consultando a API de mensajes salientes", "event");
+
+  try {
+    await sleep(1000);
+
+    while (consulta_api_mensajes_habilitado === true) {
+      try { await refreshTenantConfigFromDbPerMessage(); } catch {}
+      try { RecuperarJsonConfMensajes(); } catch {}
+
+      if (consulta_api_mensajes_habilitado !== true) break;
+
+      const nroTelFrom = onlyDigits(telefono_qr || numero || '');
+      if (!api2 || !api3 || !key || !nroTelFrom) {
+        const detalle = `ConsultaApiMensajes sin configuración completa api2=${!!api2} api3=${!!api3} key=${!!key} nro_tel_from=${nroTelFrom || '(vacío)'}`;
+        console.log(detalle);
+        EscribirLog(detalle, "error");
+        await sleep(Math.max(5000, Number(devolver_seg_tele()) || 30000));
+        continue;
+      }
+
+      const url = buildUrlWithParams(api2, { key, nro_tel_from: nroTelFrom });
+      const url_confirma_msg = buildUrlWithParams(api3, { key, nro_tel_from: nroTelFrom });
+
+      seg_msg = Math.random() * (devolver_seg_hasta() - devolver_seg_desde()) + devolver_seg_desde();
 
 
-
-
- // await io.emit('message', "Conectando a API "+url );
-  
-  await sleep(1000);
-
-     while(a < 10){
-
-      RecuperarJsonConfMensajes();
-   
-     seg_msg = Math.random() * (devolver_seg_hasta() - devolver_seg_desde()) + devolver_seg_desde();
-      
-     //console.log('segundos entre mensajes '+seg_msg);
-         try{
+      try {
+        console.log("Conectando a API " + url);
+        EscribirLog("Conectando a API " + url, "event");
+        const resp = await fetch(url, { method: "GET" }).catch(err => {
+          EscribirLog("ConsultaApiMensajes fetch error: " + String(err?.message || err), "error");
+          return null;
+        });
      
 
-        resp = await fetch(url, {
-            method: "GET"
-        })
+        if (!resp) {
+          await sleep(Math.max(5000, Number(devolver_seg_tele()) || 30000));
+          continue;
+        }
 
-        .catch(err =>   EscribirLog(err,"error"))
-      //  console.log('resp '+JSON.stringify(resp));
-      //  await io.emit('message', JSON.stringify(resp) );
-        if (resp.ok  ) {
-     
-          tam_json = 0;
-          json = await resp.json()
-  
-          var tam_mensajes = Object.keys(json[0].mensajes).length
+        const raw = await resp.text();
+       let jsonResp = null;
+        try { jsonResp = raw ? JSON.parse(raw) : null; } catch {}
 
-          var tam_destinatarios = Object.keys(json[0].destinatarios).length
-       
-          for(var i = 0; i < tam_destinatarios; i++){
+        if (!resp.ok) {
+          const detalle = jsonResp ? JSON.stringify(jsonResp) : raw;
+          if (msg_errores) {
+            console.log("ApiWhatsapp - Response ERROR " + detalle);
+            EscribirLog("ApiWhatsapp - Response ERROR " + detalle, "error");
+          }
+          await sleep(Math.max(5000, Number(devolver_seg_tele()) || 30000));
+          continue;
+        }
 
+        if (!Array.isArray(jsonResp) || !jsonResp[0]) {
+          await sleep(Number(devolver_seg_tele()) || 30000);
+          continue;
+        }
 
-            //filtro mensaje en json
-            function obtenerMensajesPorId() {
-              return Id_msj_renglon = json[0].destinatarios[i].Id_msj_renglon;
+        const mensajes = Array.isArray(jsonResp[0].mensajes) ? jsonResp[0].mensajes : [];
+        const destinatarios = Array.isArray(jsonResp[0].destinatarios) ? jsonResp[0].destinatarios : [];
+
+        for (let i = 0; i < destinatarios.length; i++) {
+          const dest = destinatarios[i] || {};
+          const idDestRenglon = dest.Id_msj_renglon;
+          const respuesta = mensajes.filter(m => String(m?.Id_msj_renglon) === String(idDestRenglon));
+
+          for (let j = 0; j < respuesta.length; j++) {
+            const msg = respuesta[j] || {};
+            const Id_msj_dest_local = dest.Id_msj_dest;
+            const Id_msj_renglon_local = dest.Id_msj_renglon;
+            const Nro_tel = onlyDigits(dest.Nro_tel || '');
+            const Nro_tel_format = Nro_tel + '@c.us';
+            const Msj = msg.Msj == null ? '' : String(msg.Msj);
+            const contenido = msg.Content;
+            let Content_nombre = msg.Content_nombre;
+
+            console.log('--------------------------------------------------');
+            console.log("Id_msj_dest " + JSON.stringify(Id_msj_dest_local));
+            console.log("Id_msj_renglon " + JSON.stringify(Id_msj_renglon_local));
+            console.log("Nro_tel " + JSON.stringify(Nro_tel));
+            console.log("Msj " + JSON.stringify(Msj));
+            console.log("Content_nombre " + JSON.stringify(Content_nombre));
+            console.log('--------------------------------------------------');
+
+            if (!Nro_tel || isNaN(Number(Nro_tel))) {
+              console.log("numero invalido");
+              await io.emit('message', 'Mensaje: ' + Nro_tel_format + ': Número Inválido');
+              await actualizar_estado_mensaje(url_confirma_msg, 'I', null, null, null, null, null, Id_msj_renglon_local, Id_msj_dest_local);
+              continue;
+             
             }
-            function buscarID(element) {
-                return element.Id_msj_renglon == obtenerMensajesPorId();
+
+            let registered = false;
+            try { registered = await client.isRegisteredUser(Nro_tel_format); } catch (e) {
+              EscribirLog('isRegisteredUser error ' + Nro_tel_format + ': ' + String(e?.message || e), "error");
             }
 
-           // obtengo json con mensaje filtrado
-            var respuesta = json[0].mensajes.filter(buscarID)
+            if (!registered) {
+              EscribirLog('Mensaje: ' + Nro_tel_format + ': Número no Registrado', "event");
+              console.log("numero no registrado");
+              await io.emit('message', 'Mensaje: ' + Nro_tel_format + ': Número no Registrado');
+              await actualizar_estado_mensaje(url_confirma_msg, 'I', null, null, null, null, null, Id_msj_renglon_local, Id_msj_dest_local);
+              continue;
+            }
 
 
-            var tam_mensajes = Object.keys(respuesta).length
-           // console.log("tamaño j "+tam_mensajes)
+            if (Content_nombre == null || Content_nombre === '') Content_nombre = 'archivo';
 
-            for(var j = 0; j < tam_mensajes; j++){
-              console.log('--------------------------------------------------')
-               Id_msj_dest = json[0].destinatarios[i].Id_msj_dest;
-               Id_msj_renglon = json[0].destinatarios[i].Id_msj_renglon;
-              var Nro_tel = json[0].destinatarios[i].Nro_tel;
-              var Nro_tel_format = Nro_tel+'@c.us';
-              var Fecha_envio = respuesta[j].Fecha_envio;
-              var Nro_tel_from = respuesta[j].Nro_tel_from;
-              var nro_tel_from_format = Nro_tel_from+'@c.us';
-              var Msj = respuesta[j].Msj;
-              var contenido = respuesta[j].Content;
-              var Content_nombre = respuesta[j].Content_nombre;
-              var Id_msj_renglon = respuesta[j].Id_msj_renglon;
-
-              console.log("Id_msj_dest "+JSON.stringify(json[0].destinatarios[i].Id_msj_dest))
-              console.log("Id_msj_renglon "+JSON.stringify(json[0].destinatarios[i].Id_msj_renglon))
-              console.log("Nro_tel "+JSON.stringify(json[0].destinatarios[i].Nro_tel))
-              console.log("Fecha_envio "+JSON.stringify(respuesta[j].Fecha_envio))
-              console.log("Nro_tel_from "+JSON.stringify(respuesta[j].Nro_tel_from))
-              console.log("Msj "+JSON.stringify(respuesta[j].Msj))
-              console.log("Content_nombre "+JSON.stringify(respuesta[j].Content_nombre))
-              console.log("Id_msj_renglon "+JSON.stringify(respuesta[j].Id_msj_renglon))
-              console.log('--------------------------------------------------')
-              //console.log('IS REGISTER '+Nro_tel)  ;
-              if (!isNaN(Number(Nro_tel))) {
-              if (!await client.isRegisteredUser(Nro_tel_format)) {
-                 EscribirLog('Mensaje: '+Nro_tel_format+': Número no Registrado',"event");
-                console.log("numero no registrado");
-                await io.emit('message', 'Mensaje: '+Nro_tel_format+': Número no Registrado' );
-                actualizar_estado_mensaje(url_confirma_msg,'I',null,null,null,null,null,json[0].destinatarios[i].Id_msj_renglon,json[0].destinatarios[i].Id_msj_dest );
-                   
-              
+            if (contenido != null && String(contenido) !== '') {
+              const mimeType = detectMimeType(String(contenido)) || mime.lookup(Content_nombre) || 'application/octet-stream';
+              console.log('tipo de dato: ' + mimeType);
+              const media = new MessageMedia(mimeType, String(contenido), Content_nombre);
+              await io.emit('message', 'Mensaje: ' + Nro_tel_format + ': ' + Msj);
+              await safeSend(Nro_tel_format, media, { caption: Msj });
+            } else {
+              console.log("msj texto");
+              await io.emit('message', 'Mensaje: ' + Nro_tel_format + ': ' + Msj);
+              await safeSend(Nro_tel_format, Msj);
+            }
+ 
+            let tipo = null, contacto = null, email = null, direccion = null, nombre = null;
+            try {
+              const contact = await client.getContactById(Nro_tel_format);
+              if (contact?.isBusiness === true) {
+                tipo = 'B';
+                contacto = contact.pushname || null;
+                email = contact.businessProfile?.email || null;
+                direccion = contact.businessProfile?.address || null;
+                nombre = contact.name || null;
+              } else {
+                tipo = 'C';
+                nombre = contact?.name || null;
+                contacto = contact?.shortName || contact?.pushname || null;
               }
-              else { 
-               
-              if(Content_nombre == null || Content_nombre == ''){Content_nombre = 'archivo'}
-               
-                //if (contenido != null || contenido != '' ){
-                 if (contenido != null ){
-                  console.log('tipo de dato: '+detectMimeType(contenido));
-                  var media = await new MessageMedia(detectMimeType(contenido), contenido, Content_nombre);
-                  //await safeSend(Nro_tel_format,media,{caption:  Msj });
-                  await io.emit('message', 'Mensaje: '+Nro_tel_format+': '+ Msj );
-                  await safeSend('5493462674128@c.us',media,{caption:  Msj });
-                  
-                  } else{
-                    console.log("msj texto");
-                    if (Msj == null){ Msj = ''}
-                    //await safeSend(Nro_tel_format,  Msj );
-                    await io.emit('message', 'Mensaje: '+Nro_tel_format+': '+ Msj );
-                    await safeSend('5493462674128@c.us',  Msj );
-                  }
-                  /////////////////////////////////////////
-                  let contact = await client.getContactById(Nro_tel_format);
-                      let tipo, contacto, email, direccion, nombre
-
-                    if(contact.isBusiness==true){
-                        tipo = 'B';
-                        contacto = contact.pushname;
-                        email= contact.businessProfile.email;
-                        direccion = contact.businessProfile.address;
-                        nombre = contact.name;
-                      } else{
-                        tipo = 'C';
-                        nombre =  contact.name;
-                        contacto = contact.shortName;
-                        direccion = null;
-                        email = null;
-                    }
-                    actualizar_estado_mensaje(url_confirma_msg,'E',tipo,nombre,contacto,direccion,email,json[0].destinatarios[i].Id_msj_renglon,json[0].destinatarios[i].Id_msj_dest );
-                  
-                    await sleep(seg_msg);
-                  
-                }
-              }
-              else
-              {
-                console.log("numero invalido");
-                await io.emit('message', 'Mensaje: '+Nro_tel_format+': Número Inválido' );
-                actualizar_estado_mensaje(url_confirma_msg,'I',null,null,null,null,null,json[0].destinatarios[i].Id_msj_renglon,json[0].destinatarios[i].Id_msj_dest );
-               
-
-              }
+            } catch (e) {
+              EscribirLog('getContactById error ' + Nro_tel_format + ': ' + String(e?.message || e), "error");
+            }
 
 
                 
-          }   console.log('--------------------------------------------------')
+            await actualizar_estado_mensaje(url_confirma_msg, 'E', tipo, nombre, contacto, direccion, email, Id_msj_renglon_local, Id_msj_dest_local);
+            await sleep(seg_msg);
+          }
           
         }
+      } catch (err) {
+        console.log(err);
+        EscribirLog('ConsultaApiMensajes error: ' + String(err?.message || err), "error");
       }
-     else
-     {
-      json = await resp.json();
-       
-       if (msg_errores == ''|| msg_errores == null){
+    
 
-       }
-       else{
-        console.log("ApiWhatsapp - Response ERROR "+JSON.stringify(json));
-        EscribirLog("ApiWhatsapp - Response ERROR "+JSON.stringify(json),"error");
-       
-       }
-      // return 'error'
-     }
- }
- catch (err) {
-   console.log(err);
-    EscribirLog(err,"error");
-   if (msg_errores == ''|| msg_errores == null){
-   }
-   else{
-    
-   
-    
-   }
-   //return 'error'
- }
-  RecuperarJsonConfMensajes();
-  seg_tele = devolver_seg_tele();
-  //console.log("esperando por API "+seg_tele/1000 + ' segundos...');
-  await sleep(seg_tele);
+      try { RecuperarJsonConfMensajes(); } catch {}
+      seg_tele = devolver_seg_tele();
+      await sleep(Math.max(1000, Number(seg_tele) || 30000));
     }
+  } finally {
+    consultaApiMensajesRunning = false;
+    console.log("ConsultaApiMensajes detenido");
+    EscribirLog("ConsultaApiMensajes detenido", "event");
+  }
+}
+
+function startConsultaApiMensajesIfEnabled(source = '') {
+  try {
+    if (consulta_api_mensajes_habilitado !== true) {
+      console.log("ConsultaApiMensajes deshabilitado" + (source ? " source=" + source : ""));
+      return;
+    }
+    if (consultaApiMensajesRunning) return;
+    ConsultaApiMensajes().catch((e) => {
+      consultaApiMensajesRunning = false;
+      console.log("ConsultaApiMensajes fatal:", e?.message || e);
+      EscribirLog("ConsultaApiMensajes fatal: " + String(e?.message || e), "error");
+    });
+  } catch (e) {
+    console.log("startConsultaApiMensajesIfEnabled error:", e?.message || e);
+    EscribirLog("startConsultaApiMensajesIfEnabled error: " + String(e?.message || e), "error");
+  }
+}
+
+function buildUrlWithParams(baseUrl, params) {
+  const raw = String(baseUrl || '').trim();
+  if (!raw) return '';
+  const qs = Object.entries(params || {})
+    .filter(([, v]) => v !== undefined && v !== null && String(v) !== '')
+    .map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(String(v)))
+    .join('&');
+  if (!qs) return raw;
+  return raw + (raw.includes('?') ? '&' : '?') + qs;
+}
+
+async function actualizar_estado_mensaje(urlBase, estado, tipo, nombre, contacto, direccion, email, id_msj_renglon, id_msj_dest) {
+  try {
+    if (!urlBase) return false;
+    const url = buildUrlWithParams(urlBase, {
+      estado,
+      Estado: estado,
+      tipo,
+      Tipo: tipo,
+      nombre,
+      Nombre: nombre,
+      contacto,
+      Contacto: contacto,
+      direccion,
+      Direccion: direccion,
+      email,
+      Email: email,
+      Id_msj_renglon: id_msj_renglon,
+      id_msj_renglon,
+      Id_msj_dest: id_msj_dest,
+      id_msj_dest
+    });
+
+    const resp = await fetch(url, { method: 'GET' }).catch((err) => {
+      EscribirLog('actualizar_estado_mensaje fetch error: ' + String(err?.message || err), 'error');
+      return null;
+    });
+    if (!resp) return false;
+    if (!resp.ok) {
+      const raw = await resp.text().catch(() => '');
+      EscribirLog('actualizar_estado_mensaje HTTP ' + resp.status + ': ' + raw, 'error');
+      return false;
+    }
+    return true;
+  } catch (e) {
+    EscribirLog('actualizar_estado_mensaje error: ' + String(e?.message || e), 'error');
+    return false;
+  }
+  
 
 }
 
@@ -2807,7 +2905,7 @@ client.on('ready', async () => {
   // updateLockStateSafe('ready').catch(()=>{});
 
   //ConsultaApiMensajes();
-
+startConsultaApiMensajesIfEnabled('ready');
 
 });
 
