@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.42  22/05/2026   */
+/*version: 4.00.43  24/05/2026   */
 
 
 
@@ -2585,21 +2585,68 @@ function startConsultaApiMensajesIfEnabled(source = '') {
   }
 }
 
+function escapeRegExp(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function replaceUrlPlaceholders(baseUrl, params) {
+  let raw = String(baseUrl || '').trim();
+  const used = new Set();
+
+  for (const [k, v] of Object.entries(params || {})) {
+    if (v === undefined || v === null || String(v) === '') continue;
+    const encoded = encodeURIComponent(String(v));
+    const before = raw;
+    raw = raw
+      .replace(new RegExp('\\{\\{\\s*' + escapeRegExp(k) + '\\s*\\}\\}', 'gi'), encoded)
+      .replace(new RegExp('<\\s*' + escapeRegExp(k) + '\\s*>', 'gi'), encoded);
+    if (raw !== before) used.add(k);
+  }
+
+  return { url: raw, used };
+}
+
+function urlAlreadyHasParam(rawUrl, keyName) {
+  try {
+    return new RegExp('(?:[?&])' + escapeRegExp(keyName) + '=', 'i').test(String(rawUrl || ''));
+  } catch {
+    return false;
+  }
+}
+
+
 function buildUrlWithParams(baseUrl, params) {
-  const raw = String(baseUrl || '').trim();
+  const replaced = replaceUrlPlaceholders(baseUrl, params);
+  let raw = replaced.url;
   if (!raw) return '';
   const qs = Object.entries(params || {})
-    .filter(([, v]) => v !== undefined && v !== null && String(v) !== '')
+    .filter(([k, v]) => {
+      if (v === undefined || v === null || String(v) === '') return false;
+      if (replaced.used.has(k)) return false;
+      if (urlAlreadyHasParam(raw, k)) return false;
+      return true;
+    })
     .map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(String(v)))
     .join('&');
   if (!qs) return raw;
   return raw + (raw.includes('?') ? '&' : '?') + qs;
 }
 
+async function fetchTextSafe(url, options) {
+  const resp = await fetch(url, options).catch((err) => {
+    EscribirLog('fetchTextSafe error: ' + String(err?.message || err), 'error');
+    return null;
+  });
+  if (!resp) return { ok: false, status: 0, text: '' };
+  const text = await resp.text().catch(() => '');
+  return { ok: !!resp.ok, status: resp.status, text };
+}
+
+
 async function actualizar_estado_mensaje(urlBase, estado, tipo, nombre, contacto, direccion, email, id_msj_renglon, id_msj_dest) {
   try {
     if (!urlBase) return false;
-    const url = buildUrlWithParams(urlBase, {
+        const payload = {
       estado,
       Estado: estado,
       tipo,
@@ -2616,19 +2663,47 @@ async function actualizar_estado_mensaje(urlBase, estado, tipo, nombre, contacto
       id_msj_renglon,
       Id_msj_dest: id_msj_dest,
       id_msj_dest
+    };
+
+    // La URL base conserva key y nro_tel_from:
+    // /api/Api_Mensajes/Actualiza_mensaje?key=...&nro_tel_from=...
+    // Los datos del estado se envían por POST en JSON.
+    const method = String(
+      tenantConfig?.api_actualiza_mensajes_method ||
+      tenantConfig?.apiActualizaMensajesMethod ||
+      process.env.API_MENSAJES_ACTUALIZA_METHOD ||
+      'POST'
+    ).trim().toUpperCase();
+
+    const postRes = await fetchTextSafe(String(urlBase || '').trim(), {
+      method: method || 'POST',
+      headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+      body: JSON.stringify(payload)
     });
 
-    const resp = await fetch(url, { method: 'GET' }).catch((err) => {
-      EscribirLog('actualizar_estado_mensaje fetch error: ' + String(err?.message || err), 'error');
-      return null;
-    });
-    if (!resp) return false;
-    if (!resp.ok) {
-      const raw = await resp.text().catch(() => '');
-      EscribirLog('actualizar_estado_mensaje HTTP ' + resp.status + ': ' + raw, 'error');
-      return false;
+    if (postRes.ok) return true;
+
+    EscribirLog('actualizar_estado_mensaje ' + (method || 'POST') + ' HTTP ' + postRes.status + ': ' + postRes.text, 'error');
+
+    // Fallback opcional para no romper si algún dominio viejo todavía esperaba GET.
+    const fallbackGet = parseBoolLike(
+      tenantConfig?.api_actualiza_mensajes_fallback_get ??
+      tenantConfig?.apiActualizaMensajesFallbackGet ??
+      process.env.API_MENSAJES_ACTUALIZA_FALLBACK_GET,
+      true
+    );
+
+    if (!fallbackGet || method === 'GET') return false;
+
+    const getUrl = buildUrlWithParams(urlBase, payload);
+    const getRes = await fetchTextSafe(getUrl, { method: 'GET' });
+    if (getRes.ok) {
+      EscribirLog('actualizar_estado_mensaje OK por fallback GET', 'event');
+      return true;
     }
-    return true;
+
+    EscribirLog('actualizar_estado_mensaje fallback GET HTTP ' + getRes.status + ': ' + getRes.text, 'error');
+    return false;
   } catch (e) {
     EscribirLog('actualizar_estado_mensaje error: ' + String(e?.message || e), 'error');
     return false;
