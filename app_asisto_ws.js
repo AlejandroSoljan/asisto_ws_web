@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.44  24/05/2026   */
+/*version: 4.00.45  24/05/2026   */
 
 
 
@@ -168,6 +168,24 @@ function applyTenantConfig(conf) {
       habilitar_bot
     );
   }
+
+
+  if (
+    conf.runtime_config_refresh_ms !== undefined ||
+    conf.runtimeConfigRefreshMs !== undefined ||
+    conf.intervalo_refresco_config_ms !== undefined ||
+   conf.intervaloRefrescoConfigMs !== undefined
+  ) {
+    runtime_config_refresh_ms = asNumber(
+      conf.runtime_config_refresh_ms ??
+      conf.runtimeConfigRefreshMs ??
+      conf.intervalo_refresco_config_ms ??
+      conf.intervaloRefrescoConfigMs,
+      runtime_config_refresh_ms
+    );
+    if (!Number.isFinite(runtime_config_refresh_ms) || runtime_config_refresh_ms < 5000) runtime_config_refresh_ms = 5000;
+  }
+
 
   // Consulta API de mensajes salientes (opcional, por tenant)
   if (conf.api2 !== undefined || conf.api_consulta_mensajes !== undefined || conf.apiConsultaMensajes !== undefined) {
@@ -1281,6 +1299,11 @@ var consulta_api_mensajes_habilitado = parseBoolLike(
   false
 );
 var consultaApiMensajesRunning = false;
+var runtime_config_refresh_ms = Number(process.env.RUNTIME_CONFIG_REFRESH_MS || process.env.CONFIG_REFRESH_MS || 30000);
+if (!Number.isFinite(runtime_config_refresh_ms) || runtime_config_refresh_ms < 5000) runtime_config_refresh_ms = 5000;
+let runtimeConfigPollTimer = null;
+let runtimeConfigPollBusy = false;
+let lastRuntimeConfigSnapshot = null;
 var msg_inicio = "";
 var msg_fin = "";
 var cant_lim = 0;
@@ -1850,6 +1873,7 @@ app.post("/control/release", requireStatusToken, async (req, res) => {
     });
 
     startAutoUpdateScheduler();
+    startRuntimeConfigPoller();
 
     bootstrapWithLock().catch(e => {
       console.log('bootstrap inicio directo error:', e?.message || e);
@@ -2416,6 +2440,7 @@ function startActionPoller() {
 async function gracefulShutdown(signal) {
   try { sessionLog(`[SHUTDOWN] ${signal} -> cerrando WhatsApp...`); } catch {}
   try { if (autoUpdateTimer) { clearInterval(autoUpdateTimer); autoUpdateTimer = null; } } catch {}
+  try { if (runtimeConfigPollTimer) { clearInterval(runtimeConfigPollTimer); runtimeConfigPollTimer = null; } } catch {}
   try { if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; } } catch {}
   try { if (actionTimer) { clearInterval(actionTimer); actionTimer = null; } } catch {}
   try { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } } catch {}
@@ -2454,8 +2479,7 @@ async function ConsultaApiMensajes(){
     await sleep(1000);
 
     while (consulta_api_mensajes_habilitado === true) {
-      try { await refreshTenantConfigFromDbPerMessage(); } catch {}
-      try { RecuperarJsonConfMensajes(); } catch {}
+      await refreshRuntimeDomainConfig('ready');
 
       if (consulta_api_mensajes_habilitado !== true) break;
 
@@ -2628,6 +2652,96 @@ function startConsultaApiMensajesIfEnabled(source = '') {
     EscribirLog("startConsultaApiMensajesIfEnabled error: " + String(e?.message || e), "error");
   }
 }
+
+
+function getRuntimeConfigSnapshot() {
+  return {
+    habilitar_bot: habilitar_bot === true,
+    habilitar_consulta_mensajes: consulta_api_mensajes_habilitado === true,
+    api2: String(api2 || ''),
+    api3: String(api3 || ''),
+    key_configurada: !!key,
+    runtime_config_refresh_ms: Number(runtime_config_refresh_ms) || 0
+  };
+}
+
+function logRuntimeConfigChanges(prev, next, source = '') {
+  try {
+    if (!prev || !next) return;
+    const cambios = [];
+    for (const k of Object.keys(next)) {
+      if (prev[k] !== next[k]) cambios.push(k + '=' + String(prev[k]) + '->' + String(next[k]));
+    }
+    if (!cambios.length) return;
+    const msg = '[CONFIG] cambios runtime' + (source ? ' source=' + source : '') + ': ' + cambios.join(', ');
+    console.log(msg);
+    EscribirLog(msg, 'event');
+  } catch {}
+}
+
+function canStartConsultaApiMensajesNow() {
+  try {
+    if (consulta_api_mensajes_habilitado !== true) return false;
+    if (consultaApiMensajesRunning) return false;
+    if (!client) return false;
+    if (localWsPanelState !== 'online') return false;
+    if (!onlyDigits(telefono_qr || numero || '')) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function refreshRuntimeDomainConfig(source = 'runtime_config_poll') {
+  if (runtimeConfigPollBusy) return;
+ runtimeConfigPollBusy = true;
+
+  const prev = getRuntimeConfigSnapshot();
+  try {
+    await loadTenantConfigFromDbMinimal();
+    try { RecuperarJsonConfMensajes(); } catch {}
+
+    const next = getRuntimeConfigSnapshot();
+    logRuntimeConfigChanges(prev, next, source);
+    lastRuntimeConfigSnapshot = next;
+    if (next.habilitar_consulta_mensajes === true && canStartConsultaApiMensajesNow()) {
+      startConsultaApiMensajesIfEnabled(source);
+    }
+
+    if (prev.habilitar_consulta_mensajes === true && next.habilitar_consulta_mensajes !== true && consultaApiMensajesRunning) {
+      const msg = 'ConsultaApiMensajes deshabilitado por configuración; se detendrá al finalizar el ciclo actual';
+      console.log(msg);
+      EscribirLog(msg, 'event');
+    }
+  } catch (e) {
+    console.log('refreshRuntimeDomainConfig error:', e?.message || e);
+    EscribirLog('refreshRuntimeDomainConfig error: ' + String(e?.message || e), 'error');
+  } finally {
+    runtimeConfigPollBusy = false;
+  }
+}
+
+function startRuntimeConfigPoller() {
+  try {
+    if (runtimeConfigPollTimer) return;
+
+    const everyMs = Math.max(5000, Number(runtime_config_refresh_ms) || 30000);
+    lastRuntimeConfigSnapshot = getRuntimeConfigSnapshot();
+
+    const msg = '[CONFIG] refresco runtime activado cada ' + everyMs + 'ms';
+    console.log(msg);
+    EscribirLog(msg, 'event');
+
+    runtimeConfigPollTimer = setInterval(() => {
+      refreshRuntimeDomainConfig('interval').catch(() => {});
+    }, everyMs);
+  } catch (e) {
+    console.log('startRuntimeConfigPoller error:', e?.message || e);
+    EscribirLog('startRuntimeConfigPoller error: ' + String(e?.message || e), 'error');
+  }
+}
+
+
 
 function escapeRegExp(value) {
   return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
