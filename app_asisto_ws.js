@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.45  24/05/2026   */
+/*version: 4.00.46  24/05/2026   */
 
 
 
@@ -219,6 +219,44 @@ function applyTenantConfig(conf) {
       consulta_api_mensajes_habilitado
     );
   }
+
+  if (
+    conf.consulta_mensajes_respetar_horarios !== undefined ||
+    conf.consultaMensajesRespetarHorarios !== undefined ||
+    conf.consulta_api_mensajes_respetar_horarios !== undefined ||
+    conf.consultaApiMensajesRespetarHorarios !== undefined ||
+    conf.respetar_horarios_consulta_mensajes !== undefined ||
+   conf.respetarHorariosConsultaMensajes !== undefined
+  ) {
+    consulta_mensajes_respetar_horarios = parseBoolLike(
+      conf.consulta_mensajes_respetar_horarios ??
+      conf.consultaMensajesRespetarHorarios ??
+      conf.consulta_api_mensajes_respetar_horarios ??
+      conf.consultaApiMensajesRespetarHorarios ??
+      conf.respetar_horarios_consulta_mensajes ??
+      conf.respetarHorariosConsultaMensajes,
+      consulta_mensajes_respetar_horarios
+    );
+  }
+
+  if (
+    conf.consulta_mensajes_fuera_horario_sleep_ms !== undefined ||
+    conf.consultaMensajesFueraHorarioSleepMs !== undefined ||
+    conf.consulta_api_mensajes_fuera_horario_sleep_ms !== undefined ||
+    conf.consultaApiMensajesFueraHorarioSleepMs !== undefined
+  ) {
+    consulta_mensajes_fuera_horario_sleep_ms = asNumber(
+      conf.consulta_mensajes_fuera_horario_sleep_ms ??
+      conf.consultaMensajesFueraHorarioSleepMs ??
+      conf.consulta_api_mensajes_fuera_horario_sleep_ms ??
+      conf.consultaApiMensajesFueraHorarioSleepMs,
+      consulta_mensajes_fuera_horario_sleep_ms
+    );
+    if (!Number.isFinite(consulta_mensajes_fuera_horario_sleep_ms) || consulta_mensajes_fuera_horario_sleep_ms < 5000) {
+      consulta_mensajes_fuera_horario_sleep_ms = 60000;
+    }
+  }
+
 
 
   if (conf.msg_inicio !== undefined) msg_inicio = String(conf.msg_inicio ?? "");
@@ -1298,7 +1336,19 @@ var consulta_api_mensajes_habilitado = parseBoolLike(
   process.env.HABILITAR_CONSULTA_MENSAJES || process.env.CONSULTA_API_MENSAJES_ENABLED || process.env.ENABLE_CONSULTA_API_MENSAJES,
   false
 );
+
+var consulta_mensajes_respetar_horarios = parseBoolLike(
+  process.env.CONSULTA_MENSAJES_RESPETAR_HORARIOS || process.env.CONSULTA_API_MENSAJES_RESPETAR_HORARIOS,
+  true
+);
+var consulta_mensajes_fuera_horario_sleep_ms = Number(process.env.CONSULTA_MENSAJES_FUERA_HORARIO_SLEEP_MS || 60000);
+if (!Number.isFinite(consulta_mensajes_fuera_horario_sleep_ms) || consulta_mensajes_fuera_horario_sleep_ms < 5000) consulta_mensajes_fuera_horario_sleep_ms = 60000;
+
 var consultaApiMensajesRunning = false;
+
+let consultaMensajesHoursCache = { expiresAt: 0, hours: null, updatedAt: null };
+let lastConsultaMensajesHorarioLogKey = '';
+
 var runtime_config_refresh_ms = Number(process.env.RUNTIME_CONFIG_REFRESH_MS || process.env.CONFIG_REFRESH_MS || 30000);
 if (!Number.isFinite(runtime_config_refresh_ms) || runtime_config_refresh_ms < 5000) runtime_config_refresh_ms = 5000;
 let runtimeConfigPollTimer = null;
@@ -2465,6 +2515,155 @@ process.on("SIGBREAK", () => { gracefulShutdown("SIGBREAK"); });
 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Horario de funcionamiento para ConsultaApiMensajes.
+// Usa el mismo documento que el panel existente de horarios:
+// settings._id = "store_hours:<tenantId>", campo hours = { monday:[{from,to}], ... }.
+// Si no hay horarios cargados, mantiene el comportamiento anterior: consulta habilitada todo el día.
+const CONSULTA_MENSAJES_DAY_KEYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
+
+function _consultaMensajesHHMMToMinutes(value) {
+  const m = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(String(value || '').trim());
+  if (!m) return null;
+  return Number(m[1]) * 60 + Number(m[2]);
+}
+
+function normalizeConsultaMensajesHoursPayload(raw) {
+  const out = {};
+  try {
+    const src = raw && typeof raw === 'object' ? raw : {};
+    for (const day of CONSULTA_MENSAJES_DAY_KEYS) {
+      const ranges = Array.isArray(src[day]) ? src[day] : [];
+      const norm = [];
+      for (const r of ranges) {
+        if (!r || typeof r !== 'object') continue;
+        const from = String(r.from ?? r.desde ?? '').trim();
+        const to = String(r.to ?? r.hasta ?? '').trim();
+        const fromM = _consultaMensajesHHMMToMinutes(from);
+        const toM = _consultaMensajesHHMMToMinutes(to);
+        if (fromM == null || toM == null || fromM >= toM) continue;
+        norm.push({ from, to, fromM, toM });
+        if (norm.length >= 2) break;
+      }
+      if (norm.length) out[day] = norm;
+    }
+  } catch {}
+  return out;
+}
+
+function _consultaMensajesHasAnyHours(hours) {
+  try {
+    return !!(hours && CONSULTA_MENSAJES_DAY_KEYS.some((d) => Array.isArray(hours[d]) && hours[d].length > 0));
+  } catch {
+    return false;
+  }
+}
+
+async function loadConsultaMensajesHoursFromDb(force = false) {
+  try {
+    if (consulta_mensajes_respetar_horarios !== true) return null;
+    const now = Date.now();
+    if (!force && consultaMensajesHoursCache.expiresAt > now) return consultaMensajesHoursCache.hours;
+
+    if (!tenantId || !await ensureMongo() || !mongoose?.connection?.db) {
+      consultaMensajesHoursCache = { expiresAt: now + 30000, hours: null, updatedAt: null };
+      return null;
+    }
+
+    const tenant = String(tenantId || '').trim();
+    const coll = mongoose.connection.db.collection('settings');
+    let doc = await coll.findOne({ _id: `store_hours:${tenant}` });
+    if (!doc) doc = await coll.findOne({ tenantId: tenant, _id: /^store_hours:/ });
+
+    const hours = normalizeConsultaMensajesHoursPayload(doc?.hours || {});
+    consultaMensajesHoursCache = {
+      expiresAt: now + 30000,
+      hours: _consultaMensajesHasAnyHours(hours) ? hours : null,
+      updatedAt: doc?.updatedAt || null
+    };
+    return consultaMensajesHoursCache.hours;
+  } catch (e) {
+    try { EscribirLog('loadConsultaMensajesHoursFromDb error: ' + String(e?.message || e), 'error'); } catch {}
+    return null;
+  }
+}
+
+function getConsultaMensajesNowArgentinaParts(date = new Date()) {
+  try {
+    const dayKey = new Intl.DateTimeFormat('en-US', { timeZone: AR_TZ, weekday: 'long' }).format(date).toLowerCase();
+    const parts = new Intl.DateTimeFormat('sv-SE', {
+      timeZone: AR_TZ,
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    }).formatToParts(date);
+    const map = {};
+    for (const p of parts || []) {
+      if (p && p.type) map[p.type] = p.value;
+    }
+    const hh = String(map.hour || '00').padStart(2, '0');
+    const mm = String(map.minute || '00').padStart(2, '0');
+    return { dayKey, hhmm: `${hh}:${mm}`, minutes: Number(hh) * 60 + Number(mm) };
+  } catch {
+    const d = date || new Date();
+    return { dayKey: '', hhmm: '', minutes: d.getHours() * 60 + d.getMinutes() };
+  }
+}
+
+async function getConsultaMensajesScheduleStatus() {
+  if (consulta_mensajes_respetar_horarios !== true) {
+    return { allowed: true, reason: 'schedule_disabled' };
+  }
+
+  const hours = await loadConsultaMensajesHoursFromDb();
+  if (!_consultaMensajesHasAnyHours(hours)) {
+    return { allowed: true, reason: 'no_hours_configured' };
+  }
+
+  const now = getConsultaMensajesNowArgentinaParts();
+  const ranges = Array.isArray(hours[now.dayKey]) ? hours[now.dayKey] : [];
+  const slots = ranges.map((r) => `${r.from}-${r.to}`).join(', ');
+
+  if (!ranges.length) {
+    return { allowed: false, reason: 'day_closed', dayKey: now.dayKey, hhmm: now.hhmm, slots: '' };
+  }
+
+  const inside = ranges.some((r) => now.minutes >= r.fromM && now.minutes <= r.toM);
+  return {
+    allowed: inside,
+    reason: inside ? 'inside_range' : 'outside_range',
+    dayKey: now.dayKey,
+    hhmm: now.hhmm,
+    slots
+  };
+}
+
+function logConsultaMensajesScheduleStatus(status) {
+  try {
+    if (!status || status.reason === 'no_hours_configured' || status.reason === 'schedule_disabled') return;
+    const key = status.allowed
+      ? `open:${status.dayKey}:${status.slots || ''}`
+      : `closed:${status.reason}:${status.dayKey}:${status.slots || ''}`;
+    if (key === lastConsultaMensajesHorarioLogKey) return;
+    lastConsultaMensajesHorarioLogKey = key;
+
+    const msg = status.allowed
+      ? `ConsultaApiMensajes dentro de horario (${status.dayKey} ${status.hhmm}, franjas: ${status.slots || '-'})`
+      : `ConsultaApiMensajes fuera de horario (${status.reason}, ${status.dayKey || '-'} ${status.hhmm || '-'}, franjas: ${status.slots || '-'})`;
+    console.log(msg);
+    EscribirLog(msg, 'event');
+  } catch {}
+}
+
+async function sleepConsultaMensajesFueraDeHorario() {
+  const waitMs = Math.max(5000, Number(consulta_mensajes_fuera_horario_sleep_ms) || 60000);
+  await sleep(waitMs);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+
+
 async function ConsultaApiMensajes(){
   if (consultaApiMensajesRunning) {
     console.log("ConsultaApiMensajes ya está corriendo");
@@ -2482,6 +2681,13 @@ async function ConsultaApiMensajes(){
       await refreshRuntimeDomainConfig('ready');
 
       if (consulta_api_mensajes_habilitado !== true) break;
+
+      const horarioConsulta = await getConsultaMensajesScheduleStatus();
+      logConsultaMensajesScheduleStatus(horarioConsulta);
+      if (!horarioConsulta.allowed) {
+        await sleepConsultaMensajesFueraDeHorario();
+        continue;
+      }
 
       const nroTelFrom = onlyDigits(telefono_qr || numero || '');
       if (!api2 || !api3 || !key || !nroTelFrom) {
@@ -2661,7 +2867,9 @@ function getRuntimeConfigSnapshot() {
     api2: String(api2 || ''),
     api3: String(api3 || ''),
     key_configurada: !!key,
-    runtime_config_refresh_ms: Number(runtime_config_refresh_ms) || 0
+    runtime_config_refresh_ms: Number(runtime_config_refresh_ms) || 0,
+    consulta_mensajes_respetar_horarios: consulta_mensajes_respetar_horarios === true,
+    consulta_mensajes_fuera_horario_sleep_ms: Number(consulta_mensajes_fuera_horario_sleep_ms) || 0
   };
 }
 
