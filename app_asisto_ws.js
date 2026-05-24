@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.43  24/05/2026   */
+/*version: 4.00.44  24/05/2026   */
 
 
 
@@ -84,6 +84,24 @@ function readBootstrapFromFile() {
   }
 }
 
+function extractTenantConfigFromDoc(doc) {
+  if (!doc || typeof doc !== "object") return {};
+  const nested = (doc.configuracion && typeof doc.configuracion === "object") ? doc.configuracion : null;
+  if (!nested) return doc;
+
+  // Compatibilidad: algunos campos operativos pueden estar en la raíz del documento
+  // tenant_config y otros dentro de configuracion. La configuración anidada gana
+  // cuando el mismo campo existe en ambos lugares, pero no descartamos la raíz.
+  return {
+    ...doc,
+    ...nested,
+    _id: doc._id,
+    tenantId: nested.tenantId ?? doc.tenantId ?? doc.tenantid,
+    tenantid: nested.tenantid ?? doc.tenantid ?? doc.tenantId
+  };
+}
+
+
 function applyTenantConfig(conf) {
   if (!conf || typeof conf !== "object") return;
 
@@ -128,6 +146,28 @@ function applyTenantConfig(conf) {
   seg_msg = asNumber(conf.seg_msg, seg_msg);
   seg_tele = asNumber(conf.seg_tele, seg_tele);
   if (conf.api !== undefined) api = String(conf.api);
+
+  // Bot/API principal de mensajes entrantes. Es independiente de la consulta
+  // de mensajes salientes. Por defecto queda habilitado para no cambiar el
+  // comportamiento actual.
+  if (
+    conf.habilitar_bot !== undefined ||
+    conf.habilitarBot !== undefined ||
+    conf.bot_habilitado !== undefined ||
+    conf.botHabilitado !== undefined ||
+    conf.enable_bot !== undefined ||
+    conf.enableBot !== undefined
+  ) {
+    habilitar_bot = parseBoolLike(
+      conf.habilitar_bot ??
+      conf.habilitarBot ??
+      conf.bot_habilitado ??
+      conf.botHabilitado ??
+      conf.enable_bot ??
+      conf.enableBot,
+      habilitar_bot
+    );
+  }
 
   // Consulta API de mensajes salientes (opcional, por tenant)
   if (conf.api2 !== undefined || conf.api_consulta_mensajes !== undefined || conf.apiConsultaMensajes !== undefined) {
@@ -199,7 +239,7 @@ async function loadTenantConfigFromDb() {
   if (!doc) doc = await coll.findOne({ tenantId: tenantId });
   if (!doc) throw new Error(`No existe configuración en BD para tenantId=${tenantId} (${collName})`);
 
-  const conf = (doc && doc.configuracion && typeof doc.configuracion === "object") ? doc.configuracion : doc;
+  const conf = extractTenantConfigFromDoc(doc);
   tenantConfig = conf;
   applyTenantConfig(conf);
 
@@ -1232,6 +1272,10 @@ var api = "http://managermsm.ddns.net:2002/v200/api/Api_Chat_Cab/ProcesarMensaje
 var api2 = String(process.env.API_MENSAJES_CONSULTA || process.env.API2 || "http://managermsm.ddns.net:2002/v200/api/Api_Mensajes/Consulta_no_enviados");
 var api3 = String(process.env.API_MENSAJES_ACTUALIZA || process.env.API3 || "http://managermsm.ddns.net:2002/v200/api/Api_Mensajes/Actualiza_mensaje");
 var key = String(process.env.API_MENSAJES_KEY || process.env.API_KEY || process.env.KEY || 'FMM0325*');
+var habilitar_bot = parseBoolLike(
+  process.env.HABILITAR_BOT || process.env.BOT_HABILITADO || process.env.ENABLE_BOT,
+  true
+);
 var consulta_api_mensajes_habilitado = parseBoolLike(
   process.env.HABILITAR_CONSULTA_MENSAJES || process.env.CONSULTA_API_MENSAJES_ENABLED || process.env.ENABLE_CONSULTA_API_MENSAJES,
   false
@@ -1499,7 +1543,7 @@ async function loadTenantConfigFromDbMinimal() {
       return null;
     }
 
-    const conf = (doc && doc.configuracion && typeof doc.configuracion === "object") ? doc.configuracion : doc;
+    const conf = extractTenantConfigFromDoc(doc);
 
     // Mantener la config completa del tenant en memoria y aplicarla al runtime.
     tenantConfig = conf;
@@ -2431,8 +2475,8 @@ async function ConsultaApiMensajes(){
 
 
       try {
-        console.log("Conectando a API " + url);
-        EscribirLog("Conectando a API " + url, "event");
+        //console.log("Conectando a API " + url);
+        //EscribirLog("Conectando a API " + url, "event");
         const resp = await fetch(url, { method: "GET" }).catch(err => {
           EscribirLog("ConsultaApiMensajes fetch error: " + String(err?.message || err), "error");
           return null;
@@ -2728,6 +2772,13 @@ async function processIncomingAsistoMessage(message, source) {
   try { await refreshTenantConfigFromDbPerMessage(); } catch {}
   try { RecuperarJsonConfMensajes(); } catch {}
 
+
+  if (habilitar_bot !== true) {
+    try { console.log('[BOT] deshabilitado: no se llama al API principal. from=' + String(message?.from || '')); } catch {}
+    try { EscribirLog('[BOT] deshabilitado: no se llama al API principal. from=' + String(message?.from || ''), 'event'); } catch {}
+    return;
+  }
+
 //if (message.from=='5493462514448@c.us'   ){
 
   var indice_telefono = indexOf2d(message.from);
@@ -2980,7 +3031,12 @@ client.on('ready', async () => {
   // updateLockStateSafe('ready').catch(()=>{});
 
   //ConsultaApiMensajes();
-startConsultaApiMensajesIfEnabled('ready');
+  try { await refreshTenantConfigFromDbPerMessage(); } catch {}
+  try { RecuperarJsonConfMensajes(); } catch {}
+  try {
+    console.log('[CONFIG] habilitar_bot=' + habilitar_bot + ' habilitar_consulta_mensajes=' + consulta_api_mensajes_habilitado);
+  } catch {}
+  startConsultaApiMensajesIfEnabled('ready');
 
 });
 
