@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.47  24/05/2026   */
+/*version: 4.00.48  24/05/2026   */
 
 
 
@@ -142,6 +142,20 @@ function applyTenantConfig(conf) {
   // Mensajes / límites
   seg_desde = asNumber(conf.seg_desde, seg_desde);
   seg_hasta = asNumber(conf.seg_hasta, seg_hasta);
+   seg_desde2 = asNumber(
+    conf.seg_desde2 ??
+    conf.segDesde2 ??
+    conf.seg_desde_diferente ??
+    conf.segDesdeDiferente,
+    seg_desde2
+  );
+  seg_hasta2 = asNumber(
+    conf.seg_hasta2 ??
+    conf.segHasta2 ??
+    conf.seg_hasta_diferente ??
+    conf.segHastaDiferente,
+    seg_hasta2
+  );
   if (conf.dsn !== undefined) dsn = String(conf.dsn);
   seg_msg = asNumber(conf.seg_msg, seg_msg);
   seg_tele = asNumber(conf.seg_tele, seg_tele);
@@ -1325,6 +1339,13 @@ var port = Number(process.env.PORT || 8002);
 var headless = true;
 var seg_desde = 80000;
 var seg_hasta = 10000;
+// ConsultaApiMensajes usa milisegundos:
+// - seg_desde/seg_hasta: pausa entre mensajes al MISMO número.
+// - seg_desde2/seg_hasta2: pausa entre mensajes a DISTINTO número.
+var seg_desde2 = Number(process.env.SEG_DESDE2 || process.env.SEG_DESDE_DIFERENTE || seg_desde);
+var seg_hasta2 = Number(process.env.SEG_HASTA2 || process.env.SEG_HASTA_DIFERENTE || seg_hasta);
+if (!Number.isFinite(seg_desde2) || seg_desde2 < 0) seg_desde2 = seg_desde;
+if (!Number.isFinite(seg_hasta2) || seg_hasta2 < 0) seg_hasta2 = seg_hasta;
 var seg_msg = 5000;
 var seg_tele = 3000;
 var version = "1.0";
@@ -2675,7 +2696,40 @@ async function sleepConsultaMensajesFueraDeHorario() {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+function randomDelayMsBetween(desde, hasta, fallbackDesde, fallbackHasta) {
+  const d = Number.isFinite(Number(desde)) ? Number(desde) : Number(fallbackDesde);
+  const h = Number.isFinite(Number(hasta)) ? Number(hasta) : Number(fallbackHasta);
+  const min = Math.max(0, Math.min(d, h));
+  const max = Math.max(0, Math.max(d, h));
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return 0;
+  if (max <= min) return min;
+  return Math.floor(Math.random() * (max - min) + min);
+}
 
+function calcularDelayConsultaMensajesMs(nroTelAnterior, nroTelActual) {
+  const anterior = onlyDigits(nroTelAnterior || '');
+  const actual = onlyDigits(nroTelActual || '');
+  const mismoNumero = !!anterior && !!actual && anterior === actual;
+
+  const delay = randomDelayMsBetween(
+    mismoNumero ? seg_desde : seg_desde2,
+    mismoNumero ? seg_hasta : seg_hasta2,
+    seg_desde,
+    seg_hasta
+  );
+
+  try {
+    const tipo = mismoNumero ? 'mismo_numero' : 'distinto_numero';
+    console.log('[ConsultaApiMensajes] delay ' + tipo + ': ' + delay + 'ms (' + (anterior || '-') + ' -> ' + (actual || '-') + ')');
+  } catch {}
+
+  seg_msg = delay;
+  return delay;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+ 
+ 
 
 
 async function ConsultaApiMensajes(){
@@ -2715,7 +2769,7 @@ async function ConsultaApiMensajes(){
       const url = buildUrlWithParams(api2, { key, nro_tel_from: nroTelFrom });
       const url_confirma_msg = buildUrlWithParams(api3, { key, nro_tel_from: nroTelFrom });
 
-      seg_msg = Math.random() * (devolver_seg_hasta() - devolver_seg_desde()) + devolver_seg_desde();
+      //seg_msg = Math.random() * (devolver_seg_hasta() - devolver_seg_desde()) + devolver_seg_desde();
 
 
       try {
@@ -2753,6 +2807,7 @@ async function ConsultaApiMensajes(){
 
         const mensajes = Array.isArray(jsonResp[0].mensajes) ? jsonResp[0].mensajes : [];
         const destinatarios = Array.isArray(jsonResp[0].destinatarios) ? jsonResp[0].destinatarios : [];
+        let ultimoNroTelConsultaMensajes = '';
 
         for (let i = 0; i < destinatarios.length; i++) {
           const dest = destinatarios[i] || {};
@@ -2798,6 +2853,9 @@ async function ConsultaApiMensajes(){
               continue;
             }
 
+          if (ultimoNroTelConsultaMensajes) {
+              await sleep(calcularDelayConsultaMensajesMs(ultimoNroTelConsultaMensajes, Nro_tel));
+            }
 
             if (Content_nombre == null || Content_nombre === '') Content_nombre = 'archivo';
 
@@ -2834,7 +2892,7 @@ async function ConsultaApiMensajes(){
 
                 
             await actualizar_estado_mensaje(url_confirma_msg, 'E', tipo, nombre, contacto, direccion, email, Id_msj_renglon_local, Id_msj_dest_local);
-            await sleep(seg_msg);
+            ultimoNroTelConsultaMensajes = Nro_tel;
           }
           
         }
@@ -2885,6 +2943,10 @@ function getRuntimeConfigSnapshot() {
     runtime_config_refresh_ms: Number(runtime_config_refresh_ms) || 0,
     consulta_mensajes_respetar_horarios: consulta_mensajes_respetar_horarios === true,
     consulta_mensajes_fuera_horario_sleep_ms: Number(consulta_mensajes_fuera_horario_sleep_ms) || 0,
+    seg_desde: Number(seg_desde) || 0,
+    seg_hasta: Number(seg_hasta) || 0,
+    seg_desde2: Number(seg_desde2) || 0,
+    seg_hasta2: Number(seg_hasta2) || 0,
     time_cad_ms: Number(time_cad) || 0
   };
 }
@@ -3876,6 +3938,17 @@ return seg_desde;
 function devolver_seg_hasta(){
 
 return seg_hasta;
+}
+
+
+function devolver_seg_desde2(){
+
+return seg_desde2;
+}
+
+function devolver_seg_hasta2(){
+
+return seg_hasta2;
 }
 
 function devolver_headless(){
