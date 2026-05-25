@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.46  24/05/2026   */
+/*version: 4.00.47  24/05/2026   */
 
 
 
@@ -263,7 +263,19 @@ function applyTenantConfig(conf) {
   if (conf.msg_fin !== undefined) msg_fin = String(conf.msg_fin ?? "");
   cant_lim = asNumber(conf.cant_lim, cant_lim);
   if (conf.msg_lim !== undefined) msg_lim = String(conf.msg_lim ?? "");
-  time_cad = asNumber(conf.time_cad, time_cad);
+  const timeCadRaw =
+    conf.time_cad ??
+    conf.timeCad ??
+    conf.caducidad_mensaje_ms ??
+    conf.caducidadMensajeMs ??
+    conf.continuar_timeout_ms ??
+    conf.continuarTimeoutMs;
+  if (timeCadRaw !== undefined) {
+    const n = Number(timeCadRaw);
+    // time_cad se usa en milisegundos para caducar la espera de Continuar S/N.
+    // No se convierte a segundos: si en Mongo dice 60000, son 60 segundos.
+    if (Number.isFinite(n) && n >= 0) time_cad = n;
+  }
   if (conf.msg_cad !== undefined) msg_cad = String(conf.msg_cad ?? "");
   if (conf.msg_can !== undefined) msg_can = String(conf.msg_can ?? "");
   if (conf.nom_emp !== undefined) nom_chatbot = String(conf.nom_emp);
@@ -300,7 +312,7 @@ async function loadTenantConfigFromDb() {
   applyTenantConfig(conf);
 
   try {
-    console.log(`[CONFIG] tenantId=${tenantId} numero=${numero || ""} puerto=${port} headless=${headless} seg_desde=${seg_desde}`);
+   // console.log(`[CONFIG] tenantId=${tenantId} numero=${numero || ""} puerto=${port} headless=${headless} seg_desde=${seg_desde}`);
   } catch {}
   return true;
 }
@@ -1359,6 +1371,7 @@ var msg_fin = "";
 var cant_lim = 0;
 var msg_lim = 'Continuar? S / N';
 var time_cad = 0;
+var mensajeCaducidadWatcherStarted = false;
 var email_err = "";
 var msg_cad = "";
 var msg_can = "";
@@ -1924,6 +1937,7 @@ app.post("/control/release", requireStatusToken, async (req, res) => {
 
     startAutoUpdateScheduler();
     startRuntimeConfigPoller();
+    startCaducidadMensajesWatcher('startup');
 
     bootstrapWithLock().catch(e => {
       console.log('bootstrap inicio directo error:', e?.message || e);
@@ -2831,6 +2845,7 @@ async function ConsultaApiMensajes(){
     
 
       try { RecuperarJsonConfMensajes(); } catch {}
+      startCaducidadMensajesWatcher('ready');
       seg_tele = devolver_seg_tele();
       await sleep(Math.max(1000, Number(seg_tele) || 30000));
     }
@@ -2869,7 +2884,8 @@ function getRuntimeConfigSnapshot() {
     key_configurada: !!key,
     runtime_config_refresh_ms: Number(runtime_config_refresh_ms) || 0,
     consulta_mensajes_respetar_horarios: consulta_mensajes_respetar_horarios === true,
-    consulta_mensajes_fuera_horario_sleep_ms: Number(consulta_mensajes_fuera_horario_sleep_ms) || 0
+    consulta_mensajes_fuera_horario_sleep_ms: Number(consulta_mensajes_fuera_horario_sleep_ms) || 0,
+    time_cad_ms: Number(time_cad) || 0
   };
 }
 
@@ -3356,7 +3372,7 @@ client.on('ready', async () => {
   try { await refreshTenantConfigFromDbPerMessage(); } catch {}
   try { RecuperarJsonConfMensajes(); } catch {}
   try {
-    console.log('[CONFIG] habilitar_bot=' + habilitar_bot + ' habilitar_consulta_mensajes=' + consulta_api_mensajes_habilitado);
+    console.log('[CONFIG] habilitar_bot=' + habilitar_bot + ' habilitar_consulta_mensajes=' + consulta_api_mensajes_habilitado + ' time_cad_ms=' + time_cad);
   } catch {}
   startConsultaApiMensajesIfEnabled('ready');
 
@@ -3597,23 +3613,31 @@ async function procesar_mensaje(json, message){
 async function controlar_hora_msg(){
 
   while(a < 1){
+    const ttlMs = Number(time_cad);
+    if (!Number.isFinite(ttlMs) || ttlMs <= 0) {
+      await sleep(5000);
+      continue;
+    }
+
      for(var i in jsonGlobal){
      
-      if( jsonGlobal[i][3] !== ''){
+      if(jsonGlobal[i] && jsonGlobal[i][3] !== ''){
         var fecha = new Date();
-        var fecha_msg = jsonGlobal[i][3].getTime();
+        var fechaMsgDate = (jsonGlobal[i][3] instanceof Date) ? jsonGlobal[i][3] : new Date(jsonGlobal[i][3]);
+        var fecha_msg = fechaMsgDate.getTime();
+        if (!Number.isFinite(fecha_msg)) continue;
         var fecha_msg2 = fecha.getTime();
         var diferencia = fecha_msg2-fecha_msg;
-        if(diferencia > time_cad ){
+         if(diferencia > ttlMs ){
           if(msg_cad == '' || msg_cad  == undefined || msg_cad == 0 ){
             
           } else {
-            safeSend(jsonGlobal[i][0],msg_cad );
+            await safeSend(jsonGlobal[i][0],msg_cad );
 
           }
-          console.log("timepo expirado "+ jsonGlobal[i][0]+' '+diferencia+' '+time_cad );
+          console.log("tiempo expirado "+ jsonGlobal[i][0]+' '+diferencia+' '+ttlMs );
           // delete(jsonGlobal[i]);
-          let now = new Date();
+          
           jsonGlobal[i][3] = '';
           jsonGlobal[i][2] = '';
           jsonGlobal[i][1] = 0;
@@ -3626,6 +3650,27 @@ async function controlar_hora_msg(){
    
     await sleep(5000);
   }   
+}
+
+function startCaducidadMensajesWatcher(source = ''){
+  try {
+    if (mensajeCaducidadWatcherStarted) return;
+    mensajeCaducidadWatcherStarted = true;
+    const msg = 'Control caducidad mensajes iniciado'
+      + (source ? ' source=' + source : '')
+      + ' time_cad_ms=' + String(Number(time_cad) || 0);
+    console.log(msg);
+    EscribirLog(msg, 'event');
+    controlar_hora_msg().catch((e) => {
+      mensajeCaducidadWatcherStarted = false;
+      console.log('controlar_hora_msg fatal:', e?.message || e);
+      EscribirLog('controlar_hora_msg fatal: ' + String(e?.message || e), 'error');
+    });
+  } catch (e) {
+    mensajeCaducidadWatcherStarted = false;
+    console.log('startCaducidadMensajesWatcher error:', e?.message || e);
+    EscribirLog('startCaducidadMensajesWatcher error: ' + String(e?.message || e), 'error');
+  }
 }
 
  
