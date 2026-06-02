@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.49  02/06/2026   */
+/*version: 4.00.50  02/06/2026   */
 
 
 
@@ -1781,13 +1781,16 @@ async function getPolicySafe() {
 
 function isPolicyMessagesBlocked(pol) {
   try {
-    return !!(pol && (
+    if (!pol) return false;
+
+    // blockMode indica el tipo de bloqueo, pero NO debe bloquear por sí solo.
+    // Antes quedaba blockMode="messages" aunque blocked=false y por eso seguía pausando.
+    return !!(
       pol.blocked === true ||
       pol.messagesBlocked === true ||
       pol.mensajes_bloqueados === true ||
-      pol.bloqueado === true ||
-      pol.blockMode === "messages"
-    ));
+      pol.bloqueado === true
+    );
   } catch {
     return false;
   }
