@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.48  24/05/2026   */
+/*version: 4.00.49  02/06/2026   */
 
 
 
@@ -1319,6 +1319,7 @@ let lastQrAt = null;
 let localWsPanelState = 'idle';
 // Cache liviano: si la política marca disabled=true, no inicializamos WhatsApp.
 let lastPolicyDisabled = null;
+let lastPolicyBlocked = false;
 let mongoReady = false;
 let LockModel = null;
 let ActionModel = null;
@@ -1778,6 +1779,32 @@ async function getPolicySafe() {
   }
 }
 
+function isPolicyMessagesBlocked(pol) {
+  try {
+    return !!(pol && (
+      pol.blocked === true ||
+      pol.messagesBlocked === true ||
+      pol.mensajes_bloqueados === true ||
+      pol.bloqueado === true ||
+      pol.blockMode === "messages"
+    ));
+  } catch {
+    return false;
+  }
+}
+
+async function isWwebMessagesBlockedSafe() {
+  try {
+    const pol = await getPolicySafe();
+    const blocked = isPolicyMessagesBlocked(pol);
+    lastPolicyBlocked = blocked;
+    return blocked;
+  } catch {
+   return lastPolicyBlocked === true;
+  }
+}
+
+
 async function heartbeatTick() {
   try {
     if (heartbeatBusy) return;
@@ -1788,6 +1815,7 @@ async function heartbeatTick() {
 
     const pol = await getPolicySafe();
     const disabled = !!(pol && pol.disabled === true);
+    lastPolicyBlocked = isPolicyMessagesBlocked(pol);
 
     if (disabled) {
       lastPolicyDisabled = true;
@@ -2750,6 +2778,14 @@ async function ConsultaApiMensajes(){
 
       if (consulta_api_mensajes_habilitado !== true) break;
 
+      if (await isWwebMessagesBlockedSafe()) {
+        const waitMs = Math.max(5000, Number(devolver_seg_tele()) || 30000);
+        try { console.log('[BLOCK] ConsultaApiMensajes pausada por bloqueo webcontrol'); } catch {}
+        try { EscribirLog('[BLOCK] ConsultaApiMensajes pausada por bloqueo webcontrol', 'event'); } catch {}
+        await sleep(waitMs);
+        continue;
+      }
+
       const horarioConsulta = await getConsultaMensajesScheduleStatus();
       logConsultaMensajesScheduleStatus(horarioConsulta);
       if (!horarioConsulta.allowed) {
@@ -2903,6 +2939,13 @@ async function ConsultaApiMensajes(){
     
 
       try { RecuperarJsonConfMensajes(); } catch {}
+
+      if (await isWwebMessagesBlockedSafe()) {
+          try { console.log('[BLOCK] mensajes bloqueados desde webcontrol: no se responde. from=' + String(message?.from || '')); } catch {}
+          try { EscribirLog('[BLOCK] mensajes bloqueados desde webcontrol: no se responde. from=' + String(message?.from || ''), 'event'); } catch {}
+          return;
+      }
+
       startCaducidadMensajesWatcher('ready');
       seg_tele = devolver_seg_tele();
       await sleep(Math.max(1000, Number(seg_tele) || 30000));
@@ -2969,6 +3012,7 @@ function canStartConsultaApiMensajesNow() {
   try {
     if (consulta_api_mensajes_habilitado !== true) return false;
     if (consultaApiMensajesRunning) return false;
+    if (lastPolicyBlocked === true) return false;
     if (!client) return false;
     if (localWsPanelState !== 'online') return false;
     if (!onlyDigits(telefono_qr || numero || '')) return false;
