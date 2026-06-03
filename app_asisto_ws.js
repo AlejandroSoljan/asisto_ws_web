@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.50  02/06/2026   */
+/*version: 4.00.51  03/06/2026   */
 
 
 
@@ -2781,13 +2781,18 @@ async function ConsultaApiMensajes(){
 
       if (consulta_api_mensajes_habilitado !== true) break;
 
-      if (await isWwebMessagesBlockedSafe()) {
+      // Si la sesión no está ONLINE no hay que consultar la API de mensajes salientes.
+      // Al desloguearse queda QR, pero este loop puede seguir vivo desde el ready anterior.
+      const consultaWsState = String(localWsPanelState || '').toLowerCase();
+      const consultaTieneSesionActiva = !!(client && client.info && client.info.me && client.info.me.user);
+      if (consultaWsState !== 'online' || consultaTieneSesionActiva !== true) {
         const waitMs = Math.max(5000, Number(devolver_seg_tele()) || 30000);
-        try { console.log('[BLOCK] ConsultaApiMensajes pausada por bloqueo webcontrol'); } catch {}
-        try { EscribirLog('[BLOCK] ConsultaApiMensajes pausada por bloqueo webcontrol', 'event'); } catch {}
+        try { console.log('[WAIT] ConsultaApiMensajes pausada: sesión WhatsApp no online state=' + consultaWsState); } catch {}
+        try { EscribirLog('[WAIT] ConsultaApiMensajes pausada: sesión WhatsApp no online state=' + consultaWsState, 'event'); } catch {}
         await sleep(waitMs);
         continue;
       }
+
 
       const horarioConsulta = await getConsultaMensajesScheduleStatus();
       logConsultaMensajesScheduleStatus(horarioConsulta);
@@ -3489,6 +3494,8 @@ client.on('ready', async () => {
 
 client.on('qr', (qr) => {
   clearAuthReadyWatchdog('qr');
+ // Al entrar en QR ya no hay sesión lista: limpiar nro anterior para no consultar API saliente con un número viejo.
+  telefono_qr = "";
   console.log('QR RECEIVED', qr);
 pushHistory('qr', { at: new Date().toISOString() }).catch(()=>{});
   // Guardar último QR para endpoint /status/qr
@@ -3526,6 +3533,7 @@ client.on('authenticated', async () => {
 
 
 client.on('auth_failure', async function(session) {
+  telefono_qr = "";
   io.emit('message', 'Auth failure');
   EnviarEmail('Chatbot error Auth failure','Auth failure: '+ String(session || '') + ' ' + client);
   EscribirLog('Error 04 - Chatbot error Auth failure', String(session || ''), "error");
@@ -3549,6 +3557,7 @@ client.on('auth_failure', async function(session) {
 });
 
 client.on('disconnected', async (reason) => {
+  telefono_qr = "";
   io.emit('message', 'Whatsapp Desconectado!');
   EnviarEmail('Chatbot Desconectado ','Desconectando...'+client);
   EscribirLog('Chatbot Desconectado ','Desconectando...',"event");
