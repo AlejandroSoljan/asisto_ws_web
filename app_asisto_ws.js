@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.53  07/06/2026   */
+/*version: 4.00.54  07/06/2026   */
 
 
 
@@ -3055,10 +3055,24 @@ async function ConsultaApiMensajes(){
               const media = new MessageMedia(mimeType, String(contenido), Content_nombre);
               await io.emit('message', 'Mensaje: ' + Nro_tel_format + ': ' + Msj);
               await safeSend(Nro_tel_format, media, { caption: Msj });
+              const logEnvioApi = '[API_MENSAJES] enviado adjunto a ' + Nro_tel +
+                ' id_msj_dest=' + String(Id_msj_dest_local || '') +
+                ' id_msj_renglon=' + String(Id_msj_renglon_local || '') +
+                ' archivo=' + String(Content_nombre || '') +
+                ' mime=' + String(mimeType || '') +
+                ' texto=' + String(Msj || '').slice(0, 120);
+              console.log(logEnvioApi);
+              EscribirLog(logEnvioApi, 'event');
             } else {
               console.log("msj texto");
               await io.emit('message', 'Mensaje: ' + Nro_tel_format + ': ' + Msj);
               await safeSend(Nro_tel_format, Msj);
+              const logEnvioApi = '[API_MENSAJES] enviado texto a ' + Nro_tel +
+                ' id_msj_dest=' + String(Id_msj_dest_local || '') +
+                ' id_msj_renglon=' + String(Id_msj_renglon_local || '') +
+                ' texto=' + String(Msj || '').slice(0, 160);
+              console.log(logEnvioApi);
+              EscribirLog(logEnvioApi, 'event');
             }
  
             let tipo = null, contacto = null, email = null, direccion = null, nombre = null;
