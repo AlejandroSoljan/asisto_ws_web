@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.51  03/06/2026   */
+/*version: 4.00.52  07/06/2026   */
 
 
 
@@ -2010,6 +2010,7 @@ app.post("/control/release", requireStatusToken, async (req, res) => {
 
 let store = null;
 let client = null;
+let clearAuthInFlight = false;
 
 // =========================
 // LocalAuth helpers
@@ -2026,6 +2027,91 @@ function getLocalAuthSessionDir(clientId) {
   // whatsapp-web.js LocalAuth creates: <dataPath>/session-<clientId>
   return path.join(getAuthBasePath(), `session-${clientId}`);
 }
+
+function getWwebClientId() {
+  return `asisto_${tenantId}_${numero}`;
+}
+
+async function removePathSafe(targetPath, label = 'path') {
+  try {
+    if (!targetPath) return false;
+    if (!fs.existsSync(targetPath)) return false;
+    await fs.promises.rm(targetPath, {
+      recursive: true,
+      force: true,
+      maxRetries: 10,
+      retryDelay: 500
+    });
+    try { EscribirLog('[CLEAR_AUTH] eliminado ' + label + ': ' + targetPath, 'event'); } catch {}
+    return true;
+  } catch (e) {
+    try { EscribirLog('[CLEAR_AUTH] no se pudo eliminar ' + label + ' ' + targetPath + ': ' + String(e?.message || e), 'error'); } catch {}
+    return false;
+  }
+}
+
+async function clearLocalAuthFilesSafe(clientId) {
+  try {
+    const sessionDir = getLocalAuthSessionDir(clientId);
+    const removed = await removePathSafe(sessionDir, 'LocalAuth sessionDir');
+    return { removed, sessionDir };
+  } catch (e) {
+    try { EscribirLog('[CLEAR_AUTH] clearLocalAuthFilesSafe error: ' + String(e?.message || e), 'error'); } catch {}
+    return { removed: false, error: String(e?.message || e) };
+  }
+}
+
+async function clearRemoteAuthStoreSafe(clientId) {
+  const result = { attempted: false, removed: false };
+  try {
+    if (!isRemoteAuthMode()) return result;
+    result.attempted = true;
+    if (!store) store = new MongoStore({ mongoose });
+
+    const candidates = [
+      async () => (typeof store.delete === 'function') ? store.delete({ session: clientId }) : undefined,
+      async () => (typeof store.delete === 'function') ? store.delete(clientId) : undefined,
+      async () => (typeof store.remove === 'function') ? store.remove({ session: clientId }) : undefined,
+      async () => (typeof store.remove === 'function') ? store.remove(clientId) : undefined,
+      async () => (typeof store.deleteSession === 'function') ? store.deleteSession(clientId) : undefined,
+      async () => (typeof store.destroy === 'function') ? store.destroy({ session: clientId }) : undefined,
+    ];
+
+    for (const fn of candidates) {
+      try {
+        const r = await fn();
+        if (r !== undefined) result.removed = true;
+      } catch {}
+    }
+
+    // Fallback defensivo para wwebjs-mongo. No rompe si las colecciones no existen.
+    try {
+      if (mongoose?.connection?.db) {
+        for (const collName of ['whatsapp-RemoteAuth', 'whatsapp-remote-auth', 'sessions', 'wwebjs']) {
+          try {
+            await mongoose.connection.db.collection(collName).deleteMany({
+              $or: [
+                { session: clientId },
+                { _id: clientId },
+                { clientId: clientId },
+                { sessionName: clientId }
+              ]
+            });
+          } catch {}
+        }
+      }
+    } catch {}
+
+    try { EscribirLog('[CLEAR_AUTH] RemoteAuth limpiado para clientId=' + clientId, 'event'); } catch {}
+    result.removed = true;
+    return result;
+  } catch (e) {
+    try { EscribirLog('[CLEAR_AUTH] clearRemoteAuthStoreSafe error: ' + String(e?.message || e), 'error'); } catch {}
+    result.error = String(e?.message || e);
+    return result;
+  }
+}
+
 
 function dirLooksPopulated(p) {
   try {
@@ -2461,6 +2547,63 @@ async function forceReleaseLock(finalState) {
   }
 }
 
+async function clearAuthenticationAndRequestQr(reason = 'clear_auth') {
+  if (clearAuthInFlight) {
+    try { EscribirLog('[CLEAR_AUTH] ya hay un borrado en curso: ' + String(reason || ''), 'event'); } catch {}
+    return false;
+  }
+
+  clearAuthInFlight = true;
+  const clientId = getWwebClientId();
+
+  try {
+    try { EscribirLog('[CLEAR_AUTH] inicio -> ' + String(reason || '') + ' clientId=' + clientId, 'event'); } catch {}
+    try { await updateLockStateSafe('restarting'); } catch {}
+    clearAuthReadyWatchdog('clear_auth');
+
+    // 1) Intentar logout para que WhatsApp invalide la sesión.
+    // Si falla por navegador roto, igual seguimos y borramos archivos/local store.
+    try {
+      if (client && typeof client.logout === 'function') await client.logout();
+    } catch (e) {
+      try { EscribirLog('[CLEAR_AUTH] logout error/skip: ' + String(e?.message || e), 'event'); } catch {}
+    }
+
+    // 2) Cerrar Chromium/cliente para liberar locks de archivos.
+    try {
+      if (client && typeof destroyClientHard === 'function') await destroyClientHard(client);
+      else if (client) await client.destroy();
+    } catch (e) {
+      try { EscribirLog('[CLEAR_AUTH] destroy error: ' + String(e?.message || e), 'error'); } catch {}
+    }
+
+    try { client = null; } catch {}
+    resetClientRuntimeFlags('clear_auth');
+    localWsPanelState = 'starting';
+
+    // 3) Borrar autenticación real según modo.
+    const clearResult = isRemoteAuthMode()
+      ? await clearRemoteAuthStoreSafe(clientId)
+      : await clearLocalAuthFilesSafe(clientId);
+
+    try { await pushHistory('clear_auth', { reason, clientId, authMode: isRemoteAuthMode() ? 'remote' : 'local', result: clearResult }); } catch {}
+
+    // 4) Mantener el lock/owner y reiniciar WhatsApp para que vuelva a emitir QR.
+    isOwner = true;
+    if (!lockAcquiredAt) lockAcquiredAt = new Date();
+    await updateLockStateSafe('starting');
+    await sleep(1500);
+    await startClientInitialize();
+    return true;
+  } catch (e) {
+    try { EscribirLog('[CLEAR_AUTH] error: ' + String(e?.message || e), 'error'); } catch {}
+    return false;
+  } finally {
+    clearAuthInFlight = false;
+  }
+}
+
+
 async function handleActionDoc(doc) {
   const action = String(doc?.action || '').toLowerCase();
   const reason = String(doc?.reason || '');
@@ -2486,21 +2629,18 @@ async function handleActionDoc(doc) {
       return 'released';
     }
 
-    if (action === 'resetauth') {
-      EscribirLog('Accion RESET AUTH recibida: ' + reason, 'event');
-      try {
-        if (client && typeof client.logout === 'function') await client.logout();
-      } catch {}
-      try {
-        if (client && typeof destroyClientHard === "function") await destroyClientHard(client);
-        else if (client) await client.destroy();
-      } catch {}
-      try { client = null; } catch {}
-      resetClientRuntimeFlags('resetauth');
-      localWsPanelState = 'offline';
-      await forceReleaseLock('offline');
-      isOwner = false;
-      return 'reset_auth_requested';
+    if ([
+      'resetauth',
+      'reset_auth',
+      'clear_auth',
+      'delete_auth',
+      'borrar_auth',
+      'borrar_autenticacion',
+     'nuevo_qr'
+    ].includes(action)) {
+      EscribirLog('Accion CLEAR AUTH recibida: ' + reason, 'event');
+      const ok = await clearAuthenticationAndRequestQr(reason || action);
+      return ok ? 'clear_auth_requested' : 'clear_auth_failed';
     }
 
     return 'ignored';
