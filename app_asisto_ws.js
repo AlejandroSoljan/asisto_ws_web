@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.56  07/06/2026   */
+/*version: 4.00.57  07/06/2026   */
 
 
 
@@ -2954,6 +2954,73 @@ function apiMensajesConfirmacionId(nroTel) {
   return `${t}:${from}:${to}`;
 }
 
+function apiMensajesConfirmacionTenantId() {
+  return String(tenantId || '').trim().toUpperCase();
+}
+
+function apiMensajesConfirmacionNumeroFrom() {
+  return onlyDigits(telefono_qr || numero || '');
+}
+
+function addUniquePhoneCandidate(list, value) {
+  const phone = onlyDigits(value || '');
+ if (!phone) return;
+  if (!list.includes(phone)) list.push(phone);
+}
+
+async function phoneCandidatesConfirmacionApiMensajes(message) {
+  const out = [];
+  try {
+    const resolved = onlyDigits(await resolvePhoneFromIncomingMessage(message));
+    addUniquePhoneCandidate(out, resolved);
+  } catch {}
+
+ try {
+    const rawFrom = String(message?.from || '').trim();
+    if (rawFrom && rawFrom !== 'status@broadcast' && !looksLikeLid(rawFrom)) {
+      addUniquePhoneCandidate(out, stripWhatsappSuffix(rawFrom));
+    }
+  } catch {}
+
+  try {
+    if (typeof message?.getContact === 'function') {
+      const c = await message.getContact();
+      addUniquePhoneCandidate(out, c?.number || '');
+      addUniquePhoneCandidate(out, c?.id?.user || '');
+    }
+  } catch {}
+
+  return out;
+}
+
+function queryConfirmacionApiMensajesByPhones(phoneCandidates) {
+  const phones = Array.isArray(phoneCandidates) ? phoneCandidates.map(onlyDigits).filter(Boolean) : [];
+  const ids = phones.map(apiMensajesConfirmacionId);
+  const ors = [];
+  if (ids.length) ors.push({ _id: { $in: ids } });
+  if (phones.length) {
+    ors.push({
+      tenantId: apiMensajesConfirmacionTenantId(),
+      numeroFrom: apiMensajesConfirmacionNumeroFrom(),
+      nroTel: { $in: phones }
+    });
+  }
+  return ors.length ? { $or: ors } : null;
+}
+
+function buildSetAceptadoConfirmacionApiMensajes(now, phone, respuesta) {
+  return {
+    tenantId: apiMensajesConfirmacionTenantId(),
+    numeroFrom: apiMensajesConfirmacionNumeroFrom(),
+    nroTel: onlyDigits(phone || ''),
+    estado: 'aceptado',
+    aceptadoAt: now,
+    respuesta: String(respuesta || '').trim(),
+    updatedAt: now
+  };
+}
+
+
 function normalizarRespuestaConfirmacionApiMensajes(value) {
   return String(value || '')
     .trim()
@@ -3043,34 +3110,84 @@ async function registrarRespuestaConfirmacionApiMensajes(message) {
 
     const fromRaw = String(message.from || '').trim();
     if (!fromRaw || fromRaw === 'status@broadcast') return false;
-    const phone = onlyDigits(await resolvePhoneFromIncomingMessage(message));
-    if (!phone) return false;
     if (!await ensureMongo()) return false;
     const col = apiMensajesConfirmacionCollection();
     if (!col) return false;
+    const phoneCandidates = await phoneCandidatesConfirmacionApiMensajes(message);
 
     const now = new Date();
-    const _id = apiMensajesConfirmacionId(phone);
-    await col.updateOne(
-      { _id },
-      {
-        $setOnInsert: { createdAt: now },
-        $set: {
-          tenantId: String(tenantId || '').toUpperCase(),
-          numeroFrom: onlyDigits(telefono_qr || numero || ''),
-          nroTel: phone,
-          estado: 'aceptado',
-          aceptadoAt: now,
-          respuesta: String(message.body || '').trim(),
-          updatedAt: now
-        }
-      },
-      { upsert: true }
-    );
+    const respuesta = String(message.body || '').trim();
+    let matched = 0;
+    let acceptedPhone = phoneCandidates[0] || '';
 
-    const log = '[API_MENSAJES_CONFIRMACION] respuesta OK recibida de ' + phone + ' texto=' + String(message.body || '').trim();
+    const query = queryConfirmacionApiMensajesByPhones(phoneCandidates);
+    if (query) {
+      const setData = buildSetAceptadoConfirmacionApiMensajes(now, acceptedPhone, respuesta);
+      const upd = await col.updateMany(
+        query,
+        {
+          $set: setData,
+          $setOnInsert: { createdAt: now }
+        }
+      );
+      matched = Number(upd?.matchedCount || upd?.modifiedCount || 0);
+    }
+
+    if (!matched && acceptedPhone) {
+      const _id = apiMensajesConfirmacionId(acceptedPhone);
+      await col.updateOne(
+        { _id },
+        {
+          $setOnInsert: { createdAt: now },
+          $set: buildSetAceptadoConfirmacionApiMensajes(now, acceptedPhone, respuesta)
+        },
+        { upsert: true }
+      );
+      matched = 1;
+    }
+
+    // Si por LID no se pudo resolver el teléfono pero hay una única confirmación pendiente
+    // para este tenant/número, asociamos ese OK a esa pendiente. Evita que quede esperando
+    // cuando WhatsApp Web entrega @lid y no hay mapeo manual todavía.
+    if (!matched) {
+      const pending = await col.find({
+        tenantId: apiMensajesConfirmacionTenantId(),
+        numeroFrom: apiMensajesConfirmacionNumeroFrom(),
+        estado: 'pendiente'
+      }).sort({ pedidoAt: -1 }).limit(2).toArray();
+
+      if (pending.length === 1) {
+        acceptedPhone = onlyDigits(pending[0].nroTel || '');
+        await col.updateOne(
+          { _id: pending[0]._id },
+          {
+            $set: buildSetAceptadoConfirmacionApiMensajes(now, acceptedPhone, respuesta)
+          }
+        );
+        matched = 1;
+      }
+    }
+
+    if (!matched) {
+      const logNoMatch = '[API_MENSAJES_CONFIRMACION] respuesta OK recibida pero sin pendiente asociada from=' + fromRaw +
+        ' candidatos=' + JSON.stringify(phoneCandidates) +
+        ' texto=' + respuesta;
+      console.log(logNoMatch);
+      EscribirLog(logNoMatch, 'error');
+      return true;
+    }
+
+    const log = '[API_MENSAJES_CONFIRMACION] respuesta OK recibida de ' + (acceptedPhone || phoneCandidates.join(',')) +
+      ' texto=' + respuesta +
+      ' docs=' + String(matched);
     console.log(log);
     EscribirLog(log, 'event');
+
+
+    // Si la consulta de mensajes quedó detenida, la despertamos. Si ya está corriendo,
+    // no hace nada por el guard interno.
+
+    try { startConsultaApiMensajesIfEnabled('confirmacion_ok'); } catch {}
     return true;
   } catch (e) {
     try { EscribirLog('[API_MENSAJES_CONFIRMACION] error respuesta: ' + String(e?.message || e), 'error'); } catch {}
