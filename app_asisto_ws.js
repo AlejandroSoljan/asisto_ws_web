@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.52  07/06/2026   */
+/*version: 4.00.53  07/06/2026   */
 
 
 
@@ -2410,39 +2410,43 @@ async function startClientInitialize() {
   // Inicializa WhatsApp SOLO si esta instancia es dueña del lock.
   if (clientStarted) return;
   if (!isOwner) return;
-  clearAuthReadyWatchdog('before_initialize');
-
-  // Antes de cada inicio real del cliente, refrescamos tenant_config y
-  // verificamos si la versión/tag objetivo cambió en Mongo.
-  // Si hay que actualizar el código, se aplica y el proceso se reinicia,
-  // evitando levantar WhatsApp con una versión vieja.
-  try {
-    const versionCheck = await ensureTenantVersionBeforeWhatsAppStart('before_whatsapp_start');
-    if (versionCheck?.restartScheduled) {
-      try { EscribirLog('[AUTO_UPDATE] reinicio programado antes de iniciar WhatsApp. Se cancela init actual.', 'event'); } catch {}
-      return;
-    }
-  } catch (e) {
-    console.log("Chequeo de versión antes de iniciar WhatsApp falló:", e?.message || e);
-    EscribirLog("Chequeo de versión antes de iniciar WhatsApp falló: " + String(e?.message || e), "error");
+  // Guard temprano: evita dobles initialize() cuando se dispara reinicio,
+  // heartbeat/watchdog o poll de acciones casi al mismo tiempo.
+  if (startingNow) {
+    try { EscribirLog('[INIT] skip: ya hay inicialización en curso', 'event'); } catch {}
     return;
   }
 
-  // Política: si está deshabilitado desde el panel, NO inicializamos WhatsApp.
-  try {
-    const pol = await getPolicySafe();
-    if (pol && pol.disabled === true) {
-      lastPolicyDisabled = true;
-      await updateLockStateSafe("disabled");
-      await pushHistory("policy_disabled", { by: "policy", disabled: true });
+  startingNow = true;
+  clearAuthReadyWatchdog('before_initialize');
+
+   try {
+    // Antes de cada inicio real del cliente, refrescamos tenant_config y
+    // verificamos si la versión/tag objetivo cambió en Mongo.
+    // Si hay que actualizar el código, se aplica y el proceso se reinicia,
+    // evitando levantar WhatsApp con una versión vieja.
+    try {
+      const versionCheck = await ensureTenantVersionBeforeWhatsAppStart('before_whatsapp_start');
+      if (versionCheck?.restartScheduled) {
+        try { EscribirLog('[AUTO_UPDATE] reinicio programado antes de iniciar WhatsApp. Se cancela init actual.', 'event'); } catch {}
+        return;
+      }
+    } catch (e) {
+      console.log("Chequeo de versión antes de iniciar WhatsApp falló:", e?.message || e);
+      EscribirLog("Chequeo de versión antes de iniciar WhatsApp falló: " + String(e?.message || e), "error");
       return;
     }
-    if (pol && pol.disabled === false) lastPolicyDisabled = false;
-  } catch {}
-
-  // Evita que el timer de standby (poll) llame varias veces mientras inicializa
-  if (startingNow) return;
-  startingNow = true;
+    // Política: si está deshabilitado desde el panel, NO inicializamos WhatsApp.
+    try {
+      const pol = await getPolicySafe();
+      if (pol && pol.disabled === true) {
+        lastPolicyDisabled = true;
+        await updateLockStateSafe("disabled");
+        await pushHistory("policy_disabled", { by: "policy", disabled: true });
+        return;
+      }
+      if (pol && pol.disabled === false) lastPolicyDisabled = false;
+    } catch {}
 
   try {
     await createClientIfNeeded();
@@ -2454,30 +2458,32 @@ async function startClientInitialize() {
     return;
   }
 
-  console.log("LOCK OK -> inicializando WhatsApp...");
-  pushHistory('lock_acquired', { holderId: instanceId, host: os.hostname() }).catch(()=>{});
-  EscribirLog("LOCK OK -> inicializando WhatsApp...", "event");
-  updateLockStateSafe("starting").catch(() => {});
+    console.log("LOCK OK -> inicializando WhatsApp...");
+    pushHistory('lock_acquired', { holderId: instanceId, host: os.hostname() }).catch(()=>{});
+    EscribirLog("LOCK OK -> inicializando WhatsApp...", "event");
+    updateLockStateSafe("starting").catch(() => {});
 
-  try {
-    await initializeWithRetry(client, 5);
-    clientStarted = true;
-  } catch (e) {
-    clientStarted = false;
-    console.log("Error al inicializar WhatsApp:", e?.message || e);
-    EscribirLog("Error al inicializar WhatsApp: " + String(e?.message || e), "error");
+    try {
+      await initializeWithRetry(client, 5);
+      clientStarted = true;
+    } catch (e) {
+      clientStarted = false;
+      console.log("Error al inicializar WhatsApp:", e?.message || e);
+      EscribirLog("Error al inicializar WhatsApp: " + String(e?.message || e), "error");
 
-    // Este error aparece cuando el poll intenta inicializar 2 veces y el Chrome anterior sigue vivo
-    const msg = String(e?.message || e || "");
-    if (msg.includes("browser is already running")) {
-      console.log("TIP: Se detectó un Chrome ya corriendo para este userDataDir. Revisá que no haya dos instancias del script abiertas.");
-      EscribirLog("TIP: Se detectó un Chrome ya corriendo para este userDataDir. Evitar doble instancia.", "error");
+      // Este error aparece cuando el poll intenta inicializar 2 veces y el Chrome anterior sigue vivo
+      const msg = String(e?.message || e || "");
+      if (msg.includes("browser is already running")) {
+        console.log("TIP: Se detectó un Chrome ya corriendo para este userDataDir. Revisá que no haya dos instancias del script abiertas.");
+        EscribirLog("TIP: Se detectó un Chrome ya corriendo para este userDataDir. Evitar doble instancia.", "error");
+      }
+
+      // Si la inicialización falla, limpiamos fuerte para permitir reintentos limpios
+      try { await destroyClientHard(client); } catch {}
+      try { client = null; } catch {}
+      clearAuthReadyWatchdog('initialize_error');
     }
 
-    // Si la inicialización falla, limpiamos fuerte para permitir reintentos limpios
-    try { await destroyClientHard(client); } catch {}
-    try { client = null; } catch {}
-    clearAuthReadyWatchdog('initialize_error');
   } finally {
     startingNow = false;
   }
@@ -3708,11 +3714,19 @@ client.on('disconnected', async (reason) => {
   try { if (client) await destroyClientHard(client); } catch(e) {}
   try { client = null; } catch {}
   resetClientRuntimeFlags('disconnected');
+  // Si el corte fue provocado por Reiniciar/Borrar auth, no agendar otro reinicio automático.
+  // Antes podía quedar doble initialize() y el panel permanecía en "iniciando".
+  if (restartInFlight || clearAuthInFlight) {
+    try { EscribirLog('[DISCONNECTED] sin auto-restart por acción en curso: ' + String(reason || ''), 'event'); } catch {}
+    return;
+  }
 
   // Solo reintenta si esta PC sigue siendo owner del lock.
   if (isOwner) {
     setTimeout(() => {
-      if (isOwner && !clientStarted && !restartInFlight) restartClientSession('disconnected', 7000).catch(() => {});
+      if (isOwner && !clientStarted && !restartInFlight && !clearAuthInFlight && !startingNow) {
+        restartClientSession('disconnected', 7000).catch(() => {});
+      }
     }, 2500);
   }
 });
