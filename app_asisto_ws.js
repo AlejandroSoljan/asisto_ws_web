@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.54  07/06/2026   */
+/*version: 4.00.55  07/06/2026   */
 
 
 
@@ -271,7 +271,42 @@ function applyTenantConfig(conf) {
     }
   }
 
+  if (
+    conf.api_mensajes_confirmacion_habilitada !== undefined ||
+   conf.apiMensajesConfirmacionHabilitada !== undefined ||
+    conf.confirmar_api_mensajes !== undefined ||
+    conf.confirmarApiMensajes !== undefined
+  ) {
+    api_mensajes_confirmacion_habilitada = parseBoolLike(
+      conf.api_mensajes_confirmacion_habilitada ??
+      conf.apiMensajesConfirmacionHabilitada ??
+      conf.confirmar_api_mensajes ??
+      conf.confirmarApiMensajes,
+      api_mensajes_confirmacion_habilitada
+    );
+  }
+  if (conf.api_mensajes_confirmacion_mensaje !== undefined || conf.apiMensajesConfirmacionMensaje !== undefined) {
+    api_mensajes_confirmacion_mensaje = String(conf.api_mensajes_confirmacion_mensaje ?? conf.apiMensajesConfirmacionMensaje ?? api_mensajes_confirmacion_mensaje);
+  }
+  if (conf.api_mensajes_confirmacion_respuestas_ok !== undefined || conf.apiMensajesConfirmacionRespuestasOk !== undefined) {
+    api_mensajes_confirmacion_respuestas_ok = conf.api_mensajes_confirmacion_respuestas_ok ?? conf.apiMensajesConfirmacionRespuestasOk;
+  }
+  if (conf.api_mensajes_confirmacion_reenviar_ms !== undefined || conf.apiMensajesConfirmacionReenviarMs !== undefined) {
+   api_mensajes_confirmacion_reenviar_ms = asNumber(
+      conf.api_mensajes_confirmacion_reenviar_ms ?? conf.apiMensajesConfirmacionReenviarMs,
+      api_mensajes_confirmacion_reenviar_ms
+    );
+    if (!Number.isFinite(api_mensajes_confirmacion_reenviar_ms) || api_mensajes_confirmacion_reenviar_ms < 0) api_mensajes_confirmacion_reenviar_ms = 86400000;
+  }
+  if (conf.api_mensajes_confirmacion_validez_ms !== undefined || conf.apiMensajesConfirmacionValidezMs !== undefined) {
+    api_mensajes_confirmacion_validez_ms = asNumber(
+      conf.api_mensajes_confirmacion_validez_ms ?? conf.apiMensajesConfirmacionValidezMs,
+      api_mensajes_confirmacion_validez_ms
+    );
+    if (!Number.isFinite(api_mensajes_confirmacion_validez_ms) || api_mensajes_confirmacion_validez_ms < 0) api_mensajes_confirmacion_validez_ms = 0;
+  }
 
+ 
 
   if (conf.msg_inicio !== undefined) msg_inicio = String(conf.msg_inicio ?? "");
   if (conf.msg_fin !== undefined) msg_fin = String(conf.msg_fin ?? "");
@@ -1377,6 +1412,21 @@ var consulta_mensajes_respetar_horarios = parseBoolLike(
 );
 var consulta_mensajes_fuera_horario_sleep_ms = Number(process.env.CONSULTA_MENSAJES_FUERA_HORARIO_SLEEP_MS || 60000);
 if (!Number.isFinite(consulta_mensajes_fuera_horario_sleep_ms) || consulta_mensajes_fuera_horario_sleep_ms < 5000) consulta_mensajes_fuera_horario_sleep_ms = 60000;
+
+var api_mensajes_confirmacion_habilitada = parseBoolLike(
+  process.env.API_MENSAJES_CONFIRMACION_HABILITADA || process.env.CONFIRMAR_API_MENSAJES,
+  false
+);
+var api_mensajes_confirmacion_mensaje = String(
+  process.env.API_MENSAJES_CONFIRMACION_MENSAJE ||
+  'Hola, vas a recibir un mensaje de nuestra parte. Respondé OK para autorizar la recepción.'
+);
+var api_mensajes_confirmacion_respuestas_ok = process.env.API_MENSAJES_CONFIRMACION_RESPUESTAS_OK || 'OK,SI,SÍ,S';
+var api_mensajes_confirmacion_reenviar_ms = Number(process.env.API_MENSAJES_CONFIRMACION_REENVIAR_MS || 86400000);
+if (!Number.isFinite(api_mensajes_confirmacion_reenviar_ms) || api_mensajes_confirmacion_reenviar_ms < 0) api_mensajes_confirmacion_reenviar_ms = 86400000;
+var api_mensajes_confirmacion_validez_ms = Number(process.env.API_MENSAJES_CONFIRMACION_VALIDEZ_MS || 0);
+if (!Number.isFinite(api_mensajes_confirmacion_validez_ms) || api_mensajes_confirmacion_validez_ms < 0) api_mensajes_confirmacion_validez_ms = 0;
+
 
 var consultaApiMensajesRunning = false;
 
@@ -2871,6 +2921,148 @@ async function sleepConsultaMensajesFueraDeHorario() {
   await sleep(waitMs);
 }
 
+function apiMensajesConfirmacionCollection() {
+  try {
+    if (!mongoose?.connection?.db) return null;
+    return mongoose.connection.db.collection('wa_api_mensajes_confirmaciones');
+  } catch {
+    return null;
+  }
+}
+
+function apiMensajesConfirmacionId(nroTel) {
+  const t = String(tenantId || 'DEFAULT').trim().toUpperCase();
+  const from = onlyDigits(telefono_qr || numero || '');
+  const to = onlyDigits(nroTel || '');
+  return `${t}:${from}:${to}`;
+}
+
+function normalizarRespuestaConfirmacionApiMensajes(value) {
+  return String(value || '')
+    .trim()
+    .toUpperCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+function respuestasOkApiMensajesConfirmacion() {
+  const raw = api_mensajes_confirmacion_respuestas_ok;
+  const arr = Array.isArray(raw) ? raw : String(raw || 'OK').split(/[|,;]/g);
+  const out = arr.map(normalizarRespuestaConfirmacionApiMensajes).filter(Boolean);
+  return out.length ? out : ['OK'];
+}
+
+function respuestaConfirmaApiMensajes(body) {
+  const b = normalizarRespuestaConfirmacionApiMensajes(body);
+  if (!b) return false;
+  return respuestasOkApiMensajesConfirmacion().includes(b);
+}
+
+function apiMensajesConfirmacionAceptada(doc) {
+  try {
+    if (!doc || doc.estado !== 'aceptado') return false;
+    if (!doc.aceptadoAt) return false;
+    const validez = Number(api_mensajes_confirmacion_validez_ms) || 0;
+    if (validez <= 0) return true;
+    const acceptedMs = new Date(doc.aceptadoAt).getTime();
+    if (!Number.isFinite(acceptedMs)) return false;
+    return (Date.now() - acceptedMs) <= validez;
+  } catch {
+    return false;
+  }
+}
+
+async function estadoConfirmacionApiMensajes(nroTel) {
+  if (api_mensajes_confirmacion_habilitada !== true) return { autorizado: true, motivo: 'disabled' };
+  const to = onlyDigits(nroTel || '');
+  if (!to) return { autorizado: false, motivo: 'sin_numero' };
+  if (!await ensureMongo()) return { autorizado: false, motivo: 'mongo_no_disponible' };
+  const col = apiMensajesConfirmacionCollection();
+  if (!col) return { autorizado: false, motivo: 'coleccion_no_disponible' };
+
+  const now = new Date();
+  const _id = apiMensajesConfirmacionId(to);
+  const doc = await col.findOne({ _id });
+  if (apiMensajesConfirmacionAceptada(doc)) return { autorizado: true, motivo: 'aceptado', doc };
+
+ const ultimoPedidoMs = doc?.pedidoAt ? new Date(doc.pedidoAt).getTime() : 0;
+  const reenviarMs = Math.max(0, Number(api_mensajes_confirmacion_reenviar_ms) || 0);
+  const debePedir = !doc || !Number.isFinite(ultimoPedidoMs) || ultimoPedidoMs <= 0 || (Date.now() - ultimoPedidoMs) >= reenviarMs;
+
+  if (debePedir) {
+    const texto = String(api_mensajes_confirmacion_mensaje || '').trim() || 'Hola, vas a recibir un mensaje de nuestra parte. Respondé OK para autorizar la recepción.';
+    await safeSend(to + '@c.us', texto);
+    await col.updateOne(
+      { _id },
+      {
+        $setOnInsert: { createdAt: now },
+        $set: {
+          tenantId: String(tenantId || '').toUpperCase(),
+          numeroFrom: onlyDigits(telefono_qr || numero || ''),
+          nroTel: to,
+          estado: 'pendiente',
+          pedidoAt: now,
+          pedidoTexto: texto,
+          respuestasOk: respuestasOkApiMensajesConfirmacion(),
+          updatedAt: now
+        }
+      },
+      { upsert: true }
+    );
+    const log = '[API_MENSAJES_CONFIRMACION] solicitud enviada a ' + to + ' reenviar_ms=' + String(reenviarMs);
+    console.log(log);
+    EscribirLog(log, 'event');
+    return { autorizado: false, motivo: 'solicitud_enviada', solicitudEnviada: true };
+  }
+
+  return { autorizado: false, motivo: 'pendiente', solicitudEnviada: false, doc };
+}
+
+async function registrarRespuestaConfirmacionApiMensajes(message) {
+  try {
+    if (api_mensajes_confirmacion_habilitada !== true) return false;
+    if (!message || message.type !== 'chat') return false;
+    if (!respuestaConfirmaApiMensajes(message.body || '')) return false;
+
+    const fromRaw = String(message.from || '').trim();
+    if (!fromRaw || fromRaw === 'status@broadcast') return false;
+    const phone = onlyDigits(await resolvePhoneFromIncomingMessage(message));
+    if (!phone) return false;
+    if (!await ensureMongo()) return false;
+    const col = apiMensajesConfirmacionCollection();
+    if (!col) return false;
+
+    const now = new Date();
+    const _id = apiMensajesConfirmacionId(phone);
+    await col.updateOne(
+      { _id },
+      {
+        $setOnInsert: { createdAt: now },
+        $set: {
+          tenantId: String(tenantId || '').toUpperCase(),
+          numeroFrom: onlyDigits(telefono_qr || numero || ''),
+          nroTel: phone,
+          estado: 'aceptado',
+          aceptadoAt: now,
+          respuesta: String(message.body || '').trim(),
+          updatedAt: now
+        }
+      },
+      { upsert: true }
+    );
+
+    const log = '[API_MENSAJES_CONFIRMACION] respuesta OK recibida de ' + phone + ' texto=' + String(message.body || '').trim();
+    console.log(log);
+    EscribirLog(log, 'event');
+    return true;
+  } catch (e) {
+    try { EscribirLog('[API_MENSAJES_CONFIRMACION] error respuesta: ' + String(e?.message || e), 'error'); } catch {}
+    return false;
+  }
+}
+
+
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 function randomDelayMsBetween(desde, hasta, fallbackDesde, fallbackHasta) {
@@ -3047,6 +3239,18 @@ async function ConsultaApiMensajes(){
               await sleep(calcularDelayConsultaMensajesMs(ultimoNroTelConsultaMensajes, Nro_tel));
             }
 
+            const permisoConfirmacion = await estadoConfirmacionApiMensajes(Nro_tel);
+            if (!permisoConfirmacion.autorizado) {
+              const log = '[API_MENSAJES_CONFIRMACION] envío retenido a ' + Nro_tel +
+                ' motivo=' + String(permisoConfirmacion.motivo || '') +
+                ' id_msj_dest=' + String(Id_msj_dest_local || '') +
+                ' id_msj_renglon=' + String(Id_msj_renglon_local || '');
+              console.log(log);
+              EscribirLog(log, 'event');
+              if (permisoConfirmacion.solicitudEnviada) ultimoNroTelConsultaMensajes = Nro_tel;
+              continue;
+            }
+
             if (Content_nombre == null || Content_nombre === '') Content_nombre = 'archivo';
 
             if (contenido != null && String(contenido) !== '') {
@@ -3154,6 +3358,9 @@ function getRuntimeConfigSnapshot() {
     runtime_config_refresh_ms: Number(runtime_config_refresh_ms) || 0,
     consulta_mensajes_respetar_horarios: consulta_mensajes_respetar_horarios === true,
     consulta_mensajes_fuera_horario_sleep_ms: Number(consulta_mensajes_fuera_horario_sleep_ms) || 0,
+    api_mensajes_confirmacion_habilitada: api_mensajes_confirmacion_habilitada === true,
+    api_mensajes_confirmacion_reenviar_ms: Number(api_mensajes_confirmacion_reenviar_ms) || 0,
+    api_mensajes_confirmacion_validez_ms: Number(api_mensajes_confirmacion_validez_ms) || 0,
     seg_desde: Number(seg_desde) || 0,
     seg_hasta: Number(seg_hasta) || 0,
     seg_desde2: Number(seg_desde2) || 0,
@@ -3384,6 +3591,9 @@ async function processIncomingAsistoMessage(message, source) {
   try { await refreshTenantConfigFromDbPerMessage(); } catch {}
   try { RecuperarJsonConfMensajes(); } catch {}
 
+  if (await registrarRespuestaConfirmacionApiMensajes(message)) {
+    return;
+  }
 
   if (habilitar_bot !== true) {
     try { console.log('[BOT] deshabilitado: no se llama al API principal. from=' + String(message?.from || '')); } catch {}
