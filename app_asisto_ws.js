@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.55  07/06/2026   */
+/*version: 4.00.56  07/06/2026   */
 
 
 
@@ -2395,7 +2395,13 @@ async function restartClientSession(reason = 'restart', waitMs = 6500) {
       return false;
     }
 
-    await startClientInitialize();
+    const restartReason = String(reason || '');
+    const skipVersionCheck = restartReason.startsWith('panel_restart:') || restartReason.includes('phone_web_restart');
+    await startClientInitialize({
+      source: restartReason,
+      skipVersionCheck
+    });
+
     return true;
   } catch (e) {
    try { EscribirLog('[RESTART] error: ' + String(e?.message || e), 'error'); } catch {}
@@ -2456,7 +2462,11 @@ async function ensureTenantVersionBeforeWhatsAppStart(reason = 'before_whatsapp_
 }
 
 
-async function startClientInitialize() {
+async function startClientInitialize(options = {}) {
+  const initOptions = options && typeof options === 'object' ? options : {};
+  const skipVersionCheck = initOptions.skipVersionCheck === true;
+  const initSource = String(initOptions.source || '');
+
   // Inicializa WhatsApp SOLO si esta instancia es dueña del lock.
   if (clientStarted) return;
   if (!isOwner) return;
@@ -2473,18 +2483,25 @@ async function startClientInitialize() {
    try {
     // Antes de cada inicio real del cliente, refrescamos tenant_config y
     // verificamos si la versión/tag objetivo cambió en Mongo.
-    // Si hay que actualizar el código, se aplica y el proceso se reinicia,
-    // evitando levantar WhatsApp con una versión vieja.
-    try {
-      const versionCheck = await ensureTenantVersionBeforeWhatsAppStart('before_whatsapp_start');
-      if (versionCheck?.restartScheduled) {
-        try { EscribirLog('[AUTO_UPDATE] reinicio programado antes de iniciar WhatsApp. Se cancela init actual.', 'event'); } catch {}
+    // Si el inicio viene de Reiniciar desde el panel, NO forzamos auto-update acá:
+    // ese update puede ejecutar npm install y dejar la sesión en 'restarting'.
+    // El auto-update normal por startup/interval sigue funcionando fuera de este flujo.
+    if (skipVersionCheck) {
+      try { EscribirLog('[AUTO_UPDATE] skip before_whatsapp_start por reinicio desde panel: ' + (initSource || 'manual_restart'), 'event'); } catch {}
+      try { await loadTenantConfigFromDbMinimal(); } catch {}
+    } else {
+      try {
+        const versionCheck = await ensureTenantVersionBeforeWhatsAppStart('before_whatsapp_start');
+        if (versionCheck?.restartScheduled) {
+          try { EscribirLog('[AUTO_UPDATE] reinicio programado antes de iniciar WhatsApp. Se cancela init actual.', 'event'); } catch {}
+          return;
+        }
+      } catch (e) {
+        console.log("Chequeo de versión antes de iniciar WhatsApp falló:", e?.message || e);
+        EscribirLog("Chequeo de versión antes de iniciar WhatsApp falló: " + String(e?.message || e), "error");
         return;
       }
-    } catch (e) {
-      console.log("Chequeo de versión antes de iniciar WhatsApp falló:", e?.message || e);
-      EscribirLog("Chequeo de versión antes de iniciar WhatsApp falló: " + String(e?.message || e), "error");
-      return;
+    
     }
     // Política: si está deshabilitado desde el panel, NO inicializamos WhatsApp.
     try {
