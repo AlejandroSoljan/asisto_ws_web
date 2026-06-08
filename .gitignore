@@ -4,6 +4,7 @@ logs/
 *.log
 *.bat
 *.bash
+*.cmd
 
 .session/
 auth_info/

@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.70  08/06/2026   */
+/*version: 4.00.71  08/06/2026   */
 
 
 
@@ -2795,6 +2795,42 @@ async function clearAuthenticationAndRequestQr(reason = 'clear_auth') {
   }
 }
 
+async function restartScriptFromPanel(reason = 'panel_restart_script') {
+  if (restartInFlight) {
+    try { EscribirLog('[PROCESS_RESTART] ya hay reinicio en curso: ' + String(reason || ''), 'event'); } catch {}
+    return false;
+  }
+
+  restartInFlight = true;
+
+  try {
+    const restartReason = String(reason || 'panel_restart_script');
+    const exitCode = Number(process.env.ASISTO_PANEL_RESTART_EXIT_CODE || 77);
+
+    try { EscribirLog('[PROCESS_RESTART] inicio -> ' + restartReason, 'event'); } catch {}
+    try { await pushHistory('process_restart', { reason: restartReason, pid: process.pid, exitCode, mode: 'task_runner_exit_code', at: new Date().toISOString() }); } catch {}
+
+    // IMPORTANTE para Windows + Tarea Programada:
+    // No intentamos lanzar otro node.exe desde este proceso.
+    // El proceso sale con exitCode=77 y asisto_ws_runner.cmd lo vuelve a iniciar.
+    try { localWsPanelState = 'restarting'; } catch {}
+    try { await updateLockStateSafe('restarting'); } catch {}
+    try { await forceReleaseLock('restarting'); } catch {}
+
+    try { EscribirLog('[PROCESS_RESTART] saliendo con exitCode=' + exitCode + ' para reinicio por runner. pid=' + process.pid, 'event'); } catch {}
+    setTimeout(() => {
+      try { process.exit(exitCode); } catch {}
+    }, 250);
+
+    return true;
+  } catch (e) {
+    restartInFlight = false;
+    try { EscribirLog('[PROCESS_RESTART] error: ' + String(e?.message || e), 'error'); } catch {}
+    return false;
+  }
+}
+
+
 
 async function handleActionDoc(doc) {
   const action = String(doc?.action || '').toLowerCase();
@@ -2806,24 +2842,19 @@ async function handleActionDoc(doc) {
     // El botón Reiniciar del panel debe reiniciar TODO el script Node.
     // Compatibilidad: si el panel todavía envía restart_whatsapp/restart_wweb
     // con reason=phone_web_restart, igual lo tratamos como reinicio completo.
-    if (
-      action === 'restart' ||
-      action === 'restart_script' ||
-      action === 'full_restart' ||
-      ((action === 'restart_whatsapp' || action === 'restart_wweb') && isPanelRestartButton)
-    ) {
+    if (action === 'restart' || action === 'restart_script' || action === 'full_restart') {
       EscribirLog('Accion RESTART SCRIPT recibida: action=' + action + ' reason=' + reason, 'event');
-      const ok = await restartFullProcessFromPanel('panel_restart:' + (reason || action));
-      return ok ? 'script_restart_scheduled' : 'script_restart_skipped';
+      const ok = await restartScriptFromPanel('panel_restart:' + (reason || action));
+      return ok ? 'script_restart_exit_scheduled' : 'script_restart_skipped';
     }
 
-    // Reinicio anterior, solo de la sesión WhatsApp, queda disponible por compatibilidad,
-    // pero solamente para acciones explícitas que NO vengan del botón Reiniciar del panel.
     if (action === 'restart_whatsapp' || action === 'restart_wweb') {
       EscribirLog('Accion RESTART WHATSAPP recibida: action=' + action + ' reason=' + reason, 'event');
       const ok = await restartClientSession('panel_restart_whatsapp:' + reason, 7000);
       return ok ? 'whatsapp_restarted' : 'whatsapp_restart_skipped';
     }
+
+    
 
     if (action === 'release') {
       EscribirLog('Accion RELEASE recibida: ' + reason, 'event');
