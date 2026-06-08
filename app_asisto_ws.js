@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.58  07/06/2026   */
+/*version: 4.00.59  07/06/2026   */
 
 
 
@@ -3056,6 +3056,70 @@ function apiMensajesConfirmacionAceptada(doc) {
   }
 }
 
+function getWhatsappMessageTimestampMs(message) {
+  try {
+    const raw = message?.timestamp ?? message?._data?.t ?? message?._data?.timestamp;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    return n > 1000000000000 ? n : n * 1000;
+  } catch {
+    return 0;
+  }
+}
+
+async function detectarOkConfirmacionApiMensajesEnChat(nroTel, doc) {
+  try {
+    if (api_mensajes_confirmacion_habilitada !== true) return false;
+    if (!client || typeof client.getChatById !== 'function') return false;
+    const to = onlyDigits(nroTel || '');
+    if (!to) return false;
+    if (!doc || doc.estado !== 'pendiente') return false;
+
+    const pedidoMs = doc?.pedidoAt ? new Date(doc.pedidoAt).getTime() : 0;
+    const chatId = to + '@c.us';
+    const chat = await client.getChatById(chatId);
+    if (!chat || typeof chat.fetchMessages !== 'function') return false;
+
+    const messages = await chat.fetchMessages({ limit: 15 });
+    const list = Array.isArray(messages) ? messages : [];
+    for (const m of list) {
+     const body = String(m?.body || m?._data?.body || '').trim();
+      if (!respuestaConfirmaApiMensajes(body)) continue;
+
+      const msgMs = getWhatsappMessageTimestampMs(m);
+      if (pedidoMs && msgMs && msgMs < (pedidoMs - 5000)) continue;
+
+      const col = apiMensajesConfirmacionCollection();
+      if (!col) return false;
+      const now = new Date();
+      await col.updateOne(
+        { _id: doc._id || apiMensajesConfirmacionId(to) },
+        {
+          $set: {
+            ...buildSetAceptadoConfirmacionApiMensajes(now, to, body),
+           aceptadoPor: m?.fromMe ? 'whatsapp_web_from_me' : 'cliente',
+            aceptadoSource: 'chat_history'
+          },
+          $setOnInsert: { createdAt: now }
+        },
+        { upsert: true }
+      );
+
+      const log = '[API_MENSAJES_CONFIRMACION] OK detectado en chat de ' + to +
+        ' texto=' + body +
+        ' fromMe=' + String(!!m?.fromMe) +
+        ' msgMs=' + String(msgMs || '');
+      console.log(log);
+      EscribirLog(log, 'event');
+      return true;
+    }
+  } catch (e) {
+    try { EscribirLog('[API_MENSAJES_CONFIRMACION] error leyendo chat para OK: ' + String(e?.message || e), 'error'); } catch {}
+  }
+  return false;
+}
+
+
 async function estadoConfirmacionApiMensajes(nroTel) {
   if (api_mensajes_confirmacion_habilitada !== true) return { autorizado: true, motivo: 'disabled' };
   const to = onlyDigits(nroTel || '');
@@ -3066,8 +3130,20 @@ async function estadoConfirmacionApiMensajes(nroTel) {
 
   const now = new Date();
   const _id = apiMensajesConfirmacionId(to);
-  const doc = await col.findOne({ _id });
+  let doc = await col.findOne({ _id });
   if (apiMensajesConfirmacionAceptada(doc)) return { autorizado: true, motivo: 'aceptado', doc };
+
+ // Respaldo importante: si habilitar_bot=false, o si WhatsApp Web no entrega
+  // el evento message/message_create del OK, igual detectamos el OK leyendo
+  // los últimos mensajes del chat antes de volver a pedir confirmación.
+  if (doc && doc.estado === 'pendiente') {
+    const okDetectado = await detectarOkConfirmacionApiMensajesEnChat(to, doc);
+    if (okDetectado) {
+      doc = await col.findOne({ _id });
+      return { autorizado: true, motivo: 'aceptado_chat_history', doc };
+    }
+  }
+
 
  const ultimoPedidoMs = doc?.pedidoAt ? new Date(doc.pedidoAt).getTime() : 0;
   const reenviarMs = Math.max(0, Number(api_mensajes_confirmacion_reenviar_ms) || 0);
