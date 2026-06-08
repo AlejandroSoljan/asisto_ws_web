@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.68  08/06/2026   */
+/*version: 4.00.69  08/06/2026   */
 
 
 
@@ -2378,22 +2378,39 @@ function quoteShArg(value) {
   return "'" + String(value ?? '').replace(/'/g, "'\\''") + "'";
 }
 
-function buildRestartCommand(delaySec = 6) {
+function quotePowerShellSingle(value) {
+  return "'" + String(value ?? '').replace(/'/g, "''") + "'";
+}
+function buildRestartCommand(delaySec = 6, parentPid = process.pid) {
   const args = Array.isArray(process.argv) && process.argv.length > 1 ? process.argv.slice(1) : [];
-  const envPrefix = 'ASISTO_RESTARTED_FROM_PANEL=1';
+  const waitSeconds = Math.max(1, Number(delaySec) || 6);
+  const parent = Math.max(1, Number(parentPid) || process.pid);
 
   if (process.platform === 'win32') {
-    const nodeCmd = [quoteCmdArg(process.execPath), ...args.map(quoteCmdArg)].join(' ');
+    const psArgs = args.map(quotePowerShellSingle).join(', ');
+    const psCommand = [
+      `$env:ASISTO_RESTARTED_FROM_PANEL='1'`,
+      `$parent=${parent}`,
+      `while (Get-Process -Id $parent -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 500 }`,
+      `Start-Sleep -Seconds ${waitSeconds}`,
+      `Set-Location -LiteralPath ${quotePowerShellSingle(process.cwd())}`,
+      `& ${quotePowerShellSingle(process.execPath)} ${psArgs}`
+    ].join('; ');
+
+    // Importante en tarea programada Windows:
+    // - start desacopla el proceso hijo del proceso actual.
+    // - PowerShell espera a que muera este PID antes de abrir el nuevo Node.
+    // - No usamos timeout.exe porque en tareas sin consola puede fallar.
     return {
       command: 'cmd.exe',
-      args: ['/d', '/s', '/c', `timeout /t ${Math.max(1, Number(delaySec) || 6)} /nobreak >nul & set ASISTO_RESTARTED_FROM_PANEL=1& ${nodeCmd}`]
+      args: ['/d', '/s', '/c', 'start "" /min powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ' + quoteCmdArg(psCommand)]
     };
   }
 
   const nodeCmd = [quoteShArg(process.execPath), ...args.map(quoteShArg)].join(' ');
   return {
     command: 'sh',
-    args: ['-lc', `${envPrefix} sleep ${Math.max(1, Number(delaySec) || 6)}; exec ${nodeCmd}`]
+    args: ['-lc', `ASISTO_RESTARTED_FROM_PANEL=1; while kill -0 ${parent} 2>/dev/null; do sleep 0.5; done; sleep ${waitSeconds}; cd ${quoteShArg(process.cwd())}; exec ${nodeCmd}`]
   };
 }
 
@@ -2412,12 +2429,13 @@ async function restartFullProcessFromPanel(reason = 'panel_restart_script') {
     try { await updateLockStateSafe('restarting'); } catch {}
    try { await pushHistory('process_restart', { reason: restartReason, pid: process.pid, at: new Date().toISOString() }); } catch {}
 
-    const restartCmd = buildRestartCommand(7);
+   const restartCmd = buildRestartCommand(1, process.pid);
+    try { EscribirLog('[PROCESS_RESTART] comando reinicio: ' + restartCmd.command + ' ' + JSON.stringify(restartCmd.args), 'event'); } catch {}
     const child = spawn(restartCmd.command, restartCmd.args, {
       cwd: process.cwd(),
       env: { ...process.env, ASISTO_RESTARTED_FROM_PANEL: '1' },
       detached: true,
-      stdio: 'inherit',
+      stdio: 'ignore',
       windowsHide: true
     });
 
@@ -2429,11 +2447,24 @@ async function restartFullProcessFromPanel(reason = 'panel_restart_script') {
     try { EscribirLog('[PROCESS_RESTART] nuevo proceso programado; cerrando proceso actual pid=' + process.pid, 'event'); } catch {}
 
     setTimeout(() => {
+            let forcedExit = false;
+      const forceTimer = setTimeout(() => {
+        forcedExit = true;
+        try { EscribirLog('[PROCESS_RESTART] salida forzada para permitir reinicio completo pid=' + process.pid, 'event'); } catch {}
+        try { process.exit(0); } catch {}
+      }, 12000);
+      try { forceTimer.unref?.(); } catch {}
+
       gracefulShutdown('PANEL_FULL_PROCESS_RESTART').catch((e) => {
         try { EscribirLog('[PROCESS_RESTART] gracefulShutdown error: ' + String(e?.message || e), 'error'); } catch {}
         try { process.exit(0); } catch {}
+      }).finally(() => {
+        if (!forcedExit) {
+          try { clearTimeout(forceTimer); } catch {}
+          try { process.exit(0); } catch {}
+        }
       });
-    }, 1500);
+    }, 500);
 
     return true;
   } catch (e) {
