@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.69  08/06/2026   */
+/*version: 4.00.70  08/06/2026   */
 
 
 
@@ -2388,19 +2388,27 @@ function buildRestartCommand(delaySec = 6, parentPid = process.pid) {
 
   if (process.platform === 'win32') {
     const psArgs = args.map(quotePowerShellSingle).join(', ');
+    const restartLog = path.join(process.cwd(), 'logs', 'asisto-restart-helper.log');
     const psCommand = [
       `$env:ASISTO_RESTARTED_FROM_PANEL='1'`,
       `$parent=${parent}`,
-      `while (Get-Process -Id $parent -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 500 }`,
+      `$log=${quotePowerShellSingle(restartLog)}`,
+      `function L($m){ try { Add-Content -LiteralPath $log -Value ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' ' + $m) } catch {} }`,
+      `L 'helper_start parent=${parent}'`,
+      `$deadline=(Get-Date).AddSeconds(25)`,
+      `while ((Get-Date) -lt $deadline -and (Get-Process -Id $parent -ErrorAction SilentlyContinue)) { Start-Sleep -Milliseconds 500 }`,
+      `L 'helper_parent_released_or_timeout'`,
       `Start-Sleep -Seconds ${waitSeconds}`,
       `Set-Location -LiteralPath ${quotePowerShellSingle(process.cwd())}`,
-      `& ${quotePowerShellSingle(process.execPath)} ${psArgs}`
+      `L 'helper_starting_node'`,
+      `& ${quotePowerShellSingle(process.execPath)} ${psArgs}`,
+      `L 'helper_node_finished'`
     ].join('; ');
 
     // Importante en tarea programada Windows:
-    // - start desacopla el proceso hijo del proceso actual.
-    // - PowerShell espera a que muera este PID antes de abrir el nuevo Node.
-    // - No usamos timeout.exe porque en tareas sin consola puede fallar.
+    // - start desacopla el helper del proceso actual.
+    // - El helper espera al PID viejo, pero con timeout máximo para no quedar eterno.
+    // - El proceso viejo hace salida rápida para que el helper pueda arrancar Node.
     return {
       command: 'cmd.exe',
       args: ['/d', '/s', '/c', 'start "" /min powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ' + quoteCmdArg(psCommand)]
@@ -2447,23 +2455,21 @@ async function restartFullProcessFromPanel(reason = 'panel_restart_script') {
     try { EscribirLog('[PROCESS_RESTART] nuevo proceso programado; cerrando proceso actual pid=' + process.pid, 'event'); } catch {}
 
     setTimeout(() => {
-            let forcedExit = false;
-      const forceTimer = setTimeout(() => {
-        forcedExit = true;
-        try { EscribirLog('[PROCESS_RESTART] salida forzada para permitir reinicio completo pid=' + process.pid, 'event'); } catch {}
-        try { process.exit(0); } catch {}
-      }, 12000);
-      try { forceTimer.unref?.(); } catch {}
-
-      gracefulShutdown('PANEL_FULL_PROCESS_RESTART').catch((e) => {
-        try { EscribirLog('[PROCESS_RESTART] gracefulShutdown error: ' + String(e?.message || e), 'error'); } catch {}
-        try { process.exit(0); } catch {}
-      }).finally(() => {
-        if (!forcedExit) {
-          try { clearTimeout(forceTimer); } catch {}
-          try { process.exit(0); } catch {}
-        }
-      });
+      // Reinicio completo desde panel: NO esperamos destroyClientHard/gracefulShutdown.
+      // En Windows + tarea programada, whatsapp-web.js/Puppeteer puede colgar destroy()
+      // y el helper queda esperando eternamente el PID viejo. Cerramos el proceso rápido;
+      // Windows libera puerto/handles y el helper arranca un Node nuevo.
+      try { EscribirLog('[PROCESS_RESTART] salida rapida del proceso actual pid=' + process.pid, 'event'); } catch {}
+      try { if (autoUpdateTimer) { clearInterval(autoUpdateTimer); autoUpdateTimer = null; } } catch {}
+      try { if (runtimeConfigPollTimer) { clearInterval(runtimeConfigPollTimer); runtimeConfigPollTimer = null; } } catch {}
+      try { if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; } } catch {}
+      try { if (actionTimer) { clearInterval(actionTimer); actionTimer = null; } } catch {}
+      try { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } } catch {}
+      try { clearAuthReadyWatchdog('process_restart_fast_exit'); } catch {}
+      try { localWsPanelState = 'restarting'; } catch {}
+      try { client = null; } catch {}
+      try { isOwner = false; } catch {}
+      try { process.exit(0); } catch {}
     }, 500);
 
     return true;
