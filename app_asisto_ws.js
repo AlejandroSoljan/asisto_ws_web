@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.64  07/06/2026   */
+/*version: 4.00.65  07/06/2026   */
 
 
 
@@ -3064,6 +3064,248 @@ function buildSetCanceladoConfirmacionApiMensajes(now, phone, respuesta, motivo)
   };
 }
 
+function keyPendienteConfirmacionApiMensajes(idDest, idRenglon) {
+  const raw = String(idDest || '') + '_' + String(idRenglon || '');
+  return raw.replace(/[^a-zA-Z0-9_-]/g, '_') || ('k_' + Date.now());
+}
+
+function pendientesConfirmacionApiMensajesArray(doc) {
+  try {
+    const p = doc && doc.pendientes;
+    if (!p) return [];
+    if (Array.isArray(p)) return p.filter(Boolean);
+    if (typeof p === 'object') return Object.values(p).filter(Boolean);
+  } catch {}
+  return [];
+}
+
+function buildUrlConfirmaApiMensajes() {
+  const nroTelFrom = onlyDigits(telefono_qr || numero || '');
+  return buildUrlWithParams(api3, { key, nro_tel_from: nroTelFrom });
+}
+
+async function guardarPendienteConfirmacionApiMensajes(nroTel, data) {
+  try {
+    const to = onlyDigits(nroTel || '');
+    if (!to || !await ensureMongo()) return false;
+    const col = apiMensajesConfirmacionCollection();
+    if (!col) return false;
+    const now = new Date();
+    const idDest = data?.id_msj_dest ?? data?.Id_msj_dest ?? '';
+    const idRenglon = data?.id_msj_renglon ?? data?.Id_msj_renglon ?? '';
+    const k = keyPendienteConfirmacionApiMensajes(idDest, idRenglon);
+    const item = {
+      key: k,
+      tenantId: apiMensajesConfirmacionTenantId(),
+      numeroFrom: apiMensajesConfirmacionNumeroFrom(),
+      nroTel: to,
+      id_msj_dest: idDest,
+      id_msj_renglon: idRenglon,
+      msj: String(data?.msj ?? data?.Msj ?? ''),
+      content: data?.content ?? data?.Content ?? null,
+      content_nombre: data?.content_nombre ?? data?.Content_nombre ?? null,
+      guardadoAt: now,
+      updatedAt: now
+    };
+
+    await col.updateOne(
+      { _id: apiMensajesConfirmacionId(to) },
+      {
+        $setOnInsert: {
+          createdAt: now,
+          tenantId: apiMensajesConfirmacionTenantId(),
+          numeroFrom: apiMensajesConfirmacionNumeroFrom(),
+          nroTel: to
+        },
+        $set: {
+          [`pendientes.${k}`]: item,
+          pendientesUpdatedAt: now,
+          updatedAt: now
+        }
+      },
+      { upsert: true }
+    );
+
+    const log = '[API_MENSAJES_CONFIRMACION] pendiente guardado en Mongo nro=' + to +
+      ' id_msj_dest=' + String(idDest || '') +
+      ' id_msj_renglon=' + String(idRenglon || '') +
+      ' key=' + k;
+    console.log(log);
+    EscribirLog(log, 'event');
+    return true;
+  } catch (e) {
+    try { EscribirLog('[API_MENSAJES_CONFIRMACION] error guardando pendiente: ' + String(e?.message || e), 'error'); } catch {}
+    return false;
+  }
+}
+
+async function getInfoContactoApiMensajes(nroTelFormat) {
+  let tipo = null, contacto = null, email = null, direccion = null, nombre = null;
+  try {
+    const contact = await client.getContactById(nroTelFormat);
+    if (contact?.isBusiness === true) {
+      tipo = 'B';
+      contacto = contact.pushname || null;
+      email = contact.businessProfile?.email || null;
+      direccion = contact.businessProfile?.address || null;
+      nombre = contact.name || null;
+    } else {
+      tipo = 'C';
+      nombre = contact?.name || null;
+      contacto = contact?.shortName || contact?.pushname || null;
+    }
+  } catch (e) {
+    try { EscribirLog('getContactById error ' + nroTelFormat + ': ' + String(e?.message || e), 'error'); } catch {}
+  }
+  return { tipo, nombre, contacto, direccion, email };
+}
+
+async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo) {
+  const col = apiMensajesConfirmacionCollection();
+  if (!col || !doc) return { total: 0, ok: 0 };
+  const pendientes = pendientesConfirmacionApiMensajesArray(doc);
+  if (!pendientes.length) return { total: 0, ok: 0 };
+
+  const url_confirma_msg = buildUrlConfirmaApiMensajes();
+  let ok = 0;
+  let ultimoNro = '';
+
+  for (const item of pendientes) {
+    const to = onlyDigits(item.nroTel || doc.nroTel || '');
+    const nroTelFormat = to + '@c.us';
+    const idDest = item.id_msj_dest;
+    const idRenglon = item.id_msj_renglon;
+    const pendingKey = item.key || keyPendienteConfirmacionApiMensajes(idDest, idRenglon);
+
+    try {
+      if (!to || !idDest || !idRenglon) {
+        const logBad = '[API_MENSAJES_CONFIRMACION] pendiente invalido; no se procesa key=' + pendingKey + ' nro=' + to;
+        console.log(logBad);
+        EscribirLog(logBad, 'error');
+        continue;
+      }
+
+      if (accion === 'C') {
+        const updOk = await actualizar_estado_mensaje(url_confirma_msg, 'C', null, null, null, null, null, idRenglon, idDest);
+        const logC = '[API_MENSAJES_CONFIRMACION] mensaje actualizado a C por ' + String(motivo || 'confirmacion_cancelada') +
+          ' nro=' + to +
+          ' id_msj_dest=' + String(idDest || '') +
+          ' id_msj_renglon=' + String(idRenglon || '') +
+          ' ok=' + String(updOk);
+        console.log(logC);
+        EscribirLog(logC, updOk ? 'event' : 'error');
+        if (updOk) {
+          ok++;
+          await col.updateOne({ _id: doc._id }, { $unset: { [`pendientes.${pendingKey}`]: '' }, $set: { pendientesUpdatedAt: new Date(), updatedAt: new Date() } });
+        }
+        continue;
+      }
+
+      if (accion === 'E') {
+        if (ultimoNro) await sleep(calcularDelayConsultaMensajesMs(ultimoNro, to));
+        let contentNombre = item.content_nombre;
+        if (contentNombre == null || contentNombre === '') contentNombre = 'archivo';
+        const msj = String(item.msj || '');
+        const contenido = item.content;
+
+        if (contenido != null && String(contenido) !== '') {
+          const mimeType = detectMimeType(String(contenido)) || mime.lookup(contentNombre) || 'application/octet-stream';
+          const media = new MessageMedia(mimeType, String(contenido), contentNombre);
+          await io.emit('message', 'Mensaje: ' + nroTelFormat + ': ' + msj);
+          await safeSend(nroTelFormat, media, { caption: msj });
+          const logEnvioApi = '[API_MENSAJES] enviado adjunto pendiente a ' + to +
+            ' id_msj_dest=' + String(idDest || '') +
+            ' id_msj_renglon=' + String(idRenglon || '') +
+            ' archivo=' + String(contentNombre || '') +
+            ' mime=' + String(mimeType || '') +
+            ' texto=' + msj.slice(0, 120);
+          console.log(logEnvioApi);
+          EscribirLog(logEnvioApi, 'event');
+        } else {
+          await io.emit('message', 'Mensaje: ' + nroTelFormat + ': ' + msj);
+          await safeSend(nroTelFormat, msj);
+          const logEnvioApi = '[API_MENSAJES] enviado texto pendiente a ' + to +
+            ' id_msj_dest=' + String(idDest || '') +
+            ' id_msj_renglon=' + String(idRenglon || '') +
+            ' texto=' + msj.slice(0, 160);
+          console.log(logEnvioApi);
+          EscribirLog(logEnvioApi, 'event');
+        }
+
+        const info = await getInfoContactoApiMensajes(nroTelFormat);
+        const updOk = await actualizar_estado_mensaje(url_confirma_msg, 'E', info.tipo, info.nombre, info.contacto, info.direccion, info.email, idRenglon, idDest);
+        const logE = '[API_MENSAJES_CONFIRMACION] pendiente enviado y actualizado a E nro=' + to +
+          ' id_msj_dest=' + String(idDest || '') +
+          ' id_msj_renglon=' + String(idRenglon || '') +
+          ' ok=' + String(updOk);
+        console.log(logE);
+        EscribirLog(logE, updOk ? 'event' : 'error');
+        ok++;
+        ultimoNro = to;
+        await col.updateOne({ _id: doc._id }, { $unset: { [`pendientes.${pendingKey}`]: '' }, $set: { pendientesUpdatedAt: new Date(), updatedAt: new Date() } });
+      }
+    } catch (e) {
+      try { EscribirLog('[API_MENSAJES_CONFIRMACION] error procesando pendiente key=' + pendingKey + ': ' + String(e?.message || e), 'error'); } catch {}
+    }
+  }
+
+  return { total: pendientes.length, ok };
+}
+
+async function procesarPendientesConfirmacionApiMensajes(phoneCandidates, accion, motivo) {
+  try {
+    if (!await ensureMongo()) return { total: 0, ok: 0 };
+    const col = apiMensajesConfirmacionCollection();
+    if (!col) return { total: 0, ok: 0 };
+    const query = queryConfirmacionApiMensajesByPhones(phoneCandidates);
+    if (!query) return { total: 0, ok: 0 };
+    const docs = await col.find(query).limit(20).toArray();
+    let total = 0, ok = 0;
+    for (const doc of docs) {
+      const res = await procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo);
+      total += Number(res.total || 0);
+      ok += Number(res.ok || 0);
+    }
+    return { total, ok };
+  } catch (e) {
+    try { EscribirLog('[API_MENSAJES_CONFIRMACION] error procesando pendientes: ' + String(e?.message || e), 'error'); } catch {}
+    return { total: 0, ok: 0 };
+  }
+}
+
+async function procesarTimeoutsPendientesConfirmacionApiMensajes() {
+  try {
+    if (api_mensajes_confirmacion_habilitada !== true) return;
+    const reenviarMs = Math.max(0, Number(api_mensajes_confirmacion_reenviar_ms) || 0);
+    if (reenviarMs <= 0) return;
+    if (!await ensureMongo()) return;
+    const col = apiMensajesConfirmacionCollection();
+    if (!col) return;
+    const cutoff = new Date(Date.now() - reenviarMs);
+    const docs = await col.find({
+      tenantId: apiMensajesConfirmacionTenantId(),
+      numeroFrom: apiMensajesConfirmacionNumeroFrom(),
+      estado: 'pendiente',
+      pedidoAt: { $lte: cutoff },
+      pendientes: { $exists: true }
+    }).limit(50).toArray();
+
+    for (const doc of docs) {
+      const now = new Date();
+      await col.updateOne(
+        { _id: doc._id },
+        { $set: buildSetCanceladoConfirmacionApiMensajes(now, doc.nroTel, '', 'sin_respuesta_timeout') }
+      );
+      const logTimeout = '[API_MENSAJES_CONFIRMACION] timeout con pendientes guardados; se actualiza a C nro=' + String(doc.nroTel || '') +
+        ' ventana_ms=' + String(reenviarMs);
+      console.log(logTimeout);
+      EscribirLog(logTimeout, 'event');
+      await procesarPendientesDocConfirmacionApiMensajes({ ...doc, estado: 'cancelado' }, 'C', 'sin_respuesta_timeout');
+    }
+  } catch (e) {
+    try { EscribirLog('[API_MENSAJES_CONFIRMACION] error procesando timeouts: ' + String(e?.message || e), 'error'); } catch {}
+  }
+}
 
 function normalizarRespuestaConfirmacionApiMensajes(value) {
   return String(value || '')
@@ -3244,7 +3486,8 @@ async function estadoConfirmacionApiMensajes(nroTel) {
 
   const now = new Date();
   const _id = apiMensajesConfirmacionId(to);
-    let doc = await col.findOne({ _id });
+  const reenviarMs = Math.max(0, Number(api_mensajes_confirmacion_reenviar_ms) || 0);
+  let doc = await col.findOne({ _id });
 
 
   if (apiMensajesConfirmacionAceptada(doc)) return { autorizado: true, motivo: 'aceptado', doc };
@@ -3296,11 +3539,13 @@ async function estadoConfirmacionApiMensajes(nroTel) {
     const okDetectado = await detectarOkConfirmacionApiMensajesEnChat(to, doc);
     if (okDetectado) {
       doc = await col.findOne({ _id });
+      await procesarPendientesConfirmacionApiMensajes([to], 'E', 'aceptado_chat_history');
       return { autorizado: true, motivo: 'aceptado_chat_history', doc };
     }
    const noValidaDetectada = await detectarNoValidaConfirmacionApiMensajesEnChat(to, doc);
    if (noValidaDetectada) {
       doc = await col.findOne({ _id });
+      await procesarPendientesConfirmacionApiMensajes([to], 'C', 'respuesta_no_valida');
       return {
         autorizado: false,
         motivo: 'respuesta_no_valida',
@@ -3313,8 +3558,7 @@ async function estadoConfirmacionApiMensajes(nroTel) {
 
 
  const ultimoPedidoMs = doc?.pedidoAt ? new Date(doc.pedidoAt).getTime() : 0;
-  const reenviarMs = Math.max(0, Number(api_mensajes_confirmacion_reenviar_ms) || 0);
-  const expiroVentana = !!doc && doc.estado === 'pendiente' && Number.isFinite(ultimoPedidoMs) && ultimoPedidoMs > 0 && reenviarMs > 0 && (Date.now() - ultimoPedidoMs) >= reenviarMs;
+   const expiroVentana = !!doc && doc.estado === 'pendiente' && Number.isFinite(ultimoPedidoMs) && ultimoPedidoMs > 0 && reenviarMs > 0 && (Date.now() - ultimoPedidoMs) >= reenviarMs;
 
   if (expiroVentana) {
     const setCancelado = buildSetCanceladoConfirmacionApiMensajes(now, to, '', 'sin_respuesta_timeout');
@@ -3465,6 +3709,14 @@ async function registrarRespuestaConfirmacionApiMensajes(message) {
     console.log(log);
     EscribirLog(log, 'event');
 
+    const proc = await procesarPendientesConfirmacionApiMensajes(
+      acceptedPhone ? [acceptedPhone] : phoneCandidates,
+      'E',
+      'confirmacion_ok'
+    );
+    const logProc = '[API_MENSAJES_CONFIRMACION] pendientes procesados por OK total=' + String(proc.total || 0) + ' ok=' + String(proc.ok || 0);
+    console.log(logProc);
+    EscribirLog(logProc, 'event');
 
     // Si la consulta de mensajes quedó detenida, la despertamos. Si ya está corriendo,
     // no hace nada por el guard interno.
@@ -3538,6 +3790,16 @@ async function registrarRespuestaNoValidaConfirmacionApiMensajes(message) {
       ' docs=' + String(matched);
     console.log(log);
     EscribirLog(log, 'event');
+ 
+    const proc = await procesarPendientesConfirmacionApiMensajes(
+      cancelPhone ? [cancelPhone] : phoneCandidates,
+      'C',
+      'respuesta_no_valida'
+    );
+    const logProc = '[API_MENSAJES_CONFIRMACION] pendientes actualizados a C por respuesta_no_valida total=' + String(proc.total || 0) + ' ok=' + String(proc.ok || 0);
+    console.log(logProc);
+    EscribirLog(logProc, proc.ok ? 'event' : 'error');
+
     try { startConsultaApiMensajesIfEnabled('confirmacion_respuesta_no_valida'); } catch {}
     return true;
   } catch (e) {
@@ -3615,6 +3877,7 @@ async function ConsultaApiMensajes(){
         continue;
       }
 
+      await procesarTimeoutsPendientesConfirmacionApiMensajes();
 
       const horarioConsulta = await getConsultaMensajesScheduleStatus();
       logConsultaMensajesScheduleStatus(horarioConsulta);
@@ -3731,6 +3994,17 @@ async function ConsultaApiMensajes(){
                 ' id_msj_renglon=' + String(Id_msj_renglon_local || '');
               console.log(log);
               EscribirLog(log, 'event');
+
+              if (permisoConfirmacion.cancelarMensaje !== true) {
+                await guardarPendienteConfirmacionApiMensajes(Nro_tel, {
+                  id_msj_dest: Id_msj_dest_local,
+                  id_msj_renglon: Id_msj_renglon_local,
+                  msj: Msj,
+                  content: contenido,
+                  content_nombre: Content_nombre
+                });
+              }
+
 
               if (permisoConfirmacion.cancelarMensaje === true) {
                 const okCancel = await actualizar_estado_mensaje(url_confirma_msg, 'C', null, null, null, null, null, Id_msj_renglon_local, Id_msj_dest_local);
