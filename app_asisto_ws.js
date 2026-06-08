@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.65  07/06/2026   */
+/*version: 4.00.66  08/06/2026   */
 
 
 
@@ -3738,7 +3738,12 @@ async function registrarRespuestaNoValidaConfirmacionApiMensajes(message) {
     if (!esRespuestaNoValidaConfirmacionApiMensajes(bodyRaw)) return false;
 
     const fromRaw = String(message.from || message._data?.from || '').trim();
-    if (!fromRaw || fromRaw === 'status@broadcast') return false;
+    const remoteRaw = String(message?.id?.remote || message?._data?.id?.remote || '').trim();
+    // No validar respuestas no válidas de grupos/estados/broadcast.
+    // El chat puede recibir mensajes normales continuamente; solo importan los contactos
+    // que tienen mensajes API pendientes de confirmación.
+    if (!fromRaw || fromRaw === 'status@broadcast' || remoteRaw === 'status@broadcast') return false;
+    if (fromRaw.endsWith('@g.us') || remoteRaw.endsWith('@g.us')) return false;
     if (!await ensureMongo()) {
       logConfirmacionDebug('[API_MENSAJES_CONFIRMACION_DEBUG] respuesta no valida pero Mongo no disponible from=' + fromRaw + ' body=' + bodyRaw);
       return false;
@@ -3747,52 +3752,55 @@ async function registrarRespuestaNoValidaConfirmacionApiMensajes(message) {
     const col = apiMensajesConfirmacionCollection();
     if (!col) return false;
 
-   const phoneCandidates = await phoneCandidatesConfirmacionApiMensajes(message);
+    const phoneCandidates = await phoneCandidatesConfirmacionApiMensajes(message);
     const queryBase = queryConfirmacionApiMensajesByPhones(phoneCandidates);
-    const query = queryBase ? { $and: [queryBase, { estado: 'pendiente' }] } : null;
+    if (!queryBase) return false;
+
+    // Regla importante:
+    // NO loguear ni cancelar una respuesta no válida si no hay mensajes API
+    // previamente leídos y guardados como pendientes para ESTE teléfono.
+    // Esto evita que cualquier mensaje común del chat/grupo se tome como rechazo.
+    const docsPendientes = await col.find({
+      $and: [
+        queryBase,
+        { estado: 'pendiente' },
+        { pendientes: { $exists: true } }
+      ]
+    }).limit(20).toArray();
+
+   const docsConPendientes = docsPendientes.filter((d) => pendientesConfirmacionApiMensajesArray(d).length > 0);
+    if (!docsConPendientes.length) return false;
+
+    const docIds = docsConPendientes.map((d) => d._id).filter(Boolean);
+    const phonesPendientes = docsConPendientes
+      .map((d) => onlyDigits(d?.nroTel || ''))
+      .filter(Boolean);
     const now = new Date();
-    let matched = 0;
-    let cancelPhone = phoneCandidates[0] || '';
+    let matched = docsConPendientes.length;
+    let cancelPhone = phonesPendientes[0] || phoneCandidates[0] || '';
 
     logConfirmacionDebug('[API_MENSAJES_CONFIRMACION_DEBUG] respuesta no valida candidata from=' + fromRaw +
       ' body=' + bodyRaw +
-     ' candidatos=' + JSON.stringify(phoneCandidates) +
+      ' candidatos=' + JSON.stringify(phoneCandidates) +
+      ' pendientes=' + JSON.stringify(phonesPendientes) +
       ' source=' + String(message?._confirmacionSource || 'message'));
 
-    if (query) {
-      const setData = buildSetCanceladoConfirmacionApiMensajes(now, cancelPhone, bodyRaw, 'respuesta_no_valida');
-      const upd = await col.updateMany(query, { $set: setData });
-      matched = Number(upd?.matchedCount || upd?.modifiedCount || 0);
-    }
-
-    if (!matched) {
-     const pending = await col.find({
-        tenantId: apiMensajesConfirmacionTenantId(),
-        numeroFrom: apiMensajesConfirmacionNumeroFrom(),
-        estado: 'pendiente'
-      }).sort({ pedidoAt: -1 }).limit(2).toArray();
-
-      if (pending.length === 1) {
-        cancelPhone = onlyDigits(pending[0].nroTel || '');
-       await col.updateOne(
-          { _id: pending[0]._id },
-          { $set: buildSetCanceladoConfirmacionApiMensajes(now, cancelPhone, bodyRaw, 'respuesta_no_valida') }
-        );
-        matched = 1;
-      }
-    }
+    
+     const setData = buildSetCanceladoConfirmacionApiMensajes(now, cancelPhone, bodyRaw, 'respuesta_no_valida');
+    const upd = await col.updateMany({ _id: { $in: docIds } }, { $set: setData });
+    matched = Number(upd?.matchedCount || upd?.modifiedCount || matched || 0);
 
     if (!matched) return false;
 
     const log = '[API_MENSAJES_CONFIRMACION] respuesta no valida recibida; se cancelan mensajes pendientes de ' +
-      (cancelPhone || phoneCandidates.join(',')) +
+      (phonesPendientes.join(',') || cancelPhone || phoneCandidates.join(',')) +
       ' texto=' + bodyRaw +
       ' docs=' + String(matched);
     console.log(log);
     EscribirLog(log, 'event');
  
     const proc = await procesarPendientesConfirmacionApiMensajes(
-      cancelPhone ? [cancelPhone] : phoneCandidates,
+      phonesPendientes.length ? phonesPendientes : (cancelPhone ? [cancelPhone] : phoneCandidates),
       'C',
       'respuesta_no_valida'
     );
