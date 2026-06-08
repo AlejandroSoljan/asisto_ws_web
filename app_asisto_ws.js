@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.59  07/06/2026   */
+/*version: 4.00.60  07/06/2026   */
 
 
 
@@ -3008,6 +3008,37 @@ function queryConfirmacionApiMensajesByPhones(phoneCandidates) {
   return ors.length ? { $or: ors } : null;
 }
 
+function getOutgoingConfirmacionTargetRaw(message) {
+  try {
+    const own = onlyDigits(telefono_qr || numero || '');
+    const candidates = [
+      message?.to,
+      message?._data?.to,
+      message?._data?.id?.remote,
+      message?.id?.remote,
+      message?._data?.chatId,
+      message?._data?.remote,
+      message?.from,
+      message?._data?.from
+    ];
+
+    for (const raw of candidates) {
+      const v = String(raw || '').trim();
+      if (!v || v === 'status@broadcast') continue;
+      const digits = onlyDigits(stripWhatsappSuffix(v));
+      if (digits && own && digits === own) continue;
+      if (digits || looksLikeLid(v) || v.endsWith('@c.us')) return v;
+    }
+  } catch {}
+  return '';
+}
+
+function logConfirmacionDebug(msg) {
+  try { console.log(msg); } catch {}
+  try { EscribirLog(msg, 'event'); } catch {}
+}
+
+
 function buildSetAceptadoConfirmacionApiMensajes(now, phone, respuesta) {
   return {
     tenantId: apiMensajesConfirmacionTenantId(),
@@ -3180,19 +3211,38 @@ async function estadoConfirmacionApiMensajes(nroTel) {
 
 async function registrarRespuestaConfirmacionApiMensajes(message) {
   try {
-    if (api_mensajes_confirmacion_habilitada !== true) return false;
-    if (!message || message.type !== 'chat') return false;
-    if (!respuestaConfirmaApiMensajes(message.body || '')) return false;
+    const bodyRaw = String(message?.body || message?._data?.body || '').trim();
+    if (api_mensajes_confirmacion_habilitada !== true) {
+      if (bodyRaw) logConfirmacionDebug('[API_MENSAJES_CONFIRMACION_DEBUG] ignorado: confirmacion deshabilitada body=' + bodyRaw);
+      return false;
+    }
+    if (!message) return false;
+    if (message.type && message.type !== 'chat') {
+      if (respuestaConfirmaApiMensajes(bodyRaw)) logConfirmacionDebug('[API_MENSAJES_CONFIRMACION_DEBUG] OK ignorado por type=' + String(message.type));
+     return false;
+    }
+    if (!respuestaConfirmaApiMensajes(bodyRaw)) return false;
 
-    const fromRaw = String(message.from || '').trim();
-    if (!fromRaw || fromRaw === 'status@broadcast') return false;
-    if (!await ensureMongo()) return false;
+    const fromRaw = String(message.from || message._data?.from || '').trim();
+    if (!fromRaw || fromRaw === 'status@broadcast') {
+      logConfirmacionDebug('[API_MENSAJES_CONFIRMACION_DEBUG] OK sin from valido from=' + fromRaw + ' body=' + bodyRaw);
+      return false;
+    }
+    if (!await ensureMongo()) {
+      logConfirmacionDebug('[API_MENSAJES_CONFIRMACION_DEBUG] OK recibido pero Mongo no disponible from=' + fromRaw);
+      return false;
+    }
     const col = apiMensajesConfirmacionCollection();
     if (!col) return false;
     const phoneCandidates = await phoneCandidatesConfirmacionApiMensajes(message);
 
+    logConfirmacionDebug('[API_MENSAJES_CONFIRMACION_DEBUG] OK candidato from=' + fromRaw +
+      ' body=' + bodyRaw +
+      ' candidatos=' + JSON.stringify(phoneCandidates) +
+      ' source=' + String(message?._confirmacionSource || 'message'));
+
     const now = new Date();
-    const respuesta = String(message.body || '').trim();
+    const respuesta = bodyRaw;
     let matched = 0;
     let acceptedPhone = phoneCandidates[0] || '';
 
@@ -4019,26 +4069,45 @@ telefonoFrom = telefonoFromApi;
 
 client.on('message_create', async message => {
   try {
+    try {
+      const b = String(message?.body || message?._data?.body || '').trim();
+      if (b && respuestaConfirmaApiMensajes(b)) {
+        logConfirmacionDebug('[API_MENSAJES_CONFIRMACION_DEBUG] message_create raw fromMe=' + String(!!message?.fromMe) +
+          ' from=' + String(message?.from || message?._data?.from || '') +
+          ' to=' + String(message?.to || message?._data?.to || '') +
+          ' remote=' + String(message?.id?.remote || message?._data?.id?.remote || '') +
+          ' type=' + String(message?.type || message?._data?.type || '') +
+          ' body=' + b);
+      }
+    } catch {}
     if (message && message.fromMe === true) {
       await logOutgoingFromMessageFallback(message);
 
       // IMPORTANTE: si el operador prueba/autoriza desde el mismo WhatsApp Web,
-      // el mensaje sale como fromMe=true y antes se ignoraba. Para la confirmación
-      // de API de mensajes lo tomamos como OK del contacto destino (message.to).
+      // el mensaje sale como fromMe=true. En algunas versiones message.to viene vacío;
+      // por eso se toma el destino desde to/from/id.remote/_data.* y, si no aparece,
+      // se permite fallback por única confirmación pendiente.
       try {
         const body = String(message?.body || message?._data?.body || '').trim();
-        const to = String(message?.to || message?._data?.to || '').trim();
-        if (body && to && respuestaConfirmaApiMensajes(body)) {
+        if (body && respuestaConfirmaApiMensajes(body)) {
+          const targetRaw = getOutgoingConfirmacionTargetRaw(message) || '__confirmacion_fromme_fallback__';
+          logConfirmacionDebug('[API_MENSAJES_CONFIRMACION_DEBUG] OK saliente detectado fromMe=true target=' + targetRaw +
+            ' raw_from=' + String(message?.from || message?._data?.from || '') +
+            ' raw_to=' + String(message?.to || message?._data?.to || '') +
+            ' remote=' + String(message?.id?.remote || message?._data?.id?.remote || '') +
+            ' body=' + body);
           const fakeIncomingConfirmacion = {
-            from: to,
+            from: targetRaw,
             to: message?.from || message?._data?.from || '',
             body,
-            type: message?.type || message?._data?.type || 'chat',
+            type: 'chat',
             fromMe: false,
             id: message?.id,
-            _data: message?._data
+            _data: message?._data,
+            _confirmacionSource: 'message_create_fromMe'
           };
-          await registrarRespuestaConfirmacionApiMensajes(fakeIncomingConfirmacion);
+          const okProcesado = await registrarRespuestaConfirmacionApiMensajes(fakeIncomingConfirmacion);
+          logConfirmacionDebug('[API_MENSAJES_CONFIRMACION_DEBUG] resultado OK saliente procesado=' + String(okProcesado));
         }
       } catch (e) {
         try { EscribirLog('[API_MENSAJES_CONFIRMACION] error procesando OK saliente: ' + String(e?.message || e), 'error'); } catch {}
@@ -4056,6 +4125,17 @@ client.on('message_create', async message => {
 
 client.on('message', async message => {
   try {
+    try {
+      const b = String(message?.body || message?._data?.body || '').trim();
+      if (b && respuestaConfirmaApiMensajes(b)) {
+        logConfirmacionDebug('[API_MENSAJES_CONFIRMACION_DEBUG] message raw fromMe=' + String(!!message?.fromMe) +
+          ' from=' + String(message?.from || message?._data?.from || '') +
+          ' to=' + String(message?.to || message?._data?.to || '') +
+          ' remote=' + String(message?.id?.remote || message?._data?.id?.remote || '') +
+          ' type=' + String(message?.type || message?._data?.type || '') +
+          ' body=' + b);
+      }
+    } catch {}
     await processIncomingAsistoMessage(message, 'message');
   } catch (e) {
     try { console.log('[message] incoming error:', e?.message || e); } catch {}
