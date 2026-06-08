@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.67  08/06/2026   */
+/*version: 4.00.68  08/06/2026   */
 
 
 
@@ -1477,7 +1477,12 @@ var signatures = {
 const logFilePath_event = path.join(__dirname, 'app_asisto_event.log');
 const logFilePath_error = path.join(__dirname, 'app_asisto_error.log');
 
-EscribirLog("inicio Script","event");
+EscribirLog(
+  "inicio Script pid=" + process.pid +
+  " restarted_from_panel=" + (process.env.ASISTO_RESTARTED_FROM_PANEL || "0") +
+  " file=" + __filename,
+  "event"
+);
 
 
 const app = express();
@@ -2757,17 +2762,28 @@ async function clearAuthenticationAndRequestQr(reason = 'clear_auth') {
 async function handleActionDoc(doc) {
   const action = String(doc?.action || '').toLowerCase();
   const reason = String(doc?.reason || '');
+  const reasonLower = reason.toLowerCase();
+  const isPanelRestartButton = reasonLower.includes('phone_web_restart') || reasonLower.includes('panel_restart');
 
   try {
-    if (action === 'restart' || action === 'restart_script' || action === 'full_restart') {
-      EscribirLog('Accion RESTART SCRIPT recibida: ' + reason, 'event');
+    // El botón Reiniciar del panel debe reiniciar TODO el script Node.
+    // Compatibilidad: si el panel todavía envía restart_whatsapp/restart_wweb
+    // con reason=phone_web_restart, igual lo tratamos como reinicio completo.
+    if (
+      action === 'restart' ||
+      action === 'restart_script' ||
+      action === 'full_restart' ||
+      ((action === 'restart_whatsapp' || action === 'restart_wweb') && isPanelRestartButton)
+    ) {
+      EscribirLog('Accion RESTART SCRIPT recibida: action=' + action + ' reason=' + reason, 'event');
       const ok = await restartFullProcessFromPanel('panel_restart:' + (reason || action));
       return ok ? 'script_restart_scheduled' : 'script_restart_skipped';
     }
 
-    // Reinicio anterior, solo de la sesión WhatsApp, queda disponible por compatibilidad.
+    // Reinicio anterior, solo de la sesión WhatsApp, queda disponible por compatibilidad,
+    // pero solamente para acciones explícitas que NO vengan del botón Reiniciar del panel.
     if (action === 'restart_whatsapp' || action === 'restart_wweb') {
-      EscribirLog('Accion RESTART WHATSAPP recibida: ' + reason, 'event');
+      EscribirLog('Accion RESTART WHATSAPP recibida: action=' + action + ' reason=' + reason, 'event');
       const ok = await restartClientSession('panel_restart_whatsapp:' + reason, 7000);
       return ok ? 'whatsapp_restarted' : 'whatsapp_restart_skipped';
     }
@@ -3697,7 +3713,7 @@ async function registrarRespuestaConfirmacionApiMensajes(message) {
   try {
     const bodyRaw = String(message?.body || message?._data?.body || '').trim();
     if (api_mensajes_confirmacion_habilitada !== true) {
-      if (bodyRaw) logConfirmacionDebug('[API_MENSAJES_CONFIRMACION_DEBUG] ignorado: confirmacion deshabilitada body=' + bodyRaw);
+      if (bodyRaw) logConfirmacionDebug('[API_MENSAJES_CONFIRMACION_DEBUG] ignorado: confirmacion deshabilitada ' );
       return false;
     }
     if (!message) return false;
@@ -3829,7 +3845,7 @@ async function registrarRespuestaNoValidaConfirmacionApiMensajes(message) {
     if (!fromRaw || fromRaw === 'status@broadcast' || remoteRaw === 'status@broadcast') return false;
     if (fromRaw.endsWith('@g.us') || remoteRaw.endsWith('@g.us')) return false;
     if (!await ensureMongo()) {
-      logConfirmacionDebug('[API_MENSAJES_CONFIRMACION_DEBUG] respuesta no valida pero Mongo no disponible from=' + fromRaw + ' body=' + bodyRaw);
+      logConfirmacionDebug('[API_MENSAJES_CONFIRMACION_DEBUG] respuesta no valida pero Mongo no disponible from=' + fromRaw + ' body=' );
       return false;
     }
 
@@ -4683,7 +4699,7 @@ client.on('message_create', async message => {
           ' to=' + String(message?.to || message?._data?.to || '') +
           ' remote=' + String(message?.id?.remote || message?._data?.id?.remote || '') +
           ' type=' + String(message?.type || message?._data?.type || '') +
-          ' body=' + b);
+          ' body=' );
       }
     } catch {}
     if (message && message.fromMe === true) {
@@ -4701,7 +4717,7 @@ client.on('message_create', async message => {
             ' raw_from=' + String(message?.from || message?._data?.from || '') +
             ' raw_to=' + String(message?.to || message?._data?.to || '') +
             ' remote=' + String(message?.id?.remote || message?._data?.id?.remote || '') +
-            ' body=' + body);
+            ' body=' );
           const fakeIncomingConfirmacion = {
             from: targetRaw,
             to: message?.from || message?._data?.from || '',
@@ -4720,7 +4736,7 @@ client.on('message_create', async message => {
             ' raw_from=' + String(message?.from || message?._data?.from || '') +
             ' raw_to=' + String(message?.to || message?._data?.to || '') +
             ' remote=' + String(message?.id?.remote || message?._data?.id?.remote || '') +
-            ' body=' + body);
+            ' body=' );
           const fakeNoValidaConfirmacion = {
             from: targetRaw,
             to: message?.from || message?._data?.from || '',
@@ -4758,7 +4774,7 @@ client.on('message', async message => {
           ' to=' + String(message?.to || message?._data?.to || '') +
           ' remote=' + String(message?.id?.remote || message?._data?.id?.remote || '') +
           ' type=' + String(message?.type || message?._data?.type || '') +
-          ' body=' + b);
+          ' body=' );
       }
     } catch {}
     await processIncomingAsistoMessage(message, 'message');
