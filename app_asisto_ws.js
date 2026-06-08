@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.66  08/06/2026   */
+/*version: 4.00.67  08/06/2026   */
 
 
 
@@ -1367,6 +1367,7 @@ let pollTimer = null;
 let actionBusy = false;
 let heartbeatBusy = false;
 let restartInFlight = false;
+let fullProcessRestartInFlight = false;
 let authReadyWatchdogTimer = null;
 let authReadyWatchdogSeq = 0;
 const AUTH_READY_WATCHDOG_MS = Math.max(30000, Number(process.env.AUTH_READY_WATCHDOG_MS || 90000));
@@ -2363,6 +2364,82 @@ function resetClientRuntimeFlags(reason = '') {
   try { clearAuthReadyWatchdog(reason); } catch {}
 }
 
+function quoteCmdArg(value) {
+  const s = String(value ?? '');
+  return '"' + s.replace(/"/g, '\\"') + '"';
+}
+
+function quoteShArg(value) {
+  return "'" + String(value ?? '').replace(/'/g, "'\\''") + "'";
+}
+
+function buildRestartCommand(delaySec = 6) {
+  const args = Array.isArray(process.argv) && process.argv.length > 1 ? process.argv.slice(1) : [];
+  const envPrefix = 'ASISTO_RESTARTED_FROM_PANEL=1';
+
+  if (process.platform === 'win32') {
+    const nodeCmd = [quoteCmdArg(process.execPath), ...args.map(quoteCmdArg)].join(' ');
+    return {
+      command: 'cmd.exe',
+      args: ['/d', '/s', '/c', `timeout /t ${Math.max(1, Number(delaySec) || 6)} /nobreak >nul & set ASISTO_RESTARTED_FROM_PANEL=1& ${nodeCmd}`]
+    };
+  }
+
+  const nodeCmd = [quoteShArg(process.execPath), ...args.map(quoteShArg)].join(' ');
+  return {
+    command: 'sh',
+    args: ['-lc', `${envPrefix} sleep ${Math.max(1, Number(delaySec) || 6)}; exec ${nodeCmd}`]
+  };
+}
+
+async function restartFullProcessFromPanel(reason = 'panel_restart_script') {
+  if (fullProcessRestartInFlight) {
+   try { EscribirLog('[PROCESS_RESTART] ya hay reinicio de script en curso: ' + String(reason || ''), 'event'); } catch {}
+    return false;
+  }
+
+  fullProcessRestartInFlight = true;
+  restartInFlight = true;
+
+  try {
+    const restartReason = String(reason || 'panel_restart_script');
+    try { EscribirLog('[PROCESS_RESTART] inicio -> ' + restartReason, 'event'); } catch {}
+    try { await updateLockStateSafe('restarting'); } catch {}
+   try { await pushHistory('process_restart', { reason: restartReason, pid: process.pid, at: new Date().toISOString() }); } catch {}
+
+    const restartCmd = buildRestartCommand(7);
+    const child = spawn(restartCmd.command, restartCmd.args, {
+      cwd: process.cwd(),
+      env: { ...process.env, ASISTO_RESTARTED_FROM_PANEL: '1' },
+      detached: true,
+      stdio: 'inherit',
+      windowsHide: true
+    });
+
+    child.on('error', (e) => {
+      try { EscribirLog('[PROCESS_RESTART] spawn error: ' + String(e?.message || e), 'error'); } catch {}
+    });
+
+    try { child.unref(); } catch {}
+    try { EscribirLog('[PROCESS_RESTART] nuevo proceso programado; cerrando proceso actual pid=' + process.pid, 'event'); } catch {}
+
+    setTimeout(() => {
+      gracefulShutdown('PANEL_FULL_PROCESS_RESTART').catch((e) => {
+        try { EscribirLog('[PROCESS_RESTART] gracefulShutdown error: ' + String(e?.message || e), 'error'); } catch {}
+        try { process.exit(0); } catch {}
+      });
+    }, 1500);
+
+    return true;
+  } catch (e) {
+    fullProcessRestartInFlight = false;
+    restartInFlight = false;
+    try { EscribirLog('[PROCESS_RESTART] error: ' + String(e?.message || e), 'error'); } catch {}
+    return false;
+  }
+}
+
+
 async function restartClientSession(reason = 'restart', waitMs = 6500) {
   if (restartInFlight) {
     try { EscribirLog('[RESTART] ya hay un reinicio en curso: ' + String(reason || ''), 'event'); } catch {}
@@ -2682,10 +2759,17 @@ async function handleActionDoc(doc) {
   const reason = String(doc?.reason || '');
 
   try {
-    if (action === 'restart') {
-      EscribirLog('Accion RESTART recibida: ' + reason, 'event');
-      const ok = await restartClientSession('panel_restart:' + reason, 7000);
-      return ok ? 'restarted' : 'restart_skipped';
+    if (action === 'restart' || action === 'restart_script' || action === 'full_restart') {
+      EscribirLog('Accion RESTART SCRIPT recibida: ' + reason, 'event');
+      const ok = await restartFullProcessFromPanel('panel_restart:' + (reason || action));
+      return ok ? 'script_restart_scheduled' : 'script_restart_skipped';
+    }
+
+    // Reinicio anterior, solo de la sesión WhatsApp, queda disponible por compatibilidad.
+    if (action === 'restart_whatsapp' || action === 'restart_wweb') {
+      EscribirLog('Accion RESTART WHATSAPP recibida: ' + reason, 'event');
+      const ok = await restartClientSession('panel_restart_whatsapp:' + reason, 7000);
+      return ok ? 'whatsapp_restarted' : 'whatsapp_restart_skipped';
     }
 
     if (action === 'release') {
@@ -4793,7 +4877,7 @@ client.on('disconnected', async (reason) => {
   resetClientRuntimeFlags('disconnected');
   // Si el corte fue provocado por Reiniciar/Borrar auth, no agendar otro reinicio automático.
   // Antes podía quedar doble initialize() y el panel permanecía en "iniciando".
-  if (restartInFlight || clearAuthInFlight) {
+  if (restartInFlight || clearAuthInFlight || fullProcessRestartInFlight) {
     try { EscribirLog('[DISCONNECTED] sin auto-restart por acción en curso: ' + String(reason || ''), 'event'); } catch {}
     return;
   }
@@ -4801,7 +4885,7 @@ client.on('disconnected', async (reason) => {
   // Solo reintenta si esta PC sigue siendo owner del lock.
   if (isOwner) {
     setTimeout(() => {
-      if (isOwner && !clientStarted && !restartInFlight && !clearAuthInFlight && !startingNow) {
+      if (isOwner && !clientStarted && !restartInFlight && !clearAuthInFlight && !fullProcessRestartInFlight && !startingNow) {
         restartClientSession('disconnected', 7000).catch(() => {});
       }
     }, 2500);
