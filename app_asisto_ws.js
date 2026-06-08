@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.63  07/06/2026   */
+/*version: 4.00.64  07/06/2026   */
 
 
 
@@ -3244,7 +3244,7 @@ async function estadoConfirmacionApiMensajes(nroTel) {
 
   const now = new Date();
   const _id = apiMensajesConfirmacionId(to);
-  let doc = await col.findOne({ _id });
+    let doc = await col.findOne({ _id });
 
 
   if (apiMensajesConfirmacionAceptada(doc)) return { autorizado: true, motivo: 'aceptado', doc };
@@ -3253,6 +3253,13 @@ async function estadoConfirmacionApiMensajes(nroTel) {
     const cancelacionVigente = reenviarMs <= 0 || !Number.isFinite(baseCancelMs) || baseCancelMs <= 0 || (Date.now() - baseCancelMs) < reenviarMs;
 
     if (cancelacionVigente) {
+      try {
+        const logCancelVigente = '[API_MENSAJES_CONFIRMACION] cancelacion vigente; se actualizara a C nro=' + to +
+          ' ventana_ms=' + String(reenviarMs) +
+          ' motivo=' + String(doc.motivoCancelacion || 'confirmacion_cancelada');
+        console.log(logCancelVigente);
+        EscribirLog(logCancelVigente, 'event');
+      } catch {}
       return {
         autorizado: false,
         motivo: doc.motivoCancelacion || 'confirmacion_cancelada',
