@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.57  07/06/2026   */
+/*version: 4.00.58  07/06/2026   */
 
 
 
@@ -3945,6 +3945,28 @@ client.on('message_create', async message => {
   try {
     if (message && message.fromMe === true) {
       await logOutgoingFromMessageFallback(message);
+
+      // IMPORTANTE: si el operador prueba/autoriza desde el mismo WhatsApp Web,
+      // el mensaje sale como fromMe=true y antes se ignoraba. Para la confirmación
+      // de API de mensajes lo tomamos como OK del contacto destino (message.to).
+      try {
+        const body = String(message?.body || message?._data?.body || '').trim();
+        const to = String(message?.to || message?._data?.to || '').trim();
+        if (body && to && respuestaConfirmaApiMensajes(body)) {
+          const fakeIncomingConfirmacion = {
+            from: to,
+            to: message?.from || message?._data?.from || '',
+            body,
+            type: message?.type || message?._data?.type || 'chat',
+            fromMe: false,
+            id: message?.id,
+            _data: message?._data
+          };
+          await registrarRespuestaConfirmacionApiMensajes(fakeIncomingConfirmacion);
+        }
+      } catch (e) {
+        try { EscribirLog('[API_MENSAJES_CONFIRMACION] error procesando OK saliente: ' + String(e?.message || e), 'error'); } catch {}
+      }
       return;
     }
     // No procesar inmediatamente message_create: puede traer datos internos y
