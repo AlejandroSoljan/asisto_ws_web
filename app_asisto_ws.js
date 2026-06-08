@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.71  08/06/2026   */
+/*version: 4.00.72  08/06/2026   */
 
 
 
@@ -1756,7 +1756,12 @@ async function loadTenantConfigFromDbMinimal() {
 
     applyAutoUpdateConfig(conf);
 
-    try { console.log(`[CONFIG] tenantId=${tenantId} numero=${numero} puerto=${port} headless=${headless} auth_mode=${auth_mode || 'local'} lease_ms=${lease_ms} heartbeat_ms=${heartbeat_ms} desiredTag=${auto_update_target_tag || '(auto)'}`); } catch {}
+    try { 
+      
+      //console.log(`[CONFIG] tenantId=${tenantId} numero=${numero} puerto=${port} headless=${headless} auth_mode=${auth_mode || 'local'} lease_ms=${lease_ms} heartbeat_ms=${heartbeat_ms} desiredTag=${auto_update_target_tag || '(auto)'}`);
+  
+  
+  } catch {}
     return conf;
   } catch (e) {
     try { console.log("loadTenantConfigFromDbMinimal error:", e?.message || e); } catch {}
