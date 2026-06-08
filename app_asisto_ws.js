@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.61  07/06/2026   */
+/*version: 4.00.63  07/06/2026   */
 
 
 
@@ -3086,6 +3086,24 @@ function respuestaConfirmaApiMensajes(body) {
   return respuestasOkApiMensajesConfirmacion().includes(b);
 }
 
+function textoSolicitudConfirmacionApiMensajes() {
+  return String(api_mensajes_confirmacion_mensaje || '').trim() || 'Hola, vas a recibir un mensaje de nuestra parte. Respondé OK para autorizar la recepción.';
+}
+
+function esTextoSolicitudConfirmacionApiMensajes(body) {
+  const b = normalizarRespuestaConfirmacionApiMensajes(body);
+  if (!b) return false;
+  return b === normalizarRespuestaConfirmacionApiMensajes(textoSolicitudConfirmacionApiMensajes());
+}
+
+function esRespuestaNoValidaConfirmacionApiMensajes(body) {
+  const raw = String(body || '').trim();
+  if (!raw) return false;
+  if (respuestaConfirmaApiMensajes(raw)) return false;
+  if (esTextoSolicitudConfirmacionApiMensajes(raw)) return false;
+  return true;
+}
+
 function apiMensajesConfirmacionAceptada(doc) {
   try {
     if (!doc || doc.estado !== 'aceptado') return false;
@@ -3163,6 +3181,58 @@ async function detectarOkConfirmacionApiMensajesEnChat(nroTel, doc) {
   return false;
 }
 
+async function detectarNoValidaConfirmacionApiMensajesEnChat(nroTel, doc) {
+  try {
+    if (api_mensajes_confirmacion_habilitada !== true) return false;
+    if (!client || typeof client.getChatById !== 'function') return false;
+    const to = onlyDigits(nroTel || '');
+    if (!to) return false;
+    if (!doc || doc.estado !== 'pendiente') return false;
+
+    const pedidoMs = doc?.pedidoAt ? new Date(doc.pedidoAt).getTime() : 0;
+    const chatId = to + '@c.us';
+    const chat = await client.getChatById(chatId);
+    if (!chat || typeof chat.fetchMessages !== 'function') return false;
+
+    const messages = await chat.fetchMessages({ limit: 15 });
+    const list = Array.isArray(messages) ? messages : [];
+    for (const m of list) {
+      const body = String(m?.body || m?._data?.body || '').trim();
+      if (!esRespuestaNoValidaConfirmacionApiMensajes(body)) continue;
+
+      const msgMs = getWhatsappMessageTimestampMs(m);
+      if (pedidoMs && msgMs && msgMs < (pedidoMs - 5000)) continue;
+
+      const col = apiMensajesConfirmacionCollection();
+      if (!col) return false;
+      const now = new Date();
+      const setCancelado = buildSetCanceladoConfirmacionApiMensajes(now, to, body, 'respuesta_no_valida');
+      await col.updateOne(
+        { _id: doc._id || apiMensajesConfirmacionId(to) },
+        {
+          $set: {
+            ...setCancelado,
+            canceladoPor: m?.fromMe ? 'whatsapp_web_from_me' : 'cliente',
+            canceladoSource: 'chat_history'
+          },
+          $setOnInsert: { createdAt: now }
+        },
+        { upsert: true }
+      );
+
+      const log = '[API_MENSAJES_CONFIRMACION] respuesta no valida detectada en chat de ' + to +
+        ' texto=' + body +
+        ' fromMe=' + String(!!m?.fromMe) +
+        ' msgMs=' + String(msgMs || '');
+      console.log(log);
+      EscribirLog(log, 'event');
+      return true;
+    }
+  } catch (e) {
+    try { EscribirLog('[API_MENSAJES_CONFIRMACION] error leyendo chat para respuesta no valida: ' + String(e?.message || e), 'error'); } catch {}
+  }
+  return false;
+}
 
 async function estadoConfirmacionApiMensajes(nroTel) {
   if (api_mensajes_confirmacion_habilitada !== true) return { autorizado: true, motivo: 'disabled' };
@@ -3175,15 +3245,41 @@ async function estadoConfirmacionApiMensajes(nroTel) {
   const now = new Date();
   const _id = apiMensajesConfirmacionId(to);
   let doc = await col.findOne({ _id });
+
+
   if (apiMensajesConfirmacionAceptada(doc)) return { autorizado: true, motivo: 'aceptado', doc };
   if (doc && doc.estado === 'cancelado') {
-   return {
-      autorizado: false,
-      motivo: doc.motivoCancelacion || 'confirmacion_cancelada',
-      solicitudEnviada: false,
-      cancelarMensaje: true,
-      doc
-    };
+    const baseCancelMs = new Date(doc.canceladoAt || doc.updatedAt || doc.pedidoAt || 0).getTime();
+    const cancelacionVigente = reenviarMs <= 0 || !Number.isFinite(baseCancelMs) || baseCancelMs <= 0 || (Date.now() - baseCancelMs) < reenviarMs;
+
+    if (cancelacionVigente) {
+      return {
+        autorizado: false,
+        motivo: doc.motivoCancelacion || 'confirmacion_cancelada',
+        solicitudEnviada: false,
+        cancelarMensaje: true,
+        doc
+      };
+    }
+
+    const logReset = '[API_MENSAJES_CONFIRMACION] cancelacion vencida; se vuelve a pedir confirmacion a ' + to +
+      ' ventana_ms=' + String(reenviarMs) +
+      ' motivo_anterior=' + String(doc.motivoCancelacion || 'confirmacion_cancelada');
+    console.log(logReset);
+    EscribirLog(logReset, 'event');
+
+    await col.updateOne(
+      { _id },
+      {
+        $set: {
+          estado: 'vencido',
+          vencidoAt: now,
+          motivoVencimiento: 'cancelacion_fuera_de_ventana',
+          updatedAt: now
+       }
+      }
+    );
+    doc = null;
   }
 
  // Respaldo importante: si habilitar_bot=false, o si WhatsApp Web no entrega
@@ -3194,6 +3290,17 @@ async function estadoConfirmacionApiMensajes(nroTel) {
     if (okDetectado) {
       doc = await col.findOne({ _id });
       return { autorizado: true, motivo: 'aceptado_chat_history', doc };
+    }
+   const noValidaDetectada = await detectarNoValidaConfirmacionApiMensajesEnChat(to, doc);
+   if (noValidaDetectada) {
+      doc = await col.findOne({ _id });
+      return {
+        autorizado: false,
+        motivo: 'respuesta_no_valida',
+        solicitudEnviada: false,
+        cancelarMensaje: true,
+        doc
+      };
     }
   }
 
@@ -3223,7 +3330,7 @@ async function estadoConfirmacionApiMensajes(nroTel) {
  
 
   if (debePedir) {
-    const texto = String(api_mensajes_confirmacion_mensaje || '').trim() || 'Hola, vas a recibir un mensaje de nuestra parte. Respondé OK para autorizar la recepción.';
+    const texto = textoSolicitudConfirmacionApiMensajes();
     await safeSend(to + '@c.us', texto);
     await col.updateOne(
       { _id },
@@ -3369,7 +3476,7 @@ async function registrarRespuestaNoValidaConfirmacionApiMensajes(message) {
     if (api_mensajes_confirmacion_habilitada !== true) return false;
     if (!message || !bodyRaw) return false;
     if (message.type && message.type !== 'chat') return false;
-    if (respuestaConfirmaApiMensajes(bodyRaw)) return false;
+    if (!esRespuestaNoValidaConfirmacionApiMensajes(bodyRaw)) return false;
 
     const fromRaw = String(message.from || message._data?.from || '').trim();
     if (!fromRaw || fromRaw === 'status@broadcast') return false;
@@ -4234,6 +4341,25 @@ client.on('message_create', async message => {
           };
           const okProcesado = await registrarRespuestaConfirmacionApiMensajes(fakeIncomingConfirmacion);
           logConfirmacionDebug('[API_MENSAJES_CONFIRMACION_DEBUG] resultado OK saliente procesado=' + String(okProcesado));
+        } else if (body && esRespuestaNoValidaConfirmacionApiMensajes(body)) {
+          const targetRaw = getOutgoingConfirmacionTargetRaw(message) || '__confirmacion_fromme_fallback__';
+          logConfirmacionDebug('[API_MENSAJES_CONFIRMACION_DEBUG] respuesta no valida saliente detectada fromMe=true target=' + targetRaw +
+            ' raw_from=' + String(message?.from || message?._data?.from || '') +
+            ' raw_to=' + String(message?.to || message?._data?.to || '') +
+            ' remote=' + String(message?.id?.remote || message?._data?.id?.remote || '') +
+            ' body=' + body);
+          const fakeNoValidaConfirmacion = {
+            from: targetRaw,
+            to: message?.from || message?._data?.from || '',
+            body,
+            type: 'chat',
+            fromMe: false,
+            id: message?.id,
+            _data: message?._data,
+            _confirmacionSource: 'message_create_fromMe_no_valida'
+          };
+          const noValidaProcesada = await registrarRespuestaNoValidaConfirmacionApiMensajes(fakeNoValidaConfirmacion);
+          logConfirmacionDebug('[API_MENSAJES_CONFIRMACION_DEBUG] resultado respuesta no valida saliente procesada=' + String(noValidaProcesada));
         }
       } catch (e) {
         try { EscribirLog('[API_MENSAJES_CONFIRMACION] error procesando OK saliente: ' + String(e?.message || e), 'error'); } catch {}
