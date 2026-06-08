@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.60  07/06/2026   */
+/*version: 4.00.61  07/06/2026   */
 
 
 
@@ -3051,6 +3051,19 @@ function buildSetAceptadoConfirmacionApiMensajes(now, phone, respuesta) {
   };
 }
 
+function buildSetCanceladoConfirmacionApiMensajes(now, phone, respuesta, motivo) {
+  return {
+    tenantId: apiMensajesConfirmacionTenantId(),
+    numeroFrom: apiMensajesConfirmacionNumeroFrom(),
+    nroTel: onlyDigits(phone || ''),
+    estado: 'cancelado',
+    canceladoAt: now,
+    respuestaCancelacion: String(respuesta || '').trim(),
+    motivoCancelacion: String(motivo || 'confirmacion_cancelada'),
+    updatedAt: now
+  };
+}
+
 
 function normalizarRespuestaConfirmacionApiMensajes(value) {
   return String(value || '')
@@ -3163,6 +3176,15 @@ async function estadoConfirmacionApiMensajes(nroTel) {
   const _id = apiMensajesConfirmacionId(to);
   let doc = await col.findOne({ _id });
   if (apiMensajesConfirmacionAceptada(doc)) return { autorizado: true, motivo: 'aceptado', doc };
+  if (doc && doc.estado === 'cancelado') {
+   return {
+      autorizado: false,
+      motivo: doc.motivoCancelacion || 'confirmacion_cancelada',
+      solicitudEnviada: false,
+      cancelarMensaje: true,
+      doc
+    };
+  }
 
  // Respaldo importante: si habilitar_bot=false, o si WhatsApp Web no entrega
   // el evento message/message_create del OK, igual detectamos el OK leyendo
@@ -3178,7 +3200,27 @@ async function estadoConfirmacionApiMensajes(nroTel) {
 
  const ultimoPedidoMs = doc?.pedidoAt ? new Date(doc.pedidoAt).getTime() : 0;
   const reenviarMs = Math.max(0, Number(api_mensajes_confirmacion_reenviar_ms) || 0);
-  const debePedir = !doc || !Number.isFinite(ultimoPedidoMs) || ultimoPedidoMs <= 0 || (Date.now() - ultimoPedidoMs) >= reenviarMs;
+  const expiroVentana = !!doc && doc.estado === 'pendiente' && Number.isFinite(ultimoPedidoMs) && ultimoPedidoMs > 0 && reenviarMs > 0 && (Date.now() - ultimoPedidoMs) >= reenviarMs;
+
+  if (expiroVentana) {
+    const setCancelado = buildSetCanceladoConfirmacionApiMensajes(now, to, '', 'sin_respuesta_timeout');
+    await col.updateOne(
+      { _id },
+      {
+        $setOnInsert: { createdAt: now },
+        $set: setCancelado
+      },
+      { upsert: true }
+    );
+    const logTimeout = '[API_MENSAJES_CONFIRMACION] confirmacion cancelada por timeout a ' + to +
+      ' ventana_ms=' + String(reenviarMs);
+    console.log(logTimeout);
+    EscribirLog(logTimeout, 'event');
+    return { autorizado: false, motivo: 'sin_respuesta_timeout', solicitudEnviada: false, cancelarMensaje: true, doc: { ...(doc || {}), ...setCancelado } };
+  }
+
+  const debePedir = !doc || !Number.isFinite(ultimoPedidoMs) || ultimoPedidoMs <= 0;
+ 
 
   if (debePedir) {
     const texto = String(api_mensajes_confirmacion_mensaje || '').trim() || 'Hola, vas a recibir un mensaje de nuestra parte. Respondé OK para autorizar la recepción.';
@@ -3321,6 +3363,74 @@ async function registrarRespuestaConfirmacionApiMensajes(message) {
   }
 }
 
+async function registrarRespuestaNoValidaConfirmacionApiMensajes(message) {
+  try {
+    const bodyRaw = String(message?.body || message?._data?.body || '').trim();
+    if (api_mensajes_confirmacion_habilitada !== true) return false;
+    if (!message || !bodyRaw) return false;
+    if (message.type && message.type !== 'chat') return false;
+    if (respuestaConfirmaApiMensajes(bodyRaw)) return false;
+
+    const fromRaw = String(message.from || message._data?.from || '').trim();
+    if (!fromRaw || fromRaw === 'status@broadcast') return false;
+    if (!await ensureMongo()) {
+      logConfirmacionDebug('[API_MENSAJES_CONFIRMACION_DEBUG] respuesta no valida pero Mongo no disponible from=' + fromRaw + ' body=' + bodyRaw);
+      return false;
+    }
+
+    const col = apiMensajesConfirmacionCollection();
+    if (!col) return false;
+
+   const phoneCandidates = await phoneCandidatesConfirmacionApiMensajes(message);
+    const queryBase = queryConfirmacionApiMensajesByPhones(phoneCandidates);
+    const query = queryBase ? { $and: [queryBase, { estado: 'pendiente' }] } : null;
+    const now = new Date();
+    let matched = 0;
+    let cancelPhone = phoneCandidates[0] || '';
+
+    logConfirmacionDebug('[API_MENSAJES_CONFIRMACION_DEBUG] respuesta no valida candidata from=' + fromRaw +
+      ' body=' + bodyRaw +
+     ' candidatos=' + JSON.stringify(phoneCandidates) +
+      ' source=' + String(message?._confirmacionSource || 'message'));
+
+    if (query) {
+      const setData = buildSetCanceladoConfirmacionApiMensajes(now, cancelPhone, bodyRaw, 'respuesta_no_valida');
+      const upd = await col.updateMany(query, { $set: setData });
+      matched = Number(upd?.matchedCount || upd?.modifiedCount || 0);
+    }
+
+    if (!matched) {
+     const pending = await col.find({
+        tenantId: apiMensajesConfirmacionTenantId(),
+        numeroFrom: apiMensajesConfirmacionNumeroFrom(),
+        estado: 'pendiente'
+      }).sort({ pedidoAt: -1 }).limit(2).toArray();
+
+      if (pending.length === 1) {
+        cancelPhone = onlyDigits(pending[0].nroTel || '');
+       await col.updateOne(
+          { _id: pending[0]._id },
+          { $set: buildSetCanceladoConfirmacionApiMensajes(now, cancelPhone, bodyRaw, 'respuesta_no_valida') }
+        );
+        matched = 1;
+      }
+    }
+
+    if (!matched) return false;
+
+    const log = '[API_MENSAJES_CONFIRMACION] respuesta no valida recibida; se cancelan mensajes pendientes de ' +
+      (cancelPhone || phoneCandidates.join(',')) +
+      ' texto=' + bodyRaw +
+      ' docs=' + String(matched);
+    console.log(log);
+    EscribirLog(log, 'event');
+    try { startConsultaApiMensajesIfEnabled('confirmacion_respuesta_no_valida'); } catch {}
+    return true;
+  } catch (e) {
+    try { EscribirLog('[API_MENSAJES_CONFIRMACION] error respuesta no valida: ' + String(e?.message || e), 'error'); } catch {}
+    return false;
+  }
+}
 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -3507,6 +3617,19 @@ async function ConsultaApiMensajes(){
                 ' id_msj_renglon=' + String(Id_msj_renglon_local || '');
               console.log(log);
               EscribirLog(log, 'event');
+
+              if (permisoConfirmacion.cancelarMensaje === true) {
+                const okCancel = await actualizar_estado_mensaje(url_confirma_msg, 'C', null, null, null, null, null, Id_msj_renglon_local, Id_msj_dest_local);
+                const logCancel = '[API_MENSAJES_CONFIRMACION] mensaje actualizado a C por ' + String(permisoConfirmacion.motivo || 'confirmacion_cancelada') +
+                  ' nro=' + Nro_tel +
+                  ' id_msj_dest=' + String(Id_msj_dest_local || '') +
+                  ' id_msj_renglon=' + String(Id_msj_renglon_local || '') +
+                  ' ok=' + String(okCancel);
+                console.log(logCancel);
+                EscribirLog(logCancel, okCancel ? 'event' : 'error');
+              }
+
+
               if (permisoConfirmacion.solicitudEnviada) ultimoNroTelConsultaMensajes = Nro_tel;
               continue;
             }
@@ -3852,6 +3975,9 @@ async function processIncomingAsistoMessage(message, source) {
   try { RecuperarJsonConfMensajes(); } catch {}
 
   if (await registrarRespuestaConfirmacionApiMensajes(message)) {
+    return;
+  }
+  if (await registrarRespuestaNoValidaConfirmacionApiMensajes(message)) {
     return;
   }
 
