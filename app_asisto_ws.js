@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.72  08/06/2026   */
+/*version: 4.00.73  12/06/2026   */
 
 
 
@@ -39,6 +39,28 @@ let authFailureHandling = false;
 const AR_TZ = 'America/Argentina/Cordoba';
 
 
+// Modo de reinicio solicitado desde el panel de sesiones.
+// task_runner: sale con código 77 y lo levanta el .cmd runner.
+// pm2: sale con código 0 y lo levanta PM2.
+// whatsapp: mantiene el comportamiento viejo, reinicia solo WhatsApp/Chromium.
+var panel_restart_mode = String(process.env.ASISTO_PANEL_RESTART_MODE || process.env.PANEL_RESTART_MODE || 'task_runner').trim().toLowerCase();
+
+function normalizePanelRestartMode(value, fallback = 'task_runner') {
+  const v = String(value || '').trim().toLowerCase();
+  if (['pm2', 'pm2_restart', 'pm2_exit'].includes(v)) return 'pm2';
+  if (['task', 'task_runner', 'runner', 'windows_task', 'tarea_programada', 'scheduled_task'].includes(v)) return 'task_runner';
+  if (['whatsapp', 'wweb', 'restart_whatsapp'].includes(v)) return 'whatsapp';
+  return fallback;
+}
+
+panel_restart_mode = normalizePanelRestartMode(panel_restart_mode, 'task_runner');
+
+function getPanelRestartMode() {
+  return normalizePanelRestartMode(
+    process.env.ASISTO_PANEL_RESTART_MODE || process.env.PANEL_RESTART_MODE || panel_restart_mode || 'task_runner',
+    'task_runner'
+  );
+}
 
 // =========================
 // Multi-PC failover (Opción B)
@@ -137,6 +159,18 @@ function applyTenantConfig(conf) {
 
   if (conf.auth_mode !== undefined && conf.auth_mode !== null && String(conf.auth_mode).trim() !== '') {
     auth_mode = String(conf.auth_mode).trim().toLowerCase();
+  }
+
+  if (
+    conf.panel_restart_mode !== undefined ||
+    conf.panelRestartMode !== undefined ||
+    conf.restart_mode !== undefined ||
+    conf.restartMode !== undefined
+  ) {
+    panel_restart_mode = normalizePanelRestartMode(
+      conf.panel_restart_mode ?? conf.panelRestartMode ?? conf.restart_mode ?? conf.restartMode,
+      panel_restart_mode
+    );
   }
 
   // Mensajes / límites
@@ -329,6 +363,21 @@ function applyTenantConfig(conf) {
   if (conf.msg_can !== undefined) msg_can = String(conf.msg_can ?? "");
   if (conf.nom_emp !== undefined) nom_chatbot = String(conf.nom_emp);
   if (conf.nom_chatbot !== undefined) nom_chatbot = String(conf.nom_chatbot);
+
+    const panelRestartModeRaw =
+    conf.panel_restart_mode ??
+    conf.panelRestartMode ??
+    conf.wweb_panel_restart_mode ??
+    conf.wwebPanelRestartMode ??
+    conf.restart_mode ??
+    conf.restartMode ??
+    conf.modo_reinicio_panel ??
+    conf.modoReinicioPanel;
+  if (panelRestartModeRaw !== undefined && panelRestartModeRaw !== null && String(panelRestartModeRaw).trim() !== '') {
+    panel_restart_mode = normalizePanelRestartMode(panelRestartModeRaw, panel_restart_mode);
+  } else {
+    panel_restart_mode = normalizePanelRestartMode(panel_restart_mode, 'task_runner');
+  }
 
   applyAutoUpdateConfig(conf);
 }
@@ -2810,19 +2859,22 @@ async function restartScriptFromPanel(reason = 'panel_restart_script') {
 
   try {
     const restartReason = String(reason || 'panel_restart_script');
-    const exitCode = Number(process.env.ASISTO_PANEL_RESTART_EXIT_CODE || 77);
+    const restartMode = getPanelRestartMode();
+    const defaultExitCode = restartMode === 'pm2' ? 0 : 77;
+    const exitCode = Number(process.env.ASISTO_PANEL_RESTART_EXIT_CODE || defaultExitCode);
 
     try { EscribirLog('[PROCESS_RESTART] inicio -> ' + restartReason, 'event'); } catch {}
-    try { await pushHistory('process_restart', { reason: restartReason, pid: process.pid, exitCode, mode: 'task_runner_exit_code', at: new Date().toISOString() }); } catch {}
+    try { await pushHistory('process_restart', { reason: restartReason, pid: process.pid, exitCode, mode: restartMode, at: new Date().toISOString() }); } catch {}
 
-    // IMPORTANTE para Windows + Tarea Programada:
-    // No intentamos lanzar otro node.exe desde este proceso.
-    // El proceso sale con exitCode=77 y asisto_ws_runner.cmd lo vuelve a iniciar.
+        // IMPORTANTE:
+    // - task_runner: no lanzamos otro node.exe desde este proceso; salimos con exitCode=77
+    //   y asisto_ws_runner.cmd lo vuelve a iniciar.
+    // - pm2: salimos con exitCode=0 para que PM2 reinicie el proceso.
     try { localWsPanelState = 'restarting'; } catch {}
     try { await updateLockStateSafe('restarting'); } catch {}
     try { await forceReleaseLock('restarting'); } catch {}
 
-    try { EscribirLog('[PROCESS_RESTART] saliendo con exitCode=' + exitCode + ' para reinicio por runner. pid=' + process.pid, 'event'); } catch {}
+    try { EscribirLog('[PROCESS_RESTART] modo=' + restartMode + ' saliendo con exitCode=' + exitCode + ' pid=' + process.pid, 'event'); } catch {}
     setTimeout(() => {
       try { process.exit(exitCode); } catch {}
     }, 250);
@@ -2848,6 +2900,12 @@ async function handleActionDoc(doc) {
     // Compatibilidad: si el panel todavía envía restart_whatsapp/restart_wweb
     // con reason=phone_web_restart, igual lo tratamos como reinicio completo.
     if (action === 'restart' || action === 'restart_script' || action === 'full_restart') {
+      const restartMode = getPanelRestartMode();
+      if (restartMode === 'whatsapp') {
+        EscribirLog('Accion RESTART WHATSAPP recibida por modo=whatsapp: action=' + action + ' reason=' + reason, 'event');
+        const ok = await restartClientSession('panel_restart_whatsapp:' + reason, 7000);
+        return ok ? 'whatsapp_restarted' : 'whatsapp_restart_skipped';
+      }
       EscribirLog('Accion RESTART SCRIPT recibida: action=' + action + ' reason=' + reason, 'event');
       const ok = await restartScriptFromPanel('panel_restart:' + (reason || action));
       return ok ? 'script_restart_exit_scheduled' : 'script_restart_skipped';
