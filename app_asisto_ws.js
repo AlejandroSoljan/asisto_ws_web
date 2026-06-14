@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.74  14/06/2026   */
+/*version: 4.00.75  14/06/2026   */
 
 
 
@@ -1028,7 +1028,51 @@ let auto_update_post_update_cmd = String(process.env.AUTO_UPDATE_POST_UPDATE_CMD
 let autoUpdateTimer = null;
 let autoUpdateRunning = false;
 let autoUpdateRestarting = false;
+let fastSupervisorExitInFlight = false;
 
+function getSupervisorRestartExitCode() {
+  const raw = process.env.ASISTO_RESTART_EXIT_CODE || process.env.RESTART_EXIT_CODE || '77';
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 && n <= 255 ? Math.trunc(n) : 77;
+}
+
+function clearRuntimeTimersForExit(reason = '') {
+  try { if (autoUpdateTimer) { clearInterval(autoUpdateTimer); autoUpdateTimer = null; } } catch {}
+  try { if (runtimeConfigPollTimer) { clearInterval(runtimeConfigPollTimer); runtimeConfigPollTimer = null; } } catch {}
+  try { if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; } } catch {}
+  try { if (actionTimer) { clearInterval(actionTimer); actionTimer = null; } } catch {}
+  try { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } } catch {}
+  try { clearAuthReadyWatchdog(String(reason || 'supervisor_exit')); } catch {}
+}
+
+function timeoutPromise(ms, label = 'timeout') {
+  return new Promise((resolve) => setTimeout(() => resolve(label), Math.max(0, Number(ms) || 0)));
+}
+
+async function fastExitForSupervisorRestart(reason = 'SUPERVISOR_RESTART', exitCode = getSupervisorRestartExitCode()) {
+  if (fastSupervisorExitInFlight) return;
+  fastSupervisorExitInFlight = true;
+
+  const code = Number.isFinite(Number(exitCode)) ? Math.trunc(Number(exitCode)) : getSupervisorRestartExitCode();
+  const msg = `[PROCESS_EXIT] ${String(reason || 'SUPERVISOR_RESTART')} -> salida rapida para reinicio por supervisor exitCode=${code}`;
+  try { console.log(msg); } catch {}
+  try { EscribirLog(msg, 'event'); } catch {}
+
+  clearRuntimeTimersForExit(reason);
+
+  // En auto-update/reinicio supervisado NO esperamos destroyClientHard/client.destroy(),
+  // porque WhatsApp Web/Puppeteer puede quedar colgado en Windows.
+  // Liberamos estado/lock con timeout corto y dejamos que el runner/PM2 levante el nuevo proceso.
+  try { resetClientRuntimeFlags('fast_exit:' + String(reason || '')); } catch {}
+  try { localWsPanelState = 'offline'; } catch {}
+  try { await Promise.race([updateLockStateSafe('offline'), timeoutPromise(1200, 'update_lock_timeout')]); } catch {}
+  try { await Promise.race([forceReleaseLock('offline'), timeoutPromise(1800, 'release_lock_timeout')]); } catch {}
+  try { isOwner = false; } catch {}
+
+  try { process.exitCode = code; } catch {}
+  setTimeout(() => { try { process.exit(code); } catch {} }, 100);
+  setTimeout(() => { try { process.exit(code); } catch {} }, 1500);
+}
 // opcional para proteger /status
 
 function isRemoteAuthMode() {
@@ -1375,7 +1419,7 @@ async function autoUpdateForceTargetTagOnBoot(reason = 'boot_target_tag_force') 
   if (auto_update_restart_on_apply) {
     autoUpdateRestarting = true;
     autoUpdateLog('[AUTO_UPDATE] reiniciando proceso para aplicar actualización forzada...', 'event');
-    setTimeout(() => { gracefulShutdown('AUTO_UPDATE_FORCE_BOOT'); }, 1200);
+    setTimeout(() => { fastExitForSupervisorRestart('AUTO_UPDATE_FORCE_BOOT'); }, 1200);
   }
   return true;
 }
@@ -1450,7 +1494,7 @@ async function autoUpdateCheckAndApply(reason = 'interval') {
     if (auto_update_restart_on_apply) {
       autoUpdateRestarting = true;
       autoUpdateLog('[AUTO_UPDATE] reiniciando proceso para aplicar actualización...', 'event');
-      setTimeout(() => { gracefulShutdown('AUTO_UPDATE'); }, 1200);
+      setTimeout(() => { fastExitForSupervisorRestart('AUTO_UPDATE'); }, 1200);
     }
   } catch (e) {
     autoUpdateLog(`[AUTO_UPDATE] error (${reason}): ${e?.message || e}`, 'error');
@@ -3091,6 +3135,9 @@ function startActionPoller() {
 
 
 async function gracefulShutdown(signal) {
+  if (String(signal || '').startsWith('AUTO_UPDATE')) {
+    return fastExitForSupervisorRestart(signal);
+  }
   try { sessionLog(`[SHUTDOWN] ${signal} -> cerrando WhatsApp...`); } catch {}
   try { if (autoUpdateTimer) { clearInterval(autoUpdateTimer); autoUpdateTimer = null; } } catch {}
   try { if (runtimeConfigPollTimer) { clearInterval(runtimeConfigPollTimer); runtimeConfigPollTimer = null; } } catch {}
@@ -3108,6 +3155,23 @@ async function gracefulShutdown(signal) {
   process.exit(0);
 
 }
+process.on('unhandledRejection', (reason) => {
+  try {
+    const msg = '[FATAL] unhandledRejection: ' + String(reason?.stack || reason?.message || reason);
+    console.error(msg);
+    EscribirLog(msg, 'error');
+  } catch {}
+  fastExitForSupervisorRestart('FATAL_UNHANDLED_REJECTION').catch(() => { try { process.exit(getSupervisorRestartExitCode()); } catch {} });
+});
+
+process.on('uncaughtException', (err) => {
+  try {
+    const msg = '[FATAL] uncaughtException: ' + String(err?.stack || err?.message || err);
+    console.error(msg);
+    EscribirLog(msg, 'error');
+  } catch {}
+  fastExitForSupervisorRestart('FATAL_UNCAUGHT_EXCEPTION').catch(() => { try { process.exit(getSupervisorRestartExitCode()); } catch {} });
+});
 
 process.on("SIGINT", () => { gracefulShutdown("SIGINT"); });
 process.on("SIGTERM", () => { gracefulShutdown("SIGTERM"); });
