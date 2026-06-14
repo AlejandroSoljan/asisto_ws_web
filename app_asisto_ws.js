@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.73  12/06/2026   */
+/*version: 4.00.74  14/06/2026   */
 
 
 
@@ -61,6 +61,99 @@ function getPanelRestartMode() {
     'task_runner'
   );
 }
+
+
+
+// =========================
+// Reinicio automático por error fatal
+// =========================
+// IMPORTANTE:
+// - El script NO intenta relanzarse solo.
+// - Si corre con Tarea Programada, la tarea debe ejecutar asisto_ws_runner.cmd.
+// - Ante un error fatal, salimos con código distinto de 0 para que el runner
+//   vuelva a iniciar el script.
+const FATAL_PROCESS_EXIT_CODE = Number(
+  process.env.ASISTO_FATAL_EXIT_CODE ||
+  process.env.ASISTO_CRASH_EXIT_CODE ||
+  88
+);
+
+let fatalProcessExitInProgress = false;
+
+function fatalReasonToString(reason) {
+  try {
+    if (reason instanceof Error) return (reason.stack || reason.message || String(reason));
+    if (typeof reason === 'string') return reason;
+    return JSON.stringify(reason);
+  } catch {
+    return String(reason);
+  }
+}
+
+function writeFatalProcessLog(label, reason) {
+  const text = fatalReasonToString(reason);
+  const line = '[FATAL] ' + String(label || 'fatal') + ' -> ' + text;
+
+  try { console.error(line); } catch {}
+  try {
+    if (typeof EscribirLog === 'function') EscribirLog(line, 'error');
+  } catch {}
+
+  try {
+    const logsDir = path.join(__dirname, 'logs');
+    try { fs.mkdirSync(logsDir, { recursive: true }); } catch {}
+    fs.appendFileSync(
+      path.join(logsDir, 'asisto-fatal.log'),
+      '[' + new Date().toISOString() + '] pid=' + process.pid + ' ' + line + '\n',
+      'utf8'
+    );
+  } catch {}
+}
+
+function exitForFatalProcessError(label, reason) {
+  if (fatalProcessExitInProgress) return;
+  fatalProcessExitInProgress = true;
+
+  const exitCode = Number.isFinite(FATAL_PROCESS_EXIT_CODE) && FATAL_PROCESS_EXIT_CODE !== 0
+    ? FATAL_PROCESS_EXIT_CODE
+    : 88;
+
+  writeFatalProcessLog(label, reason);
+
+  try { localWsPanelState = 'crashed'; } catch {}
+
+  // Intento rápido de liberar estado/lock, sin bloquear el cierre.
+  try {
+    Promise.resolve()
+      .then(async () => {
+        try {
+          if (typeof updateLockStateSafe === 'function') await updateLockStateSafe('crashed');
+        } catch {}
+        try {
+          if (typeof forceReleaseLock === 'function') await forceReleaseLock('crashed');
+        } catch {}
+      })
+      .catch(() => {});
+  } catch {}
+
+  try { process.exitCode = exitCode; } catch {}
+  try {
+    const t = setTimeout(() => {
+      try { process.exit(exitCode); } catch {}
+    }, 1500);
+    if (t && typeof t.unref === 'function') t.unref();
+  } catch {
+    try { process.exit(exitCode); } catch {}
+  }
+}
+
+process.on('unhandledRejection', (reason) => {
+  exitForFatalProcessError('unhandledRejection', reason);
+});
+
+process.on('uncaughtException', (err) => {
+  exitForFatalProcessError('uncaughtException', err);
+});
 
 // =========================
 // Multi-PC failover (Opción B)
