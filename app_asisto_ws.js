@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.77  22/06/2026   */
+/*version: 4.00.78  22/06/2026   */
 
 
 
@@ -558,6 +558,40 @@ function stripWhatsappSuffix(value) {
 
 function onlyDigits(value) {
   return String(value || '').replace(/\D/g, '');
+}
+
+function normalizarNroTelFromApiMensajes(value) {
+  const n = onlyDigits(value || '');
+  if (!n) return '';
+
+  // En Argentina, el usuario del API está registrado como 549 + número local.
+  // WhatsApp/QR puede dejar el teléfono como 346..., 54346... o 549346...
+  if (n.startsWith('549')) return n;
+  if (n.startsWith('54') && !n.startsWith('549') && n.length >= 12) return '549' + n.slice(2);
+  if (n.length === 10 && n.startsWith('3')) return '549' + n;
+  return n;
+}
+
+function getApiMensajesNroTelFrom() {
+  const candidatos = [
+    tenantConfig?.api_mensajes_nro_tel_from,
+    tenantConfig?.apiMensajesNroTelFrom,
+    tenantConfig?.api_mensajes_alta_nro_tel_from,
+    tenantConfig?.apiMensajesAltaNroTelFrom,
+    tenantConfig?.nro_tel_from,
+    tenantConfig?.nroTelFrom,
+    tenantConfig?.telefono_qr,
+    tenantConfig?.telefonoQr,
+    numero,
+    telefono_qr,
+    telefono_local
+  ];
+
+  for (const c of candidatos) {
+    const n = normalizarNroTelFromApiMensajes(c);
+    if (n) return n;
+  }
+  return '';
 }
 
 function looksLikeLid(value) {
@@ -1582,7 +1616,7 @@ var api = "http://managermsm.ddns.net:2002/v200/api/Api_Chat_Cab/ProcesarMensaje
 // API de consulta/envío de mensajes salientes. Por defecto queda deshabilitada
 // hasta activarla en tenant_config o por variables de entorno.
 var api2 = String(process.env.API_MENSAJES_CONSULTA || process.env.API2 || "http://managermsm.ddns.net:2002/v200/api/Api_Mensajes/Consulta_no_enviados");
-var api3 = String(process.env.API_MENSAJES_ACTUALIZA || process.env.API3 || "http://managermsm.ddns.net:2002/v200/api/Api_Mensajes/Actualiza_mensaje");
+var api3 = String(process.env.API_MENSAJES_ACTUALIZA || process.env.API3 || "http://managermsm.ddns.net:2002/v200/api/Api_Mensajes/Actualiza_mensaje_destinatario");
 var key = String(process.env.API_MENSAJES_KEY || process.env.API_KEY || process.env.KEY || 'FMM0325*');
 
 
@@ -4742,9 +4776,12 @@ async function actualizar_estado_mensaje(urlBase, estado, tipo, nombre, contacto
   try {
     if (!urlBase) return false;
 
-    // La API de Manager para Actualiza_mensaje trabaja de forma compatible con GET
-    // usando estos nombres de parámetros. No enviamos duplicados Estado/estado ni
-    // Id/id porque algunos clientes/API terminan rechazando la actualización.
+    // Actualiza_mensaje_destinatario trabaja como en Postman:
+    // POST URL?key=...&nro_tel_from=... con JSON en el body.
+    // Mantengo la misma función, sin helpers nuevos, y corrijo también si en Mongo quedó
+    // configurado el endpoint viejo /Actualiza_mensaje.
+    const urlPost = String(urlBase || '').trim().replace(/\/Actualiza_mensaje(?=($|[?#]))/i, '/Actualiza_mensaje_destinatario');
+
     const paramsGet = {
       estado,
       tipo,
@@ -4757,15 +4794,14 @@ async function actualizar_estado_mensaje(urlBase, estado, tipo, nombre, contacto
     };
 
     const payloadPost = {
-      estado,
-      tipo,
-      nombre,
-      contacto,
-      direccion,
-      Direccion: direccion,
-      email,
-      id_msj_renglon,
-      id_msj_dest
+      Id_Msj_Renglon: id_msj_renglon,
+      Id_Msj_Dest: id_msj_dest,
+      Estado: estado,
+      Tipo: tipo == null ? null : tipo,
+      Nombre: nombre == null ? null : nombre,
+      Contacto: contacto == null ? null : contacto,
+      Direccion: direccion == null ? null : direccion,
+      Email: email == null ? null : email
     };
 
     const configuredMethod = String(
@@ -4775,16 +4811,16 @@ async function actualizar_estado_mensaje(urlBase, estado, tipo, nombre, contacto
       ''
     ).trim().toUpperCase();
 
-    // Si no se configura nada, usar GET como el runtime de Telegram y como espera
-    // el endpoint Actualiza_mensaje histórico.
-    const method = configuredMethod || 'GET';
+    // Default correcto: POST. Si quedó GET de pruebas anteriores, no lo uso como principal
+    // porque ese endpoint devuelve 404 por GET.
+    const method = configuredMethod && configuredMethod !== 'GET' ? configuredMethod : 'POST';
 
 
     const fallbackGet = parseBoolLike(
       tenantConfig?.api_actualiza_mensajes_fallback_get ??
       tenantConfig?.apiActualizaMensajesFallbackGet ??
       process.env.API_MENSAJES_ACTUALIZA_FALLBACK_GET,
-      true
+      false
     );
 
     const fallbackPost = parseBoolLike(
@@ -4799,7 +4835,7 @@ async function actualizar_estado_mensaje(urlBase, estado, tipo, nombre, contacto
       ' id_msj_renglon=' + String(id_msj_renglon || '');
 
     async function tryGet(label) {
-      const getUrl = buildUrlWithParams(urlBase, paramsGet);
+      const getUrl = buildUrlWithParams(urlPost, paramsGet);
       const res = await fetchTextSafe(getUrl, { method: 'GET' });
       if (res.ok && !apiMensajesResponseIndicaError(res.text)) return true;
       const detalle = logPrefix + ' ' + label + ' GET HTTP ' + res.status + ': ' + apiMensajesResponseDetalle(res.text);
@@ -4809,29 +4845,25 @@ async function actualizar_estado_mensaje(urlBase, estado, tipo, nombre, contacto
     }
 
     async function tryPost(label) {
-      const res = await fetchTextSafe(String(urlBase || '').trim(), {
-        method: method === 'GET' ? 'POST' : method,
+      const res = await fetchTextSafe(urlPost, {
+        method,
         headers: { 'Content-Type': 'application/json; charset=UTF-8' },
         body: JSON.stringify(payloadPost)
       });
       if (res.ok && !apiMensajesResponseIndicaError(res.text)) return true;
-      const detalle = logPrefix + ' ' + label + ' ' + (method === 'GET' ? 'POST' : method) + ' HTTP ' + res.status + ': ' + apiMensajesResponseDetalle(res.text);
+      const detalle = logPrefix + ' ' + label + ' ' + method + ' HTTP ' + res.status + ': ' + apiMensajesResponseDetalle(res.text);
       console.log(detalle);
       EscribirLog(detalle, 'error');
      return false;
     }
 
-    if (method === 'GET') {
-      if (await tryGet('principal')) return true;
-      if (fallbackPost && await tryPost('fallback')) return true;
-      return false;
-    }
+    
     if (await tryPost('principal')) return true;
     if (fallbackGet && await tryGet('fallback')) {
       EscribirLog(logPrefix + ' OK por fallback GET', 'event');
       return true;
     }
-
+    if (fallbackPost && await tryPost('fallback')) return true;
 
     return false;
   } catch (e) {
