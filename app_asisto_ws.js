@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.75  14/06/2026   */
+/*version: 4.00.76  22/06/2026   */
 
 
 
@@ -3628,9 +3628,12 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
           ' ok=' + String(updOk);
         console.log(logE);
         EscribirLog(logE, updOk ? 'event' : 'error');
-        ok++;
+        
         ultimoNro = to;
-        await col.updateOne({ _id: doc._id }, { $unset: { [`pendientes.${pendingKey}`]: '' }, $set: { pendientesUpdatedAt: new Date(), updatedAt: new Date() } });
+        if (updOk) {
+          ok++;
+          await col.updateOne({ _id: doc._id }, { $unset: { [`pendientes.${pendingKey}`]: '' }, $set: { pendientesUpdatedAt: new Date(), updatedAt: new Date() } });
+        }
       }
     } catch (e) {
       try { EscribirLog('[API_MENSAJES_CONFIRMACION] error procesando pendiente key=' + pendingKey + ': ' + String(e?.message || e), 'error'); } catch {}
@@ -4466,7 +4469,13 @@ async function ConsultaApiMensajes(){
 
 
                 
-            await actualizar_estado_mensaje(url_confirma_msg, 'E', tipo, nombre, contacto, direccion, email, Id_msj_renglon_local, Id_msj_dest_local);
+            const okEstadoE = await actualizar_estado_mensaje(url_confirma_msg, 'E', tipo, nombre, contacto, direccion, email, Id_msj_renglon_local, Id_msj_dest_local);
+            const logEstadoE = '[API_MENSAJES] estado E actualizado nro=' + Nro_tel +
+              ' id_msj_dest=' + String(Id_msj_dest_local || '') +
+              ' id_msj_renglon=' + String(Id_msj_renglon_local || '') +
+              ' ok=' + String(okEstadoE);
+            console.log(logEstadoE);
+            EscribirLog(logEstadoE, okEstadoE ? 'event' : 'error');
             ultimoNroTelConsultaMensajes = Nro_tel;
           }
           
@@ -4672,6 +4681,28 @@ async function fetchTextSafe(url, options) {
   return { ok: !!resp.ok, status: resp.status, text };
 }
 
+function apiMensajesResponseIndicaError(text) {
+  try {
+    const raw = String(text || '').trim();
+    if (!raw) return false;
+    const data = JSON.parse(raw);
+    const arr = Array.isArray(data) ? data : [data];
+    for (const item of arr) {
+      if (!item || typeof item !== 'object') continue;
+      const code = item.Error_Code ?? item.error_code ?? item.codigo_error ?? item.CodigoError;
+      if (code !== undefined && code !== null && String(code).trim() !== '' && String(code).trim() !== '0') return true;
+      const ok = item.Ok ?? item.ok ?? item.Success ?? item.success;
+      if (ok === false || String(ok).trim().toLowerCase() === 'false') return true;
+    }
+  } catch {}
+  return false;
+}
+
+function apiMensajesResponseDetalle(text) {
+  const raw = String(text || '').trim();
+  return raw ? raw.slice(0, 500) : '(sin cuerpo)';
+}
+
 
 async function actualizar_estado_mensaje(urlBase, estado, tipo, nombre, contacto, direccion, email, id_msj_renglon, id_msj_dest) {
   try {
@@ -4705,34 +4736,46 @@ async function actualizar_estado_mensaje(urlBase, estado, tipo, nombre, contacto
       'POST'
     ).trim().toUpperCase();
 
-    const postRes = await fetchTextSafe(String(urlBase || '').trim(), {
-      method: method || 'POST',
-      headers: { 'Content-Type': 'application/json; charset=UTF-8' },
-      body: JSON.stringify(payload)
-    });
-
-    if (postRes.ok) return true;
-
-    EscribirLog('actualizar_estado_mensaje ' + (method || 'POST') + ' HTTP ' + postRes.status + ': ' + postRes.text, 'error');
-
-    // Fallback opcional para no romper si algún dominio viejo todavía esperaba GET.
     const fallbackGet = parseBoolLike(
       tenantConfig?.api_actualiza_mensajes_fallback_get ??
       tenantConfig?.apiActualizaMensajesFallbackGet ??
       process.env.API_MENSAJES_ACTUALIZA_FALLBACK_GET,
       true
     );
+    const logPrefix = 'actualizar_estado_mensaje estado=' + String(estado || '') +
+      ' id_msj_dest=' + String(id_msj_dest || '') +
+      ' id_msj_renglon=' + String(id_msj_renglon || '');
 
-    if (!fallbackGet || method === 'GET') return false;
+    if (method === 'GET') {
+      const getUrl = buildUrlWithParams(urlBase, payload);
+      const getRes = await fetchTextSafe(getUrl, { method: 'GET' });
+      if (getRes.ok && !apiMensajesResponseIndicaError(getRes.text)) return true;
+      EscribirLog(logPrefix + ' GET HTTP ' + getRes.status + ': ' + apiMensajesResponseDetalle(getRes.text), 'error');
+      return false;
+    }
+
+
+    const postRes = await fetchTextSafe(String(urlBase || '').trim(), {
+      method: method || 'POST',
+      headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+      body: JSON.stringify(payload)
+    });
+
+    if (postRes.ok && !apiMensajesResponseIndicaError(postRes.text)) return true;
+
+    EscribirLog(logPrefix + ' ' + (method || 'POST') + ' HTTP ' + postRes.status + ': ' + apiMensajesResponseDetalle(postRes.text), 'error');
+
+        // Fallback para dominios/API que responden 200 con Error_Code, o que todavía esperan parámetros por GET.
+    if (!fallbackGet) return false;
 
     const getUrl = buildUrlWithParams(urlBase, payload);
     const getRes = await fetchTextSafe(getUrl, { method: 'GET' });
-    if (getRes.ok) {
-      EscribirLog('actualizar_estado_mensaje OK por fallback GET', 'event');
+    if (getRes.ok && !apiMensajesResponseIndicaError(getRes.text)) {
+      EscribirLog(logPrefix + ' OK por fallback GET', 'event');
       return true;
     }
 
-    EscribirLog('actualizar_estado_mensaje fallback GET HTTP ' + getRes.status + ': ' + getRes.text, 'error');
+    EscribirLog(logPrefix + ' fallback GET HTTP ' + getRes.status + ': ' + apiMensajesResponseDetalle(getRes.text), 'error');
     return false;
   } catch (e) {
     EscribirLog('actualizar_estado_mensaje error: ' + String(e?.message || e), 'error');
