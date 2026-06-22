@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.76  22/06/2026   */
+/*version: 4.00.77  22/06/2026   */
 
 
 
@@ -1584,6 +1584,40 @@ var api = "http://managermsm.ddns.net:2002/v200/api/Api_Chat_Cab/ProcesarMensaje
 var api2 = String(process.env.API_MENSAJES_CONSULTA || process.env.API2 || "http://managermsm.ddns.net:2002/v200/api/Api_Mensajes/Consulta_no_enviados");
 var api3 = String(process.env.API_MENSAJES_ACTUALIZA || process.env.API3 || "http://managermsm.ddns.net:2002/v200/api/Api_Mensajes/Actualiza_mensaje");
 var key = String(process.env.API_MENSAJES_KEY || process.env.API_KEY || process.env.KEY || 'FMM0325*');
+
+
+function normalizarNroTelFromApiMensajes(value) {
+  const d = onlyDigits(value || '');
+  if (!d) return '';
+  if (d.startsWith('549')) return d;
+  // Argentina: el usuario API está registrado con 549 + característica + número.
+  // Si WhatsApp/client.info entrega 54 sin el 9, o solo el número local, lo corregimos.
+  if (d.startsWith('54') && !d.startsWith('549') && d.length >= 12) return '549' + d.slice(2);
+  if (d.length === 10 && d.startsWith('3')) return '549' + d;
+  return d;
+}
+
+function getApiMensajesNroTelFrom() {
+  const candidatos = [
+    tenantConfig?.api_mensajes_nro_tel_from,
+   tenantConfig?.apiMensajesNroTelFrom,
+    tenantConfig?.api_mensajes_alta_nro_tel_from,
+    tenantConfig?.apiMensajesAltaNroTelFrom,
+    tenantConfig?.nro_tel_from,
+    tenantConfig?.nroTelFrom,
+    process.env.API_MENSAJES_NRO_TEL_FROM,
+    process.env.API_MENSAJES_ALTA_NRO_TEL_FROM,
+    telefono_qr,
+    numero,
+    telefono_local
+  ];
+  for (const v of candidatos) {
+    const n = normalizarNroTelFromApiMensajes(v);
+    if (n) return n;
+  }
+  return '';
+}
+
 var habilitar_bot = parseBoolLike(
   process.env.HABILITAR_BOT || process.env.BOT_HABILITADO || process.env.ENABLE_BOT,
   true
@@ -3337,7 +3371,7 @@ function apiMensajesConfirmacionCollection() {
 
 function apiMensajesConfirmacionId(nroTel) {
   const t = String(tenantId || 'DEFAULT').trim().toUpperCase();
-  const from = onlyDigits(telefono_qr || numero || '');
+  const from = getApiMensajesNroTelFrom();
   const to = onlyDigits(nroTel || '');
   return `${t}:${from}:${to}`;
 }
@@ -3347,7 +3381,7 @@ function apiMensajesConfirmacionTenantId() {
 }
 
 function apiMensajesConfirmacionNumeroFrom() {
-  return onlyDigits(telefono_qr || numero || '');
+  return getApiMensajesNroTelFrom();
 }
 
 function addUniquePhoneCandidate(list, value) {
@@ -3468,7 +3502,7 @@ function pendientesConfirmacionApiMensajesArray(doc) {
 }
 
 function buildUrlConfirmaApiMensajes() {
-  const nroTelFrom = onlyDigits(telefono_qr || numero || '');
+  const nroTelFrom = getApiMensajesNroTelFrom();
   return buildUrlWithParams(api3, { key, nro_tel_from: nroTelFrom });
 }
 
@@ -3980,7 +4014,7 @@ async function estadoConfirmacionApiMensajes(nroTel) {
         $setOnInsert: { createdAt: now },
         $set: {
           tenantId: String(tenantId || '').toUpperCase(),
-          numeroFrom: onlyDigits(telefono_qr || numero || ''),
+          numeroFrom: getApiMensajesNroTelFrom(),
           nroTel: to,
           estado: 'pendiente',
           pedidoAt: now,
@@ -4285,7 +4319,7 @@ async function ConsultaApiMensajes(){
         continue;
       }
 
-      const nroTelFrom = onlyDigits(telefono_qr || numero || '');
+      const nroTelFrom = getApiMensajesNroTelFrom();
       if (!api2 || !api3 || !key || !nroTelFrom) {
         const detalle = `ConsultaApiMensajes sin configuración completa api2=${!!api2} api3=${!!api3} key=${!!key} nro_tel_from=${nroTelFrom || '(vacío)'}`;
         console.log(detalle);
@@ -4566,7 +4600,7 @@ function canStartConsultaApiMensajesNow() {
     if (lastPolicyBlocked === true) return false;
     if (!client) return false;
     if (localWsPanelState !== 'online') return false;
-    if (!onlyDigits(telefono_qr || numero || '')) return false;
+    if (!getApiMensajesNroTelFrom()) return false;
     return true;
   } catch {
     return false;
@@ -4707,34 +4741,44 @@ function apiMensajesResponseDetalle(text) {
 async function actualizar_estado_mensaje(urlBase, estado, tipo, nombre, contacto, direccion, email, id_msj_renglon, id_msj_dest) {
   try {
     if (!urlBase) return false;
-        const payload = {
+
+    // La API de Manager para Actualiza_mensaje trabaja de forma compatible con GET
+    // usando estos nombres de parámetros. No enviamos duplicados Estado/estado ni
+    // Id/id porque algunos clientes/API terminan rechazando la actualización.
+    const paramsGet = {
       estado,
-      Estado: estado,
       tipo,
-      Tipo: tipo,
       nombre,
-      Nombre: nombre,
       contacto,
-      Contacto: contacto,
+      direccion,
+      email,
+      Id_msj_renglon: id_msj_renglon,
+      Id_msj_dest: id_msj_dest
+    };
+
+    const payloadPost = {
+      estado,
+      tipo,
+      nombre,
+      contacto,
       direccion,
       Direccion: direccion,
       email,
-      Email: email,
-      Id_msj_renglon: id_msj_renglon,
       id_msj_renglon,
-      Id_msj_dest: id_msj_dest,
       id_msj_dest
     };
 
-    // La URL base conserva key y nro_tel_from:
-    // /api/Api_Mensajes/Actualiza_mensaje?key=...&nro_tel_from=...
-    // Los datos del estado se envían por POST en JSON.
-    const method = String(
+    const configuredMethod = String(
       tenantConfig?.api_actualiza_mensajes_method ||
       tenantConfig?.apiActualizaMensajesMethod ||
       process.env.API_MENSAJES_ACTUALIZA_METHOD ||
-      'POST'
+      ''
     ).trim().toUpperCase();
+
+    // Si no se configura nada, usar GET como el runtime de Telegram y como espera
+    // el endpoint Actualiza_mensaje histórico.
+    const method = configuredMethod || 'GET';
+
 
     const fallbackGet = parseBoolLike(
       tenantConfig?.api_actualiza_mensajes_fallback_get ??
@@ -4742,47 +4786,58 @@ async function actualizar_estado_mensaje(urlBase, estado, tipo, nombre, contacto
       process.env.API_MENSAJES_ACTUALIZA_FALLBACK_GET,
       true
     );
+
+    const fallbackPost = parseBoolLike(
+      tenantConfig?.api_actualiza_mensajes_fallback_post ??
+      tenantConfig?.apiActualizaMensajesFallbackPost ??
+      process.env.API_MENSAJES_ACTUALIZA_FALLBACK_POST,
+      false
+    );
+
     const logPrefix = 'actualizar_estado_mensaje estado=' + String(estado || '') +
       ' id_msj_dest=' + String(id_msj_dest || '') +
       ' id_msj_renglon=' + String(id_msj_renglon || '');
 
-    if (method === 'GET') {
-      const getUrl = buildUrlWithParams(urlBase, payload);
-      const getRes = await fetchTextSafe(getUrl, { method: 'GET' });
-      if (getRes.ok && !apiMensajesResponseIndicaError(getRes.text)) return true;
-      EscribirLog(logPrefix + ' GET HTTP ' + getRes.status + ': ' + apiMensajesResponseDetalle(getRes.text), 'error');
+    async function tryGet(label) {
+      const getUrl = buildUrlWithParams(urlBase, paramsGet);
+      const res = await fetchTextSafe(getUrl, { method: 'GET' });
+      if (res.ok && !apiMensajesResponseIndicaError(res.text)) return true;
+      const detalle = logPrefix + ' ' + label + ' GET HTTP ' + res.status + ': ' + apiMensajesResponseDetalle(res.text);
+      console.log(detalle);
+      EscribirLog(detalle, 'error');
       return false;
     }
 
+    async function tryPost(label) {
+      const res = await fetchTextSafe(String(urlBase || '').trim(), {
+        method: method === 'GET' ? 'POST' : method,
+        headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+        body: JSON.stringify(payloadPost)
+      });
+      if (res.ok && !apiMensajesResponseIndicaError(res.text)) return true;
+      const detalle = logPrefix + ' ' + label + ' ' + (method === 'GET' ? 'POST' : method) + ' HTTP ' + res.status + ': ' + apiMensajesResponseDetalle(res.text);
+      console.log(detalle);
+      EscribirLog(detalle, 'error');
+     return false;
+    }
 
-    const postRes = await fetchTextSafe(String(urlBase || '').trim(), {
-      method: method || 'POST',
-      headers: { 'Content-Type': 'application/json; charset=UTF-8' },
-      body: JSON.stringify(payload)
-    });
-
-    if (postRes.ok && !apiMensajesResponseIndicaError(postRes.text)) return true;
-
-    EscribirLog(logPrefix + ' ' + (method || 'POST') + ' HTTP ' + postRes.status + ': ' + apiMensajesResponseDetalle(postRes.text), 'error');
-
-        // Fallback para dominios/API que responden 200 con Error_Code, o que todavía esperan parámetros por GET.
-    if (!fallbackGet) return false;
-
-    const getUrl = buildUrlWithParams(urlBase, payload);
-    const getRes = await fetchTextSafe(getUrl, { method: 'GET' });
-    if (getRes.ok && !apiMensajesResponseIndicaError(getRes.text)) {
+    if (method === 'GET') {
+      if (await tryGet('principal')) return true;
+      if (fallbackPost && await tryPost('fallback')) return true;
+      return false;
+    }
+    if (await tryPost('principal')) return true;
+    if (fallbackGet && await tryGet('fallback')) {
       EscribirLog(logPrefix + ' OK por fallback GET', 'event');
       return true;
     }
 
-    EscribirLog(logPrefix + ' fallback GET HTTP ' + getRes.status + ': ' + apiMensajesResponseDetalle(getRes.text), 'error');
+
     return false;
   } catch (e) {
     EscribirLog('actualizar_estado_mensaje error: ' + String(e?.message || e), 'error');
     return false;
   }
-  
-
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -5024,7 +5079,7 @@ client.on('message_create', async message => {
   try {
     try {
       const b = String(message?.body || message?._data?.body || '').trim();
-      if (b && respuestaConfirmaApiMensajes(b)) {
+      if (api_mensajes_confirmacion_habilitada === true && b && respuestaConfirmaApiMensajes(b)) {
         logConfirmacionDebug('[API_MENSAJES_CONFIRMACION_DEBUG] message_create raw fromMe=' + String(!!message?.fromMe) +
           ' from=' + String(message?.from || message?._data?.from || '') +
           ' to=' + String(message?.to || message?._data?.to || '') +
@@ -5042,6 +5097,9 @@ client.on('message_create', async message => {
       // se permite fallback por única confirmación pendiente.
       try {
         const body = String(message?.body || message?._data?.body || '').trim();
+        if (api_mensajes_confirmacion_habilitada !== true) {
+          return;
+        }
         if (body && respuestaConfirmaApiMensajes(body)) {
           const targetRaw = getOutgoingConfirmacionTargetRaw(message) || '__confirmacion_fromme_fallback__';
           logConfirmacionDebug('[API_MENSAJES_CONFIRMACION_DEBUG] OK saliente detectado fromMe=true target=' + targetRaw +
