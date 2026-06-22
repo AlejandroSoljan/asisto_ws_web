@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.78  22/06/2026   */
+/*version: 4.00.79  22/06/2026   */
 
 
 
@@ -4776,23 +4776,18 @@ async function actualizar_estado_mensaje(urlBase, estado, tipo, nombre, contacto
   try {
     if (!urlBase) return false;
 
-    // Actualiza_mensaje_destinatario trabaja como en Postman:
-    // POST URL?key=...&nro_tel_from=... con JSON en el body.
-    // Mantengo la misma función, sin helpers nuevos, y corrijo también si en Mongo quedó
-    // configurado el endpoint viejo /Actualiza_mensaje.
-    const urlPost = String(urlBase || '').trim().replace(/\/Actualiza_mensaje(?=($|[?#]))/i, '/Actualiza_mensaje_destinatario');
-
-    const paramsGet = {
-      estado,
-      tipo,
-      nombre,
-      contacto,
-      direccion,
-      email,
-      Id_msj_renglon: id_msj_renglon,
-      Id_msj_dest: id_msj_dest
-    };
-
+    // Mismo formato que funciona en Postman:
+    // POST /V200/api/Api_Mensajes/Actualiza_mensaje_destinatario?key=...&nro_tel_from=...
+    // Body JSON con Id_Msj_Renglon, Id_Msj_Dest y Estado.
+    let urlPost = String(urlBase || '').trim();
+    urlPost = urlPost.replace(/\/v200\//i, '/V200/');
+    if (/\/Api_Mensajes/i.test(urlPost)) {
+      urlPost = urlPost.replace(/\/Api_Mensajes(?:\/[^?#]*)?(?=($|[?#]))/i, '/Api_Mensajes/Actualiza_mensaje_destinatario');
+   } else {
+      urlPost = urlPost.replace(/\/Actualiza_mensaje(?:_destinatario)?\/?(?=($|[?#]))/i, '/Actualiza_mensaje_destinatario');
+    }
+    urlPost = urlPost.replace(/\/\?(?=key=|nro_tel_from=)/i, '?');
+   
     const payloadPost = {
       Id_Msj_Renglon: id_msj_renglon,
       Id_Msj_Dest: id_msj_dest,
@@ -4804,67 +4799,25 @@ async function actualizar_estado_mensaje(urlBase, estado, tipo, nombre, contacto
       Email: email == null ? null : email
     };
 
-    const configuredMethod = String(
-      tenantConfig?.api_actualiza_mensajes_method ||
-      tenantConfig?.apiActualizaMensajesMethod ||
-      process.env.API_MENSAJES_ACTUALIZA_METHOD ||
-      ''
-    ).trim().toUpperCase();
-
-    // Default correcto: POST. Si quedó GET de pruebas anteriores, no lo uso como principal
-    // porque ese endpoint devuelve 404 por GET.
-    const method = configuredMethod && configuredMethod !== 'GET' ? configuredMethod : 'POST';
-
-
-    const fallbackGet = parseBoolLike(
-      tenantConfig?.api_actualiza_mensajes_fallback_get ??
-      tenantConfig?.apiActualizaMensajesFallbackGet ??
-      process.env.API_MENSAJES_ACTUALIZA_FALLBACK_GET,
-      false
-    );
-
-    const fallbackPost = parseBoolLike(
-      tenantConfig?.api_actualiza_mensajes_fallback_post ??
-      tenantConfig?.apiActualizaMensajesFallbackPost ??
-      process.env.API_MENSAJES_ACTUALIZA_FALLBACK_POST,
-      false
-    );
-
+ 
     const logPrefix = 'actualizar_estado_mensaje estado=' + String(estado || '') +
       ' id_msj_dest=' + String(id_msj_dest || '') +
       ' id_msj_renglon=' + String(id_msj_renglon || '');
 
-    async function tryGet(label) {
-      const getUrl = buildUrlWithParams(urlPost, paramsGet);
-      const res = await fetchTextSafe(getUrl, { method: 'GET' });
-      if (res.ok && !apiMensajesResponseIndicaError(res.text)) return true;
-      const detalle = logPrefix + ' ' + label + ' GET HTTP ' + res.status + ': ' + apiMensajesResponseDetalle(res.text);
-      console.log(detalle);
-      EscribirLog(detalle, 'error');
-      return false;
-    }
+    const res = await fetchTextSafe(urlPost, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payloadPost)
+    });
 
-    async function tryPost(label) {
-      const res = await fetchTextSafe(urlPost, {
-        method,
-        headers: { 'Content-Type': 'application/json; charset=UTF-8' },
-        body: JSON.stringify(payloadPost)
-      });
-      if (res.ok && !apiMensajesResponseIndicaError(res.text)) return true;
-      const detalle = logPrefix + ' ' + label + ' ' + method + ' HTTP ' + res.status + ': ' + apiMensajesResponseDetalle(res.text);
-      console.log(detalle);
-      EscribirLog(detalle, 'error');
-     return false;
-    }
+    if (res.ok && !apiMensajesResponseIndicaError(res.text)) return true;
 
-    
-    if (await tryPost('principal')) return true;
-    if (fallbackGet && await tryGet('fallback')) {
-      EscribirLog(logPrefix + ' OK por fallback GET', 'event');
-      return true;
-    }
-    if (fallbackPost && await tryPost('fallback')) return true;
-
+    const urlLog = String(urlPost || '').replace(/([?&]key=)[^&]*/i, '$1***');
+    const detalle = logPrefix + ' POST HTTP ' + res.status + ': ' + apiMensajesResponseDetalle(res.text) +
+      ' url=' + urlLog +
+      ' body=' + JSON.stringify(payloadPost);
+    console.log(detalle);
+    EscribirLog(detalle, 'error');
     return false;
   } catch (e) {
     EscribirLog('actualizar_estado_mensaje error: ' + String(e?.message || e), 'error');
