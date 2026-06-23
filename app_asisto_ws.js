@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.86  22/06/2026   */
+/*version: 4.00.87  22/06/2026   */
 
 
 
@@ -5333,10 +5333,22 @@ async function safeSendMessage(to, text, opts) {
   return await safeSend(to, String(text || ''), opts || { sendSeen: false });
 }
 
+function getMessageBodyText(message) {
+  return String(message?.body || message?._data?.body || '').trim();
+}
+
+function isAdminDeliveryCommandBody(body) {
+  return /^\/e(?:\s|$)/i.test(String(body || '').trim());
+}
+
+function isAdminDeliveryCommandMessage(message) {
+  return isAdminDeliveryCommandBody(getMessageBodyText(message));
+}
+
 async function handleAdminDeliveryCommand(message, source = '') {
   try {
-    const body = String(message?.body || '').trim();
-    if (!body || !/^\/e(?:\s|$)/i.test(body)) return false;
+    const body = getMessageBodyText(message);
+    if (!body || !isAdminDeliveryCommandBody(body)) return false;
 
     const isAdmin = await isAdminCommandSender(message);
     if (!isAdmin) return false;
@@ -5419,14 +5431,23 @@ async function processIncomingAsistoMessage(message, source) {
   try { await refreshTenantConfigFromDbPerMessage(); } catch {}
   try { RecuperarJsonConfMensajes(); } catch {}
 
+  if (isAdminDeliveryCommandMessage(message)) {
+   // Comando interno de entrega: NUNCA debe llegar al API principal ProcesarMensajePost.
+    // Si no es admin, también se corta acá para que /e no se procese como chat del bot.
+    const handled = await handleAdminDeliveryCommand(message, source || 'message');
+    if (!handled) {
+      try { console.log('[admin-command] /e ignorado: remitente no autorizado. No se llama al API principal. from=' + String(message?.from || '')); } catch {}
+      try { EscribirLog('[admin-command] /e ignorado: remitente no autorizado. No se llama al API principal. from=' + String(message?.from || ''), 'event'); } catch {}
+    }
+    return;
+  }
+
+
   if (await registrarRespuestaConfirmacionApiMensajes(message)) {
     return;
   }
   if (await registrarRespuestaNoValidaConfirmacionApiMensajes(message)) {
-    return;
-  }
- 
-  if (await handleAdminDeliveryCommand(message, source || 'message')) {
+    
     return;
   }
 
@@ -5657,8 +5678,9 @@ client.on('message_create', async message => {
     } catch {}
     if (message && message.fromMe === true) {
       await logOutgoingFromMessageFallback(message);
-      if (String(message?.body || message?._data?.body || '').trim().toLowerCase().startsWith('/e')) {
-        if (await handleAdminDeliveryCommand(message, 'message_create')) return;
+      if (isAdminDeliveryCommandMessage(message)) {
+        await handleAdminDeliveryCommand(message, 'message_create');
+        return;
       }
       // IMPORTANTE: si el operador prueba/autoriza desde el mismo WhatsApp Web,
       // el mensaje sale como fromMe=true. En algunas versiones message.to viene vacío;
