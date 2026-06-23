@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.87  22/06/2026   */
+/*version: 4.00.88  22/06/2026   */
 
 
 
@@ -360,6 +360,49 @@ function applyTenantConfig(conf) {
       api_mensajes_alta
     );
   }
+  if (
+    conf.api_mensajes_alta_key !== undefined ||
+    conf.apiMensajesAltaKey !== undefined ||
+    conf.key_mensajes_alta !== undefined ||
+    conf.keyMensajesAlta !== undefined ||
+    conf.api_alta_mensajes_key !== undefined ||
+    conf.apiAltaMensajesKey !== undefined ||
+    conf.key !== undefined
+  ) {
+    api_mensajes_alta_key = asString(
+      conf.api_mensajes_alta_key ??
+      conf.apiMensajesAltaKey ??
+     conf.key_mensajes_alta ??
+      conf.keyMensajesAlta ??
+      conf.api_alta_mensajes_key ??
+      conf.apiAltaMensajesKey ??
+      conf.key,
+      api_mensajes_alta_key
+    );
+  }
+
+  if (
+    conf.api_mensajes_alta_nro_tel_from !== undefined ||
+    conf.apiMensajesAltaNroTelFrom !== undefined ||
+    conf.nro_tel_from_mensajes_alta !== undefined ||
+    conf.nroTelFromMensajesAlta !== undefined ||
+    conf.api_alta_mensajes_nro_tel_from !== undefined ||
+    conf.apiAltaMensajesNroTelFrom !== undefined ||
+    conf.nro_tel_from !== undefined ||
+    conf.nroTelFrom !== undefined
+  ) {
+    api_mensajes_alta_nro_tel_from = asString(
+      conf.api_mensajes_alta_nro_tel_from ??
+      conf.apiMensajesAltaNroTelFrom ??
+      conf.nro_tel_from_mensajes_alta ??
+      conf.nroTelFromMensajesAlta ??
+      conf.api_alta_mensajes_nro_tel_from ??
+      conf.apiAltaMensajesNroTelFrom ??
+      conf.nro_tel_from ??
+      conf.nroTelFrom,
+      api_mensajes_alta_nro_tel_from
+    );
+  }
 
   if (
     conf.compra_mensajes_usar_api_alta !== undefined ||
@@ -372,10 +415,9 @@ function applyTenantConfig(conf) {
       conf.compraMensajesUsarApiAlta ??
       conf.usar_api_alta_compra ??
       conf.usarApiAltaCompra,
-      false
+      compra_mensajes_usar_api_alta
     );
-  } else {
-    compra_mensajes_usar_api_alta = false;
+  
   }
 
   if (
@@ -389,10 +431,9 @@ function applyTenantConfig(conf) {
       conf.entregaMensajesUsarApiAlta ??
       conf.usar_api_alta_entrega ??
       conf.usarApiAltaEntrega,
-      false
+      entrega_mensajes_usar_api_alta
     );
-  } else {
-    entrega_mensajes_usar_api_alta = false;
+  
   }
 
 
@@ -632,6 +673,7 @@ function normalizarNroTelFromApiMensajes(value) {
 
 function getApiMensajesNroTelFrom() {
   const candidatos = [
+    api_mensajes_alta_nro_tel_from,
     tenantConfig?.api_mensajes_nro_tel_from,
     tenantConfig?.apiMensajesNroTelFrom,
     tenantConfig?.api_mensajes_alta_nro_tel_from,
@@ -1134,6 +1176,9 @@ function clearRuntimeTimersForExit(reason = '') {
   try { if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; } } catch {}
   try { if (actionTimer) { clearInterval(actionTimer); actionTimer = null; } } catch {}
   try { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } } catch {}
+  try { compraEntregaQueryStopRequested = true; } catch {}
+  try { if (compraEntregaConnection && typeof compraEntregaConnection.close === 'function') await compraEntregaConnection.close(); } catch {}
+  try { compraEntregaConnection = null; } catch {}
   try { clearAuthReadyWatchdog(String(reason || 'supervisor_exit')); } catch {}
 }
 
@@ -1685,13 +1730,16 @@ var api_mensajes_alta = String(
   process.env.API_ALTA_MENSAJES ||
   "https://managersistemas.ddns.net:4800/v200/api/Api_Mensajes/Alta"
 );
+var api_mensajes_alta_key = String(process.env.API_MENSAJES_ALTA_KEY || process.env.API_ALTA_MENSAJES_KEY || "1234");
+var api_mensajes_alta_nro_tel_from = String(process.env.API_MENSAJES_ALTA_NRO_TEL_FROM || process.env.API_ALTA_MENSAJES_NRO_TEL_FROM || "");
+
 var compra_mensajes_usar_api_alta = parseBoolLike(
   process.env.COMPRA_MENSAJES_USAR_API_ALTA ?? process.env.USAR_API_ALTA_COMPRA,
-  false
+  true
 );
 var entrega_mensajes_usar_api_alta = parseBoolLike(
   process.env.ENTREGA_MENSAJES_USAR_API_ALTA ?? process.env.USAR_API_ALTA_ENTREGA,
-  false
+  true
 );
 
 function normalizarNroTelFromApiMensajes(value) {
@@ -1707,6 +1755,7 @@ function normalizarNroTelFromApiMensajes(value) {
 
 function getApiMensajesNroTelFrom() {
   const candidatos = [
+    api_mensajes_alta_nro_tel_from,
     tenantConfig?.api_mensajes_nro_tel_from,
    tenantConfig?.apiMensajesNroTelFrom,
     tenantConfig?.api_mensajes_alta_nro_tel_from,
@@ -4943,6 +4992,10 @@ async function refreshRuntimeDomainConfig(source = 'runtime_config_poll') {
       startConsultaApiMensajesIfEnabled(source);
     }
 
+    if ((next.compra_mensajes_usar_api_alta === true || next.entrega_mensajes_usar_api_alta === true) && client && localWsPanelState === 'online') {
+      startCompraEntregaLoopIfEnabled(source);
+    }
+
     if (prev.habilitar_consulta_mensajes === true && next.habilitar_consulta_mensajes !== true && consultaApiMensajesRunning) {
       const msg = 'ConsultaApiMensajes deshabilitado por configuración; se detendrá al finalizar el ciclo actual';
       console.log(msg);
@@ -5043,6 +5096,7 @@ function formatFechaEnvioApiMensajes(date = new Date()) {
 
 function getApiMensajesAltaKey() {
   const candidates = [
+    api_mensajes_alta_key,
     tenantConfig?.api_mensajes_alta_key,
     tenantConfig?.apiMensajesAltaKey,
     tenantConfig?.key_mensajes_alta,
@@ -5116,11 +5170,55 @@ async function altaApiMensaje({ nroTel, mensaje, identificacion1, tipo = 'MENSAJ
 }
 
 async function altaApiMensajeCompra({ nroTel, mensaje, identificacion1 }) {
-  return await altaApiMensaje({ nroTel, mensaje, identificacion1, tipo: 'COMPRA' });
+  const nroDestino = onlyDigits(nroTel);
+  const nroFrom = getApiMensajesNroTelFrom();
+  if (!api_mensajes_alta) throw new Error('api_mensajes_alta_sin_configurar');
+  if (!api_mensajes_alta_key) throw new Error('api_mensajes_alta_key_sin_configurar');
+  if (!nroFrom) throw new Error('api_mensajes_alta_nro_tel_from_sin_configurar');
+  if (!nroDestino) throw new Error('api_mensajes_alta_destinatario_invalido');
+
+  const url = buildUrlWithParams(api_mensajes_alta, {
+    key: api_mensajes_alta_key,
+    nro_tel_from: nroFrom
+  });
+
+  const body = {
+    mensaje: [
+      { fecha_envio: formatFechaEnvioApiMensajes() }
+    ],
+    lineas: [
+      { orden: 1, mensaje: String(mensaje || '') }
+    ],
+    destinatarios: [
+      {
+        orden: 1,
+        nro_tel: nroDestino,
+        identificacion1: String(identificacion1 || '')
+      }
+    ]
+  };
+
+  const resp = await axios.post(url, body, {
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    timeout: 30000
+  });
+
+  try {
+    console.log('COMPRA: API Alta OK -> ' + nroDestino + ' status=' + resp.status);
+    io.emit('message', 'COMPRA: API Alta OK -> ' + nroDestino);
+  } catch {}
+
+  return resp.data;
 }
 
 async function altaApiMensajeEntrega({ nroTel, mensaje, identificacion1 }) {
-  return await altaApiMensaje({ nroTel, mensaje, identificacion1, tipo: 'ENTREGA' });
+  const data = await altaApiMensajeCompra({ nroTel, mensaje, identificacion1 });
+  try {
+   const nroDestino = onlyDigits(nroTel);
+    console.log('ENTREGA: API Alta OK -> ' + nroDestino);
+    io.emit('message', 'ENTREGA: API Alta OK -> ' + nroDestino);
+  } catch {}
+  return data;
 }
 
 
@@ -5205,6 +5303,240 @@ async function actualizar_estado_mensaje(urlBase, estado, tipo, nombre, contacto
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+function toChatId(rawPhone) {
+  const raw = String(rawPhone ?? "");
+  let digits = raw.replace(/\D/g, "");
+  if (!digits) return null;
+  if (digits.startsWith("549")) return `${digits}@c.us`;
+  if (digits.startsWith("54")) return `549${digits.slice(2)}@c.us`;
+  return `549${digits}@c.us`;
+}
+
+function RecuperarTelefonos() {
+  try {
+    const jsonTel = JSON.parse(fs.readFileSync('C:/Chatbot_pb/telefonos.json'));
+    return jsonTel;
+  } catch (error) {
+    const jsonTel = '[{"telefono":"999999999","nombre":"-","permitir":"N"}]';
+    console.log("Sin bloqueo de telefonos...");
+    return jsonTel;
+  }
+}
+
+function validarTelefono(tel) {
+  var telefono = RecuperarTelefonos();
+  var permitir = telefono[0].permitir;
+  console.log("permitir " + permitir);
+
+  if (permitir == undefined) {
+    return true;
+  }
+
+ if (permitir == 'N') {
+    var tam = telefono.length;
+    for (var i = 0; i < tam; i++) {
+      console.log("busca en N " + '549' + telefono[i].telefono + ' ' + tel);
+      if ('549' + telefono[i].telefono == tel) {
+        console.log("existe en N " + '549' + telefono[i].telefono + ' ' + tel);
+        return false;
+      }
+    }
+    return true;
+  }
+
+  if (permitir == 'S') {
+    var tam = telefono.length;
+   for (var i = 0; i < tam; i++) {
+      console.log("busca en S " + '549' + telefono[i].telefono + ' ' + tel);
+      if ('549' + telefono[i].telefono == tel) {
+        console.log("existe en S " + '549' + telefono[i].telefono + ' ' + tel);
+        return true;
+      }
+    }
+    return false;
+  }
+}
+
+let compraEntregaQueryRunning = false;
+let compraEntregaQueryStopRequested = false;
+let compraEntregaConnection = null;
+
+async function startCompraEntregaLoopIfEnabled(source = '') {
+  try {
+    if (compra_mensajes_usar_api_alta !== true && entrega_mensajes_usar_api_alta !== true) return;
+    if (compraEntregaQueryRunning) return;
+    queryAccessComprasEntregas(source).catch((e) => {
+      compraEntregaQueryRunning = false;
+      try { console.log('queryAccessComprasEntregas fatal:', e?.message || e); } catch {}
+      try { EscribirLog('queryAccessComprasEntregas fatal: ' + String(e?.message || e), 'error'); } catch {}
+    });
+  } catch (e) {
+    try { console.log('startCompraEntregaLoopIfEnabled error:', e?.message || e); } catch {}
+    try { EscribirLog('startCompraEntregaLoopIfEnabled error: ' + String(e?.message || e), 'error'); } catch {}
+  }
+}
+
+async function queryAccessComprasEntregas(source = '') {
+  if (compraEntregaQueryRunning) {
+    try { EscribirLog('queryAccessComprasEntregas: ya estaba corriendo, no se inicia otro loop', 'event'); } catch {}
+    return;
+  }
+
+  compraEntregaQueryRunning = true;
+  compraEntregaQueryStopRequested = false;
+
+  try {
+    if (!odbc) {
+      try { EscribirLog('queryAccessComprasEntregas: odbc no disponible', 'error'); } catch {}
+      return;
+    }
+
+    if (!client || !client.info || !client.info.me) {
+      try { EscribirLog('queryAccessComprasEntregas: client.info no disponible, se omite inicio del loop', 'event'); } catch {}
+      return;
+    }
+
+    var telefono = '549' + telefono_qr + '@c.us';
+    console.log("Telefono Habilitado:" + telefono);
+    console.log("cliente:" + client.info.me.user + '@c.us');
+    telefono_local = client.info.me.user + '@c.us';
+
+    if (telefono != telefono_local) {
+      console.log(telefono_local + ' ' + telefono);
+      console.log("TELEFONO NO AUTORIZADO A UTILIZAR WSCHATBOT!!!");
+     io.emit('message', "TELEFONO NO AUTORIZADO A UTILIZAR WSCHATBOT!!!");
+      return;
+    }
+
+    try { if (compraEntregaConnection && typeof compraEntregaConnection.close === 'function') await compraEntregaConnection.close(); } catch {}
+    compraEntregaConnection = await odbc.connect('DSN=' + dsn + '; charset=UTF8');
+
+    console.log("conectado a Manager..." + dsn);
+    console.log("esperando...");
+    await sleep(1000);
+
+    while (!compraEntregaQueryStopRequested && isOwner && clientStarted && client) {
+      RecuperarJsonConfMensajes();
+      await enviar_mensajes_compra();
+      await enviar_mensajes_entrega();
+      if (compraEntregaQueryStopRequested || !isOwner || !clientStarted || !client) break;
+      await sleep(seg_msg);
+    }
+  } finally {
+    compraEntregaQueryRunning = false;
+    try {
+      if (compraEntregaConnection && typeof compraEntregaConnection.close === 'function') {
+        await compraEntregaConnection.close();
+      }
+    } catch {}
+    try { compraEntregaConnection = null; } catch {}
+  }
+}
+
+async function enviar_mensajes_compra() {
+  if (!compraEntregaConnection) return;
+  const data2 = await compraEntregaConnection.query("select  codigo, clientes.razon_social, clientes.telefono, direccion_entrega, hora_desde, hora_hasta, total from clientes, es_datos_entregas, ven_remitos_cabecera, es_horarios where es_datos_entregas.cod_horario = es_horarios.cod_horario and ven_remitos_cabecera.transaccion = es_datos_entregas.transaccion and ven_remitos_cabecera.letra = es_datos_entregas.letra and ven_remitos_cabecera.nrotransaccion = es_datos_entregas.nrotransaccion and  ven_remitos_cabecera.ptodeventa = es_datos_entregas.ptodeventa and  ven_remitos_cabecera.cliente = clientes.codigo and     es_datos_entregas.observaciones = 'obs'");
+  var tam2 = data2.length;
+
+  for (let i = 0; i <= tam2 - 1; i++) {
+    const jid = toChatId(data2[i].telefono);
+    if (!jid) {
+      console.log("COMPRA: tel invalido ->", data2[i].telefono, data2[i].razon_social);
+      io.emit('message', 'COMPRA: tel invalido -> ' + data2[i].razon_social);
+      continue;
+   }
+
+    console.log('COMPRA: ' + data2[i].codigo + ' ' + data2[i].razon_social + ' ' + jid);
+    io.emit('message', 'COMPRA: ' + data2[i].codigo + ' ' + data2[i].razon_social + ' ' + jid);
+
+    await sleep(1000);
+
+    const isReg = await client.isRegisteredUser(jid).catch(() => false);
+    if (!isReg) {
+      console.log("COMPRA: numero NO registrado en WhatsApp ->", jid, data2[i].razon_social);
+      io.emit('message', 'COMPRA: numero NO registrado -> ' + data2[i].razon_social + ' ' + jid);
+      continue;
+    }
+
+    try {
+      const msgCompraCliente = '*👋 Hola ' + data2[i].razon_social + '*\nGracias por su compra...\n🛒 Tu súper Online en Venado Tuerto\n\nwww.supermercadodigital.com.ar\n\n_Mensaje enviado por Asisto Bot_\n_https://www.asistobot.com.ar_';
+      const msgCompraAdmin = '*COMPRA: ' + data2[i].razon_social + '* \n ' + data2[i].hora_desde + '\n' + '$ ' + data2[i].total;
+
+      if (compra_mensajes_usar_api_alta) {
+        await altaApiMensajeCompra({
+          nroTel: jid,
+          mensaje: msgCompraCliente,
+          identificacion1: String(data2[i].codigo || data2[i].razon_social || 'compra')
+        });
+        await altaApiMensajeCompra({
+          nroTel: '5493462674128',
+          mensaje: msgCompraAdmin,
+          identificacion1: 'COMPRA_ADMIN_1'
+        });
+        await altaApiMensajeCompra({
+          nroTel: '5493462541989',
+          mensaje: msgCompraAdmin,
+          identificacion1: 'COMPRA_ADMIN_2'
+        });
+      } else {
+        await client.sendMessage(jid, msgCompraCliente, { sendSeen: false });
+        await client.sendMessage('5493462674128@c.us', msgCompraAdmin, { sendSeen: false });
+        await client.sendMessage('5493462541989@c.us', msgCompraAdmin, { sendSeen: false });
+      }
+
+      await compraEntregaConnection.query("update es_datos_entregas set observaciones = '*'");
+    } catch (e) {
+      console.log("COMPRA: API Alta/sendMessage ERROR ->", jid, e?.message || e);
+      io.emit('message', 'COMPRA: API Alta/sendMessage ERROR -> ' + data2[i].razon_social + ' ' + jid);
+    }
+  }
+}
+
+async function enviar_mensajes_entrega() {
+  if (!compraEntregaConnection) return;
+  const data1 = await compraEntregaConnection.query("select  codigo, clientes.razon_social, clientes.telefono, direccion_entrega, hora_desde, hora_hasta from clientes, es_datos_entregas, ven_remitos_cabecera, es_horarios where es_datos_entregas.cod_horario = es_horarios.cod_horario and ven_remitos_cabecera.transaccion = es_datos_entregas.transaccion and ven_remitos_cabecera.letra = es_datos_entregas.letra and ven_remitos_cabecera.nrotransaccion = es_datos_entregas.nrotransaccion and  ven_remitos_cabecera.ptodeventa = es_datos_entregas.ptodeventa and  ven_remitos_cabecera.cliente = clientes.codigo and     es_datos_entregas.observaciones = 'e'");
+  var tam1 = data1.length;
+
+  for (let j = 0; j <= tam1 - 1; j++) {
+    const jid = toChatId(data1[j].telefono);
+    if (!jid) continue;
+
+    console.log("telefono " + jid);
+    var telefono_api = validarTelefono(jid.replace("@c.us", ""));
+    console.log("telefono_api " + telefono_api);
+    console.log('ENTREGA: ' + data1[j].codigo + ' ' + data1[j].razon_social + ' ' + jid);
+    io.emit('message', 'ENTREGA: ' + data1[j].codigo + ' ' + data1[j].razon_social + ' ' + jid);
+    await sleep(5000);
+
+    const desde = data1[j].hora_desde;
+    const hora_d = String(desde || '').substr(10, 6);
+    const hasta = data1[j].hora_hasta;
+    const hora_h = String(hasta || '').substr(10, 6);
+
+    const isReg = await client.isRegisteredUser(jid).catch(() => false);
+    if (!isReg) {
+      console.log("ENTREGA: numero NO registrado ->", jid);
+      continue;
+    }
+
+    const msgEntregaAdmin = 'Mensaje Entrega enviado a: ' + data1[j].razon_social + ' ' + hora_d + ' a ' + hora_h + ' en la direccion ' + data1[j].direccion_entrega;
+    const msgEntregaCliente = '*👋 Hola ' + data1[j].razon_social + '*\nTu pedido está en camino...\nserá entregado de ' + hora_d + ' a ' + hora_h + ' en la direccion ' + data1[j].direccion_entrega + ' \n🛒 Tu súper Online en Venado Tuerto\n\nwww.supermercadodigital.com.ar\n\n_Mensaje enviado por Asisto Bot_\n_https://www.asistobot.com.ar_';
+
+    await safeSendMessage('5493462674128@c.us', msgEntregaAdmin);
+    if (entrega_mensajes_usar_api_alta) {
+      await altaApiMensajeEntrega({
+        nroTel: jid,
+        mensaje: msgEntregaCliente,
+        identificacion1: String(data1[j].codigo || data1[j].razon_social || 'entrega')
+      });
+    } else {
+      await safeSendMessage(jid, msgEntregaCliente);
+    }
+
+    await compraEntregaConnection.query("update es_datos_entregas set observaciones = '*'");
+  }
+}
+
 const ADMIN_COMMAND_PHONE_FALLBACK = '5493462674128';
 
 function samePhoneDigits(a, b) {
@@ -5794,6 +6126,7 @@ client.on('ready', async () => {
     console.log('[CONFIG] habilitar_bot=' + habilitar_bot + ' habilitar_consulta_mensajes=' + consulta_api_mensajes_habilitado + ' time_cad_ms=' + time_cad);
   } catch {}
   startConsultaApiMensajesIfEnabled('ready');
+  startCompraEntregaLoopIfEnabled('ready');
 
 });
 
@@ -5863,6 +6196,9 @@ client.on('auth_failure', async function(session) {
 
 client.on('disconnected', async (reason) => {
   telefono_qr = "";
+  try { compraEntregaQueryStopRequested = true; } catch {}
+  try { if (compraEntregaConnection && typeof compraEntregaConnection.close === 'function') await compraEntregaConnection.close(); } catch {}
+  try { compraEntregaConnection = null; } catch {}
   io.emit('message', 'Whatsapp Desconectado!');
   EnviarEmail('Chatbot Desconectado ','Desconectando...'+client);
   EscribirLog('Chatbot Desconectado ','Desconectando...',"event");
