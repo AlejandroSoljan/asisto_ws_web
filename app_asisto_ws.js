@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.79  22/06/2026   */
+/*version: 4.00.86  22/06/2026   */
 
 
 
@@ -18,6 +18,13 @@ const socketIO = require('socket.io');
 const qrcode = require('qrcode');
 const http = require('http');
 //var odbc = require("odbc");
+let odbc = null;
+try {
+  odbc = require("odbc");
+} catch (e) {
+  // ODBC es opcional: solo se usa para comandos administrativos como /e l.
+  odbc = null;
+}
 const fetch = require('node-fetch');
 const fileUpload = require('express-fileupload');
 const axios = require('axios');
@@ -338,6 +345,57 @@ function applyTenantConfig(conf) {
   if (conf.key !== undefined || conf.api_key !== undefined || conf.apiKey !== undefined || conf.api_mensajes_key !== undefined || conf.apiMensajesKey !== undefined) {
     key = asString(conf.key ?? conf.api_key ?? conf.apiKey ?? conf.api_mensajes_key ?? conf.apiMensajesKey, key);
   }
+
+  if (
+    conf.api_mensajes_alta !== undefined ||
+    conf.apiMensajesAlta !== undefined ||
+    conf.api_alta_mensajes !== undefined ||
+    conf.apiAltaMensajes !== undefined
+  ) {
+    api_mensajes_alta = asString(
+     conf.api_mensajes_alta ??
+      conf.apiMensajesAlta ??
+      conf.api_alta_mensajes ??
+      conf.apiAltaMensajes,
+      api_mensajes_alta
+    );
+  }
+
+  if (
+    conf.compra_mensajes_usar_api_alta !== undefined ||
+    conf.compraMensajesUsarApiAlta !== undefined ||
+    conf.usar_api_alta_compra !== undefined ||
+    conf.usarApiAltaCompra !== undefined
+ ) {
+    compra_mensajes_usar_api_alta = parseBoolLike(
+      conf.compra_mensajes_usar_api_alta ??
+      conf.compraMensajesUsarApiAlta ??
+      conf.usar_api_alta_compra ??
+      conf.usarApiAltaCompra,
+      false
+    );
+  } else {
+    compra_mensajes_usar_api_alta = false;
+  }
+
+  if (
+    conf.entrega_mensajes_usar_api_alta !== undefined ||
+    conf.entregaMensajesUsarApiAlta !== undefined ||
+    conf.usar_api_alta_entrega !== undefined ||
+    conf.usarApiAltaEntrega !== undefined
+  ) {
+    entrega_mensajes_usar_api_alta = parseBoolLike(
+      conf.entrega_mensajes_usar_api_alta ??
+      conf.entregaMensajesUsarApiAlta ??
+      conf.usar_api_alta_entrega ??
+      conf.usarApiAltaEntrega,
+      false
+    );
+  } else {
+    entrega_mensajes_usar_api_alta = false;
+  }
+
+
   if (
     conf.habilitar_consulta_mensajes !== undefined ||
     conf.habilitarConsultaMensajes !== undefined ||
@@ -1619,6 +1677,22 @@ var api2 = String(process.env.API_MENSAJES_CONSULTA || process.env.API2 || "http
 var api3 = String(process.env.API_MENSAJES_ACTUALIZA || process.env.API3 || "http://managermsm.ddns.net:2002/v200/api/Api_Mensajes/Actualiza_mensaje_destinatario");
 var key = String(process.env.API_MENSAJES_KEY || process.env.API_KEY || process.env.KEY || 'FMM0325*');
 
+// API Alta de mensajes salientes.
+// Se configura por tenant_config o variables de entorno. Los flags quedan en false
+// por defecto para que, si Mongo no trae esos campos, no cambie el flujo actual.
+var api_mensajes_alta = String(
+  process.env.API_MENSAJES_ALTA ||
+  process.env.API_ALTA_MENSAJES ||
+  "https://managersistemas.ddns.net:4800/v200/api/Api_Mensajes/Alta"
+);
+var compra_mensajes_usar_api_alta = parseBoolLike(
+  process.env.COMPRA_MENSAJES_USAR_API_ALTA ?? process.env.USAR_API_ALTA_COMPRA,
+  false
+);
+var entrega_mensajes_usar_api_alta = parseBoolLike(
+  process.env.ENTREGA_MENSAJES_USAR_API_ALTA ?? process.env.USAR_API_ALTA_ENTREGA,
+  false
+);
 
 function normalizarNroTelFromApiMensajes(value) {
   const d = onlyDigits(value || '');
@@ -1852,9 +1926,16 @@ function initMongoModelsIfNeeded() {
           tenantid: { type: String },
           tenantId: { type: String, index: true },
           numero: { type: String, index: true },
-          disabled: { type: Boolean, default: false }
+          disabled: { type: Boolean, default: false },
+          paused: { type: Boolean, default: false },
+          pausado: { type: Boolean, default: false },
+          blocked: { type: Boolean, default: false },
+          messagesBlocked: { type: Boolean, default: false },
+          mensajes_bloqueados: { type: Boolean, default: false },
+          bloqueado: { type: Boolean, default: false },
+          blockMode: { type: String }
         },
-        { collection: "wa_wweb_policies" }
+        { collection: "wa_wweb_policies", strict: false }
       );
       PolicyModel = mongoose.models.WaWwebPolicy || mongoose.model("WaWwebPolicy", PolicySchema);
     }
@@ -2071,25 +2152,56 @@ async function pushHistory(event, detail) {
 async function getPolicySafe() {
   try {
     if (!await ensureMongo()) return null;
-    if (!PolicyModel) return null;
-    if (tenantId && numero) {
-      const tid = String(tenantId);
-      const num = String(numero);
-      const p = await PolicyModel.findOne({
-        numero: num,
-        $or: [
-          { tenantId: tid },
-          { tenantid: tid }
-        ]
-      }).lean();
-      if (p) return p;
+
+    const tid = String(tenantId || '').trim();
+    const nums = Array.from(new Set([
+      onlyDigits(numero || ''),
+      onlyDigits(telefono_qr || ''),
+     onlyDigits(getApiMensajesNroTelFrom ? getApiMensajesNroTelFrom() : ''),
+      onlyDigits(telefono_local || '')
+    ].filter(Boolean)));
+
+   const or = [];
+    if (lockId) {
+      or.push({ _id: String(lockId) });
+      or.push({ lockId: String(lockId) });
     }
+   for (const n of nums) {
+      if (tid) {
+        or.push({ tenantId: tid, numero: n });
+        or.push({ tenantid: tid, numero: n });
+      }
+     or.push({ numero: n });
+    }
+
+    // Leer directo desde Mongo para no depender de paths declarados en el schema.
+   // La pausa del panel puede estar guardada como paused/messagesBlocked/etc.
+    if (mongoose?.connection?.db && or.length) {
+      const p0 = await mongoose.connection.db.collection('wa_wweb_policies').findOne({ $or: or });
+      if (p0) return p0;
+    }
+
+    if (!PolicyModel) return null;
+
     if (lockId) {
       const p2 = await PolicyModel.findById(lockId).lean();
       if (p2) return p2;
     }
+    if (tenantId && numero) {
+
+      const p = await PolicyModel.findOne({
+        numero: String(numero),
+        $or: [
+          { tenantId: String(tenantId) },
+          { tenantid: String(tenantId) }
+        ]
+      }).lean();
+      if (p) return p;
+    }
+   
     return null;
-  } catch {
+  } catch (e) {
+    try { EscribirLog('getPolicySafe error: ' + String(e?.message || e), 'error'); } catch {}
     return null;
   }
 }
@@ -2101,6 +2213,8 @@ function isPolicyMessagesBlocked(pol) {
     // blockMode indica el tipo de bloqueo, pero NO debe bloquear por sí solo.
     // Antes quedaba blockMode="messages" aunque blocked=false y por eso seguía pausando.
     return !!(
+      pol.paused === true ||
+      pol.pausado === true ||
       pol.blocked === true ||
       pol.messagesBlocked === true ||
       pol.mensajes_bloqueados === true ||
@@ -2114,11 +2228,29 @@ function isPolicyMessagesBlocked(pol) {
 async function isWwebMessagesBlockedSafe() {
   try {
     const pol = await getPolicySafe();
-    const blocked = isPolicyMessagesBlocked(pol);
-    lastPolicyBlocked = blocked;
-    return blocked;
+    let blocked = isPolicyMessagesBlocked(pol);
+
+    // Refuerzo: si el lock quedó en PAUSED/BLOCKED, también cortar la consulta API.
+    // Esto evita que un proceso viejo siga consultando aunque el panel muestre Bot pausado.
+    if (!blocked && LockModel && lockId) {
+      try {
+        const lockDoc = await LockModel.findById(lockId).lean();
+        const st = String(lockDoc?.state || lockDoc?.status || '').toLowerCase();
+        if (st === 'paused' || st === 'pause' || st === 'blocked' || st === 'bloqueado') blocked = true;
+      } catch {}
+    }
+
+    if (blocked) {
+      lastPolicyBlocked = true;
+      localWsPanelState = 'paused';
+      return true;
+    }
+
+    // No reanudar automáticamente si no hay política bloqueada.
+   // La salida de pausa solamente debe venir por una acción explícita resume/reanudar.
+    return lastPolicyBlocked === true || String(localWsPanelState || '').toLowerCase() === 'paused';
   } catch {
-   return lastPolicyBlocked === true;
+   return lastPolicyBlocked === true || String(localWsPanelState || '').toLowerCase() === 'paused';
   }
 }
 
@@ -2133,7 +2265,27 @@ async function heartbeatTick() {
 
     const pol = await getPolicySafe();
     const disabled = !!(pol && pol.disabled === true);
-    lastPolicyBlocked = isPolicyMessagesBlocked(pol);
+    const policyBlockedNow = isPolicyMessagesBlocked(pol);
+
+    if (policyBlockedNow) {
+      if (lastPolicyBlocked !== true || localWsPanelState !== 'paused') {
+        try { EscribirLog('Bot pausado por política del panel', 'event'); } catch {}
+        try { console.log('Bot pausado por política del panel'); } catch {}
+       }
+      lastPolicyBlocked = true;
+      localWsPanelState = 'paused';
+      try { await updateLockStateSafe('paused'); } catch {}
+      return;
+    }
+
+    // No reanudar por ausencia de política o lectura incompleta.
+    // El bot solo sale de pausa cuando llega action=resume/reanudar.
+    if (lastPolicyBlocked === true || String(localWsPanelState || '').toLowerCase() === 'paused') {
+      localWsPanelState = 'paused';
+      try { await updateLockStateSafe('paused'); } catch {}
+      return;
+    }
+
 
     if (disabled) {
       lastPolicyDisabled = true;
@@ -3138,6 +3290,30 @@ async function handleActionDoc(doc) {
       return 'released';
     }
 
+    if (['pause', 'pausar', 'pause_messages', 'block_messages'].includes(action)) {
+      EscribirLog('Accion PAUSA recibida: ' + reason, 'event');
+      try { console.log('Accion PAUSA recibida: ' + reason); } catch {}
+      lastPolicyBlocked = true;
+      localWsPanelState = 'paused';
+      try { await updateLockStateSafe('paused'); } catch {}
+      return 'paused';
+    }
+    if (['resume', 'reanudar', 'resume_messages', 'unblock_messages', 'enable', 'habilitar'].includes(action)) {
+      EscribirLog('Accion REANUDAR recibida: ' + reason, 'event');
+      try { console.log('Accion REANUDAR recibida: ' + reason); } catch {}
+      lastPolicyBlocked = false;
+      if (client && client.info && client.info.me && client.info.me.user) {
+        localWsPanelState = 'online';
+        try { await updateLockStateSafe('online'); } catch {}
+        try { startConsultaApiMensajesIfEnabled('resume'); } catch {}
+      } else {
+        localWsPanelState = 'starting';
+        try { await updateLockStateSafe('starting'); } catch {}
+      }
+      return 'resumed';
+    }
+
+
     if ([
       'resetauth',
       'reset_auth',
@@ -3151,6 +3327,7 @@ async function handleActionDoc(doc) {
       const ok = await clearAuthenticationAndRequestQr(reason || action);
       return ok ? 'clear_auth_requested' : 'clear_auth_failed';
     }
+    
 
     return 'ignored';
   } catch (e) {
@@ -4332,6 +4509,13 @@ async function ConsultaApiMensajes(){
 
       if (consulta_api_mensajes_habilitado !== true) break;
 
+      if (String(localWsPanelState || '').toLowerCase() === 'paused' || lastPolicyBlocked === true) {
+        try { console.log('[WAIT] ConsultaApiMensajes detenida: bot en pausa'); } catch {}
+        try { EscribirLog('[WAIT] ConsultaApiMensajes detenida: bot en pausa', 'event'); } catch {}
+        return;
+      }
+
+
       // Si la sesión no está ONLINE no hay que consultar la API de mensajes salientes.
       // Al desloguearse queda QR, pero este loop puede seguir vivo desde el ready anterior.
       const consultaWsState = String(localWsPanelState || '').toLowerCase();
@@ -4340,6 +4524,25 @@ async function ConsultaApiMensajes(){
         const waitMs = Math.max(5000, Number(devolver_seg_tele()) || 30000);
         try { console.log('[WAIT] ConsultaApiMensajes pausada: sesión WhatsApp no online state=' + consultaWsState); } catch {}
         try { EscribirLog('[WAIT] ConsultaApiMensajes pausada: sesión WhatsApp no online state=' + consultaWsState, 'event'); } catch {}
+        await sleep(waitMs);
+        continue;
+      }
+
+      // Si el panel dejó la sesión en PAUSED / mensajes bloqueados, no se debe leer
+      // la API de mensajes salientes. Leerla reserva los mensajes y luego el API
+      // puede volver a liberarlos si no se actualizan a tiempo.
+      try { await pollActionsOnce(); } catch {}
+      if (String(localWsPanelState || '').toLowerCase() === 'paused' || lastPolicyBlocked === true || await isWwebMessagesBlockedSafe()) {
+        try { console.log('[WAIT] ConsultaApiMensajes detenida antes de leer API: bot en pausa'); } catch {}
+        try { EscribirLog('[WAIT] ConsultaApiMensajes detenida antes de leer API: bot en pausa', 'event'); } catch {}
+        return;
+      }
+
+      await pollActionsOnce();
+      if (await isWwebMessagesBlockedSafe()) {
+        const waitMs = Math.max(5000, Number(devolver_seg_tele()) || 30000);
+        try { console.log('[WAIT] ConsultaApiMensajes pausada: bot en pausa, no consulta API'); } catch {}
+        try { EscribirLog('[WAIT] ConsultaApiMensajes pausada: bot en pausa, no consulta API', 'event'); } catch {}
         await sleep(waitMs);
         continue;
       }
@@ -4400,6 +4603,20 @@ async function ConsultaApiMensajes(){
           await sleep(Number(devolver_seg_tele()) || 30000);
           continue;
         }
+ 
+        if (String(localWsPanelState || '').toLowerCase() === 'paused' || lastPolicyBlocked === true || await isWwebMessagesBlockedSafe()) {
+          try { console.log('[WAIT] ConsultaApiMensajes detenida luego de leer API: bot en pausa'); } catch {}
+          try { EscribirLog('[WAIT] ConsultaApiMensajes detenida luego de leer API: bot en pausa', 'event'); } catch {}
+          return;
+        }
+
+        await pollActionsOnce();
+        if (await isWwebMessagesBlockedSafe()) {
+          try { console.log('[WAIT] ConsultaApiMensajes detenida luego de leer API: bot en pausa'); } catch {}
+          try { EscribirLog('[WAIT] ConsultaApiMensajes detenida luego de leer API: bot en pausa', 'event'); } catch {}
+          return;
+        }
+
 
         const mensajes = Array.isArray(jsonResp[0].mensajes) ? jsonResp[0].mensajes : [];
         const destinatarios = Array.isArray(jsonResp[0].destinatarios) ? jsonResp[0].destinatarios : [];
@@ -4411,6 +4628,20 @@ async function ConsultaApiMensajes(){
           const respuesta = mensajes.filter(m => String(m?.Id_msj_renglon) === String(idDestRenglon));
 
           for (let j = 0; j < respuesta.length; j++) {
+            await pollActionsOnce();
+            if (await isWwebMessagesBlockedSafe()) {
+              try { console.log('[WAIT] ConsultaApiMensajes detenida antes de procesar mensaje: bot en pausa'); } catch {}
+              try { EscribirLog('[WAIT] ConsultaApiMensajes detenida antes de procesar mensaje: bot en pausa', 'event'); } catch {}
+              return;
+            }
+
+            try { await pollActionsOnce(); } catch {}
+            if (String(localWsPanelState || '').toLowerCase() === 'paused' || lastPolicyBlocked === true || await isWwebMessagesBlockedSafe()) {
+              try { console.log('[WAIT] ConsultaApiMensajes detenida antes de enviar: bot en pausa'); } catch {}
+              try { EscribirLog('[WAIT] ConsultaApiMensajes detenida antes de enviar: bot en pausa', 'event'); } catch {}
+              return;
+            }
+
             const msg = respuesta[j] || {};
             const Id_msj_dest_local = dest.Id_msj_dest;
             const Id_msj_renglon_local = dest.Id_msj_renglon;
@@ -4451,7 +4682,22 @@ async function ConsultaApiMensajes(){
 
           if (ultimoNroTelConsultaMensajes) {
               await sleep(calcularDelayConsultaMensajesMs(ultimoNroTelConsultaMensajes, Nro_tel));
+              try { await pollActionsOnce(); } catch {}
             }
+
+            if (String(localWsPanelState || '').toLowerCase() === 'paused' || lastPolicyBlocked === true || await isWwebMessagesBlockedSafe()) {
+              try { console.log('[WAIT] ConsultaApiMensajes detenida despues del delay: bot en pausa'); } catch {}
+              try { EscribirLog('[WAIT] ConsultaApiMensajes detenida despues del delay: bot en pausa', 'event'); } catch {}
+              return;
+            }
+
+            await pollActionsOnce();
+            if (await isWwebMessagesBlockedSafe()) {
+              try { console.log('[WAIT] ConsultaApiMensajes detenida despues del delay: bot en pausa'); } catch {}
+              try { EscribirLog('[WAIT] ConsultaApiMensajes detenida despues del delay: bot en pausa', 'event'); } catch {}
+              return;
+            }
+
 
             const permisoConfirmacion = await estadoConfirmacionApiMensajes(Nro_tel);
             if (!permisoConfirmacion.autorizado) {
@@ -4491,10 +4737,24 @@ async function ConsultaApiMensajes(){
 
             if (Content_nombre == null || Content_nombre === '') Content_nombre = 'archivo';
 
+            await pollActionsOnce();
+            if (await isWwebMessagesBlockedSafe()) {
+              try { console.log('[WAIT] ConsultaApiMensajes detenida antes de enviar: bot en pausa'); } catch {}
+              try { EscribirLog('[WAIT] ConsultaApiMensajes detenida antes de enviar: bot en pausa', 'event'); } catch {}
+              return;
+            }
+
+
             if (contenido != null && String(contenido) !== '') {
               const mimeType = detectMimeType(String(contenido)) || mime.lookup(Content_nombre) || 'application/octet-stream';
               console.log('tipo de dato: ' + mimeType);
               const media = new MessageMedia(mimeType, String(contenido), Content_nombre);
+              try { await pollActionsOnce(); } catch {}
+              if (String(localWsPanelState || '').toLowerCase() === 'paused' || lastPolicyBlocked === true || await isWwebMessagesBlockedSafe()) {
+                try { console.log('[WAIT] ConsultaApiMensajes detenida justo antes de enviar adjunto: bot en pausa'); } catch {}
+                try { EscribirLog('[WAIT] ConsultaApiMensajes detenida justo antes de enviar adjunto: bot en pausa', 'event'); } catch {}
+                return;
+              }
               await io.emit('message', 'Mensaje: ' + Nro_tel_format + ': ' + Msj);
               await safeSend(Nro_tel_format, media, { caption: Msj });
               const logEnvioApi = '[API_MENSAJES] enviado adjunto a ' + Nro_tel +
@@ -4507,6 +4767,12 @@ async function ConsultaApiMensajes(){
               EscribirLog(logEnvioApi, 'event');
             } else {
               console.log("msj texto");
+             try { await pollActionsOnce(); } catch {}
+              if (String(localWsPanelState || '').toLowerCase() === 'paused' || lastPolicyBlocked === true || await isWwebMessagesBlockedSafe()) {
+                try { console.log('[WAIT] ConsultaApiMensajes detenida justo antes de enviar texto: bot en pausa'); } catch {}
+                try { EscribirLog('[WAIT] ConsultaApiMensajes detenida justo antes de enviar texto: bot en pausa', 'event'); } catch {}
+                return;
+              }
               await io.emit('message', 'Mensaje: ' + Nro_tel_format + ': ' + Msj);
               await safeSend(Nro_tel_format, Msj);
               const logEnvioApi = '[API_MENSAJES] enviado texto a ' + Nro_tel +
@@ -4556,11 +4822,8 @@ async function ConsultaApiMensajes(){
 
       try { RecuperarJsonConfMensajes(); } catch {}
 
-      if (await isWwebMessagesBlockedSafe()) {
-          try { console.log('[BLOCK] mensajes bloqueados desde webcontrol: no se responde. from=' + String(message?.from || '')); } catch {}
-          try { EscribirLog('[BLOCK] mensajes bloqueados desde webcontrol: no se responde. from=' + String(message?.from || ''), 'event'); } catch {}
-          return;
-      }
+
+  
 
       startCaducidadMensajesWatcher('ready');
       seg_tele = devolver_seg_tele();
@@ -4579,11 +4842,31 @@ function startConsultaApiMensajesIfEnabled(source = '') {
       console.log("ConsultaApiMensajes deshabilitado" + (source ? " source=" + source : ""));
       return;
     }
-    if (consultaApiMensajesRunning) return;
-    ConsultaApiMensajes().catch((e) => {
-      consultaApiMensajesRunning = false;
-      console.log("ConsultaApiMensajes fatal:", e?.message || e);
-      EscribirLog("ConsultaApiMensajes fatal: " + String(e?.message || e), "error");
+    
+    if (String(localWsPanelState || '').toLowerCase() === 'paused' || lastPolicyBlocked === true) {
+      const msg = "ConsultaApiMensajes no inicia: bot pausado" + (source ? " source=" + source : "");
+      try { console.log(msg); } catch {}
+      try { EscribirLog(msg, "event"); } catch {}
+      return;
+    }
+    
+    isWwebMessagesBlockedSafe().then((blocked) => {
+      if (blocked === true) {
+        const msg = "ConsultaApiMensajes no inicia: bot pausado" + (source ? " source=" + source : "");
+        try { console.log(msg); } catch {}
+        try { EscribirLog(msg, "event"); } catch {}
+        return;
+      }
+      if (consulta_api_mensajes_habilitado !== true || consultaApiMensajesRunning) return;
+      ConsultaApiMensajes().catch((e) => {
+        consultaApiMensajesRunning = false;
+        console.log("ConsultaApiMensajes fatal:", e?.message || e);
+        EscribirLog("ConsultaApiMensajes fatal: " + String(e?.message || e), "error");
+      });
+    }).catch((e) => {
+      console.log("startConsultaApiMensajesIfEnabled policy error:", e?.message || e);
+      ("ConsultaApiMensajes fatal: " + String(e?.message || e), "error");
+      EscribirLog("startConsultaApiMensajesIfEnabled policy error: " + String(e?.message || e), "error");
     });
   } catch (e) {
     console.log("startConsultaApiMensajesIfEnabled error:", e?.message || e);
@@ -4599,6 +4882,9 @@ function getRuntimeConfigSnapshot() {
     api2: String(api2 || ''),
     api3: String(api3 || ''),
     key_configurada: !!key,
+    api_mensajes_alta: String(api_mensajes_alta || ''),
+    compra_mensajes_usar_api_alta: compra_mensajes_usar_api_alta === true,
+    entrega_mensajes_usar_api_alta: entrega_mensajes_usar_api_alta === true,
     runtime_config_refresh_ms: Number(runtime_config_refresh_ms) || 0,
     consulta_mensajes_respetar_horarios: consulta_mensajes_respetar_horarios === true,
     consulta_mensajes_fuera_horario_sleep_ms: Number(consulta_mensajes_fuera_horario_sleep_ms) || 0,
@@ -4739,6 +5025,105 @@ function buildUrlWithParams(baseUrl, params) {
   return raw + (raw.includes('?') ? '&' : '?') + qs;
 }
 
+function formatFechaEnvioApiMensajes(date = new Date()) {
+  try {
+    const parts = new Intl.DateTimeFormat('sv-SE', {
+      timeZone: AR_TZ,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    }).formatToParts(date);
+    const map = {};
+    for (const p of parts || []) map[p.type] = p.value;
+    return `${map.year}-${map.month}-${map.day}`;
+  } catch {
+    return new Date(date).toISOString().slice(0, 10);
+  }
+}
+
+function getApiMensajesAltaKey() {
+  const candidates = [
+    tenantConfig?.api_mensajes_alta_key,
+    tenantConfig?.apiMensajesAltaKey,
+    tenantConfig?.key_mensajes_alta,
+    tenantConfig?.keyMensajesAlta,
+    process.env.API_MENSAJES_ALTA_KEY,
+    process.env.API_ALTA_MENSAJES_KEY,
+    key
+  ];
+  for (const c of candidates) {
+    const v = String(c || '').trim();
+    if (v) return v;
+  }
+  return '';
+}
+
+async function altaApiMensaje({ nroTel, mensaje, identificacion1, tipo = 'MENSAJE' }) {
+  const nroDestino = onlyDigits(nroTel);
+  const nroFrom = getApiMensajesNroTelFrom();
+  const altaKey = getApiMensajesAltaKey();
+
+  if (!api_mensajes_alta) throw new Error('api_mensajes_alta_sin_configurar');
+  if (!altaKey) throw new Error('api_mensajes_alta_key_sin_configurar');
+  if (!nroFrom) throw new Error('api_mensajes_alta_nro_tel_from_sin_configurar');
+  if (!nroDestino) throw new Error('api_mensajes_alta_destinatario_invalido');
+
+  const url = buildUrlWithParams(api_mensajes_alta, {
+    key: altaKey,
+    nro_tel_from: nroFrom
+  });
+
+  const payload = {
+    mensaje: [
+      { fecha_envio: formatFechaEnvioApiMensajes() }
+    ],
+    lineas: [
+      { orden: 1, mensaje: String(mensaje || '') }
+    ],
+    destinatarios: [
+      {
+        orden: 1,
+        nro_tel: nroDestino,
+        identificacion1: String(identificacion1 || '')
+      }
+    ]
+  };
+
+  const res = await fetchTextSafe(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    body: JSON.stringify(payload)
+  });
+
+  if (!res.ok || apiMensajesResponseIndicaError(res.text)) {
+    const urlLog = String(url || '').replace(/([?&]key=)[^&]*/i, '$1***');
+    const detalle = '[' + String(tipo || 'MENSAJE') + '] API Alta ERROR -> ' + nroDestino +
+      ' HTTP ' + String(res.status || 0) +
+      ' url=' + urlLog +
+      ' body=' + JSON.stringify(payload) +
+      ' resp=' + apiMensajesResponseDetalle(res.text);
+    console.log(detalle);
+    EscribirLog(detalle, 'error');
+    throw new Error('api_mensajes_alta_error_' + String(res.status || 0));
+  }
+
+  try {
+    console.log(String(tipo || 'MENSAJE') + ': API Alta OK -> ' + nroDestino);
+    io.emit('message', String(tipo || 'MENSAJE') + ': API Alta OK -> ' + nroDestino);
+  } catch {}
+
+  try { return res.text ? JSON.parse(res.text) : true; } catch { return res.text || true; }
+}
+
+async function altaApiMensajeCompra({ nroTel, mensaje, identificacion1 }) {
+  return await altaApiMensaje({ nroTel, mensaje, identificacion1, tipo: 'COMPRA' });
+}
+
+async function altaApiMensajeEntrega({ nroTel, mensaje, identificacion1 }) {
+  return await altaApiMensaje({ nroTel, mensaje, identificacion1, tipo: 'ENTREGA' });
+}
+
+
 async function fetchTextSafe(url, options) {
   const resp = await fetch(url, options).catch((err) => {
     EscribirLog('fetchTextSafe error: ' + String(err?.message || err), 'error');
@@ -4776,27 +5161,21 @@ async function actualizar_estado_mensaje(urlBase, estado, tipo, nombre, contacto
   try {
     if (!urlBase) return false;
 
-    // Mismo formato que funciona en Postman:
-    // POST /V200/api/Api_Mensajes/Actualiza_mensaje_destinatario?key=...&nro_tel_from=...
-    // Body JSON con Id_Msj_Renglon, Id_Msj_Dest y Estado.
-    let urlPost = String(urlBase || '').trim();
-    urlPost = urlPost.replace(/\/v200\//i, '/V200/');
-    if (/\/Api_Mensajes/i.test(urlPost)) {
-      urlPost = urlPost.replace(/\/Api_Mensajes(?:\/[^?#]*)?(?=($|[?#]))/i, '/Api_Mensajes/Actualiza_mensaje_destinatario');
-   } else {
-      urlPost = urlPost.replace(/\/Actualiza_mensaje(?:_destinatario)?\/?(?=($|[?#]))/i, '/Actualiza_mensaje_destinatario');
-    }
-    urlPost = urlPost.replace(/\/\?(?=key=|nro_tel_from=)/i, '?');
+    // La URL del API de actualización sale de Mongo (api3), porque puede cambiar
+    // por cliente/instalación. No se fuerza host, versión ni path acá.
+    const urlPost = String(urlBase || '').trim();
+
+    // Mismo body que funciona en Postman: ids + estado; el resto nulo.
    
     const payloadPost = {
       Id_Msj_Renglon: id_msj_renglon,
       Id_Msj_Dest: id_msj_dest,
       Estado: estado,
-      Tipo: tipo == null ? null : tipo,
-      Nombre: nombre == null ? null : nombre,
-      Contacto: contacto == null ? null : contacto,
-      Direccion: direccion == null ? null : direccion,
-      Email: email == null ? null : email
+      Tipo: null,
+      Nombre: null,
+      Contacto: null,
+      Direccion: null,
+      Email: null
     };
 
  
@@ -4826,6 +5205,205 @@ async function actualizar_estado_mensaje(urlBase, estado, tipo, nombre, contacto
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+const ADMIN_COMMAND_PHONE_FALLBACK = '5493462674128';
+
+function samePhoneDigits(a, b) {
+  const da = onlyDigits(a);
+  const db = onlyDigits(b);
+  if (!da || !db) return false;
+  if (da === db) return true;
+  if (da.length >= 10 && db.length >= 10 && da.slice(-10) === db.slice(-10)) return true;
+  return false;
+}
+
+function getAdminCommandPhones() {
+  const raw = [];
+  const addRaw = (v) => {
+    if (Array.isArray(v)) {
+      for (const item of v) addRaw(item);
+      return;
+    }
+    if (v && typeof v === 'object') {
+      for (const item of Object.values(v)) addRaw(item);
+      return;
+    }
+    const s = String(v || '').trim();
+    if (s) raw.push(s);
+  };
+
+  addRaw(process.env.ASISTO_ADMIN_COMMAND_PHONE);
+  addRaw(process.env.ADMIN_COMMAND_PHONE);
+  addRaw(process.env.SUPER_ADMIN_PHONE);
+  addRaw(tenantConfig?.admin_command_phone);
+  addRaw(tenantConfig?.adminCommandPhone);
+  addRaw(tenantConfig?.admin_command_phones);
+  addRaw(tenantConfig?.adminCommandPhones);
+  addRaw(tenantConfig?.api_mensajes_admin_phone);
+  addRaw(tenantConfig?.apiMensajesAdminPhone);
+  addRaw(getApiMensajesNroTelFrom());
+  addRaw(ADMIN_COMMAND_PHONE_FALLBACK);
+
+  return Array.from(new Set(raw.map(onlyDigits).filter(Boolean)));
+}
+
+async function resolveMessagePhoneCandidates(message) {
+  const out = new Set();
+  const add = (value) => {
+    const raw = String(value || '').trim();
+    if (!raw || looksLikeLid(raw)) return;
+    const d = onlyDigits(raw);
+    if (d) out.add(d);
+  };
+
+  add(message?.from);
+  add(message?.author);
+  add(message?.to);
+  add(message?.id?.remote);
+  add(message?._data?.from);
+  add(message?._data?.author);
+  add(message?._data?.to);
+  add(message?._data?.id?.remote);
+
+  try {
+    const resolved = await resolvePhoneFromIncomingMessage(message);
+    add(resolved);
+  } catch {}
+
+  try {
+    if (typeof message?.getContact === 'function') {
+      const c = await message.getContact();
+      add(c?.number);
+      add(c?.id?.user);
+      add(c?.id?._serialized);
+      add(c?._data?.id?.user);
+      add(c?._data?.id?._serialized);
+      add(c?._data?.number);
+      add(c?._data?.wid?.user);
+      add(c?._data?.wid?._serialized);
+      add(c?._data?.userid);
+      add(c?._data?.phone);
+    }
+  } catch {}
+
+  for (const id of [message?.from, message?.author, message?.to].map(x => String(x || '').trim()).filter(Boolean)) {
+    try {
+      const c = await client.getContactById(id);
+      add(c?.number);
+      add(c?.id?.user);
+      add(c?.id?._serialized);
+      add(c?._data?.id?.user);
+      add(c?._data?.id?._serialized);
+      add(c?._data?.number);
+      add(c?._data?.wid?.user);
+      add(c?._data?.wid?._serialized);
+      add(c?._data?.userid);
+      add(c?._data?.phone);
+    } catch {}
+  }
+
+  return Array.from(out).filter(Boolean);
+}
+
+async function isAdminCommandSender(message) {
+  if (!message) return false;
+  if (message.fromMe === true) return true;
+
+  const adminPhones = getAdminCommandPhones();
+  if (!adminPhones.length) return false;
+
+  const candidates = await resolveMessagePhoneCandidates(message);
+  const ok = candidates.some(c => adminPhones.some(a => samePhoneDigits(c, a)));
+  if (!ok && String(message?.from || '').includes('@lid')) {
+    try {
+      console.log('[admin-command] remitente @lid no resuelto como admin. from=' + message.from + ' candidates=' + candidates.join(','));
+    } catch {}
+  }
+  return ok;
+}
+
+function adminReplyTarget(message) {
+  if (message?.fromMe === true) return String(message?.to || message?.from || '').trim();
+  const from = String(message?.from || '').trim();
+  if (from) return from;
+  const admins = getAdminCommandPhones();
+  return admins.length ? (admins[0] + '@c.us') : '';
+}
+
+async function safeSendMessage(to, text, opts) {
+  return await safeSend(to, String(text || ''), opts || { sendSeen: false });
+}
+
+async function handleAdminDeliveryCommand(message, source = '') {
+  try {
+    const body = String(message?.body || '').trim();
+    if (!body || !/^\/e(?:\s|$)/i.test(body)) return false;
+
+    const isAdmin = await isAdminCommandSender(message);
+    if (!isAdmin) return false;
+
+    const parts = body.split(/\s+/).filter(Boolean);
+    const cmd = String(parts[0] || '').trim().toLowerCase();
+    const param = String(parts[1] || '').trim().toLowerCase();
+    if (cmd !== '/e') return false;
+
+    const replyTo = adminReplyTarget(message);
+    if (!replyTo) return true;
+
+    if (!odbc) {
+      await safeSendMessage(replyTo, 'ODBC no está disponible en este script. No puedo consultar pedidos.');
+      return true;
+    }
+
+    console.log('[admin-command] OK source=' + source + ' from=' + message.from + ' to=' + message.to + ' fromMe=' + message.fromMe + ' body=' + body);
+    EscribirLog('[admin-command] OK source=' + source + ' body=' + body, 'event');
+
+    const cmdConnection = await odbc.connect('DSN=' + dsn + '; charset=UTF8');
+    try {
+      if (param === 'l' || !param) {
+        const data2 = await cmdConnection.query("SELECT ven_remitos_cabecera.fecha,forma_de_pago.descripcion, ven_remitos_cabecera.total, es_datos_entregas.forma_pago, es_horarios.hora_desde, clientes.razon_social, ven_remitos_cabecera.nrotransaccion , es_datos_entregas.direccion_entrega  FROM ven_remitos_cabecera, es_datos_entregas,  es_horarios, forma_de_pago ,clientes WHERE (ven_remitos_cabecera.transaccion = es_datos_entregas.transaccion ) and  (ven_remitos_cabecera.transaccion = es_datos_entregas.transaccion )and  ( ven_remitos_cabecera.letra = es_datos_entregas.letra ) and( ven_remitos_cabecera.nrotransaccion = es_datos_entregas.nrotransaccion ) and  ( ven_remitos_cabecera.ptodeventa = es_datos_entregas.ptodeventa ) and  ( es_horarios.cod_horario = es_datos_entregas.cod_horario) and( forma_de_pago.codigo = es_datos_entregas.forma_pago )   and( ven_remitos_cabecera.cliente = clientes.codigo )  and (  es_horarios.fecha > DateAdd(day,-1,GetDate() )) order by es_horarios.hora_desde ;  ");
+
+        if (!data2 || !data2.length) {
+          await safeSendMessage(replyTo, 'No hay pedidos para listar hoy.');
+          return true;
+        }
+
+        for (let i = 0; i <= data2.length - 1; i++) {
+          await safeSendMessage(replyTo, data2[i].razon_social + '  ' + data2[i].nrotransaccion + ' ' + data2[i].hora_desde + ' / $' + data2[i].total + ' -- ' + data2[i].direccion_entrega);
+          try { console.log(data2[i].fecha); } catch {}
+        }
+        return true;
+      }
+
+      if (param === '?') {
+        await safeSendMessage(replyTo, '*------AYUDA------* \n */e* o */e l* -> listado de pedidos \n */e 0000XXXX* -> Envía Mensaje de Entrega*');
+        return true;
+      }
+
+      const nro = String(param || '').replace(/'/g, "''");
+      if (!nro) {
+        await safeSendMessage(replyTo, 'Falta número de pedido. Usá /e l para listar o /e 0000XXXX para marcar entrega.');
+        return true;
+      }
+
+      console.log("update es_datos_entregas set observaciones = 'e' where nrotransaccion = '" + nro + "'");
+      await cmdConnection.query("update es_datos_entregas set observaciones = 'e' where nrotransaccion = '" + nro + "'");
+      await safeSendMessage(replyTo, 'Mensaje Entrega Actualizado');
+      return true;
+    } finally {
+      try { await cmdConnection.close(); } catch {}
+    }
+  } catch (e) {
+    console.log('[admin-command] error:', e?.message || e);
+    try { EscribirLog('[admin-command] error: ' + String(e?.message || e), 'error'); } catch {}
+    try {
+      const replyTo = adminReplyTarget(message);
+      if (replyTo) await safeSendMessage(replyTo, 'Error ejecutando comando: ' + String(e?.message || e));
+    } catch {}
+    return true;
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 function attachClientHandlers() {
 
@@ -4845,6 +5423,10 @@ async function processIncomingAsistoMessage(message, source) {
     return;
   }
   if (await registrarRespuestaNoValidaConfirmacionApiMensajes(message)) {
+    return;
+  }
+ 
+  if (await handleAdminDeliveryCommand(message, source || 'message')) {
     return;
   }
 
@@ -5075,7 +5657,9 @@ client.on('message_create', async message => {
     } catch {}
     if (message && message.fromMe === true) {
       await logOutgoingFromMessageFallback(message);
-
+      if (String(message?.body || message?._data?.body || '').trim().toLowerCase().startsWith('/e')) {
+        if (await handleAdminDeliveryCommand(message, 'message_create')) return;
+      }
       // IMPORTANTE: si el operador prueba/autoriza desde el mismo WhatsApp Web,
       // el mensaje sale como fromMe=true. En algunas versiones message.to viene vacío;
       // por eso se toma el destino desde to/from/id.remote/_data.* y, si no aparece,
@@ -5175,7 +5759,9 @@ client.on('ready', async () => {
    await io.emit('message', 'Whatsapp Listo!');
    EscribirLog('Whatsapp Listo!',"event");
    // Para el panel: sesión activa
-  updateLockStateSafe('online').catch(()=>{});
+  if (String(localWsPanelState || '').toLowerCase() !== 'paused' && lastPolicyBlocked !== true) {
+    updateLockStateSafe('online').catch(()=>{});
+  }
   // Opcional: si querés conservar un "hito" ready en historial:
   // updateLockStateSafe('ready').catch(()=>{});
 
