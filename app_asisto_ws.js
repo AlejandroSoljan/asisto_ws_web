@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.88  22/06/2026   */
+/*version: 4.00.89  22/06/2026   */
 
 
 
@@ -1177,7 +1177,7 @@ function clearRuntimeTimersForExit(reason = '') {
   try { if (actionTimer) { clearInterval(actionTimer); actionTimer = null; } } catch {}
   try { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } } catch {}
   try { compraEntregaQueryStopRequested = true; } catch {}
-  try { if (compraEntregaConnection && typeof compraEntregaConnection.close === 'function') await compraEntregaConnection.close(); } catch {}
+  try { if (compraEntregaConnection && typeof compraEntregaConnection.close === 'function')  compraEntregaConnection.close(); } catch {}
   try { compraEntregaConnection = null; } catch {}
   try { clearAuthReadyWatchdog(String(reason || 'supervisor_exit')); } catch {}
 }
