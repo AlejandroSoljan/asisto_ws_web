@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.89  22/06/2026   */
+/*version: 4.00.93  23/06/2026   */
 
 
 
@@ -366,8 +366,7 @@ function applyTenantConfig(conf) {
     conf.key_mensajes_alta !== undefined ||
     conf.keyMensajesAlta !== undefined ||
     conf.api_alta_mensajes_key !== undefined ||
-    conf.apiAltaMensajesKey !== undefined ||
-    conf.key !== undefined
+    conf.apiAltaMensajesKey !== undefined
   ) {
     api_mensajes_alta_key = asString(
       conf.api_mensajes_alta_key ??
@@ -375,8 +374,7 @@ function applyTenantConfig(conf) {
      conf.key_mensajes_alta ??
       conf.keyMensajesAlta ??
       conf.api_alta_mensajes_key ??
-      conf.apiAltaMensajesKey ??
-      conf.key,
+      conf.apiAltaMensajesKey,
       api_mensajes_alta_key
     );
   }
@@ -4992,7 +4990,7 @@ async function refreshRuntimeDomainConfig(source = 'runtime_config_poll') {
       startConsultaApiMensajesIfEnabled(source);
     }
 
-    if ((next.compra_mensajes_usar_api_alta === true || next.entrega_mensajes_usar_api_alta === true) && client && localWsPanelState === 'online') {
+    if (client && localWsPanelState === 'online') {
       startCompraEntregaLoopIfEnabled(source);
     }
 
@@ -5114,7 +5112,11 @@ function getApiMensajesAltaKey() {
 
 async function altaApiMensaje({ nroTel, mensaje, identificacion1, tipo = 'MENSAJE' }) {
   const nroDestino = onlyDigits(nroTel);
-  const nroFrom = getApiMensajesNroTelFrom();
+  // El API Alta usa el telefono emisor local, como en la URL que funciona:
+  // nro_tel_from=3462514448. WhatsApp/tenant puede venir como 5493462514448.
+  const nroFrom = normalizarNroTelFromApiMensajes(getApiMensajesNroTelFrom())
+    .replace(/^549(\d{10})$/, '$1')
+    .replace(/^54(\d{10})$/, '$1');
   const altaKey = getApiMensajesAltaKey();
 
   if (!api_mensajes_alta) throw new Error('api_mensajes_alta_sin_configurar');
@@ -5184,7 +5186,9 @@ async function altaApiMensajeCompra({ nroTel, mensaje, identificacion1 }) {
 
   const body = {
     mensaje: [
-      { fecha_envio: formatFechaEnvioApiMensajes() }
+      { fecha_envio: formatFechaEnvioApiMensajes(),
+        agente:'SUPER'
+       }
     ],
     lineas: [
       { orden: 1, mensaje: String(mensaje || '') }
@@ -5198,10 +5202,23 @@ async function altaApiMensajeCompra({ nroTel, mensaje, identificacion1 }) {
     ]
   };
 
-  const resp = await axios.post(url, body, {
-    headers: { 'Content-Type': 'application/json; charset=utf-8' },
-    timeout: 30000
-  });
+  let resp;
+  try {
+    resp = await axios.post(url, body, {
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+      timeout: 30000
+    });
+  } catch (e) {
+    const status = e?.response?.status || 0;
+    const data = e?.response?.data;
+    const urlLog = String(url || '').replace(/([?&]key=)[^&]*/i, '$1***');
+    const detalle = 'API Alta HTTP ' + status + ' -> nroFrom=' + nroFrom + ' nroDestino=' + nroDestino +
+      ' url=' + urlLog + ' body=' + JSON.stringify(body) + ' resp=' +
+      (typeof data === 'string' ? data : JSON.stringify(data || {}));
+    console.log(detalle);
+    try { EscribirLog(detalle, 'error'); } catch {}
+    throw e;
+  }
 
   try {
     console.log('COMPRA: API Alta OK -> ' + nroDestino + ' status=' + resp.status);
@@ -5363,7 +5380,7 @@ let compraEntregaConnection = null;
 
 async function startCompraEntregaLoopIfEnabled(source = '') {
   try {
-    if (compra_mensajes_usar_api_alta !== true && entrega_mensajes_usar_api_alta !== true) return;
+    
     if (compraEntregaQueryRunning) return;
     queryAccessComprasEntregas(source).catch((e) => {
       compraEntregaQueryRunning = false;
@@ -5396,10 +5413,10 @@ async function queryAccessComprasEntregas(source = '') {
       return;
     }
 
-    var telefono = '549' + telefono_qr + '@c.us';
+    var telefono = normalizarNroTelFromApiMensajes(telefono_qr || numero) + '@c.us';
     console.log("Telefono Habilitado:" + telefono);
-    console.log("cliente:" + client.info.me.user + '@c.us');
-    telefono_local = client.info.me.user + '@c.us';
+    console.log("cliente:" + normalizarNroTelFromApiMensajes(client.info.me.user) + '@c.us');
+    telefono_local = normalizarNroTelFromApiMensajes(client.info.me.user) + '@c.us';
 
     if (telefono != telefono_local) {
       console.log(telefono_local + ' ' + telefono);
@@ -5522,18 +5539,23 @@ async function enviar_mensajes_entrega() {
     const msgEntregaAdmin = 'Mensaje Entrega enviado a: ' + data1[j].razon_social + ' ' + hora_d + ' a ' + hora_h + ' en la direccion ' + data1[j].direccion_entrega;
     const msgEntregaCliente = '*👋 Hola ' + data1[j].razon_social + '*\nTu pedido está en camino...\nserá entregado de ' + hora_d + ' a ' + hora_h + ' en la direccion ' + data1[j].direccion_entrega + ' \n🛒 Tu súper Online en Venado Tuerto\n\nwww.supermercadodigital.com.ar\n\n_Mensaje enviado por Asisto Bot_\n_https://www.asistobot.com.ar_';
 
-    await safeSendMessage('5493462674128@c.us', msgEntregaAdmin);
-    if (entrega_mensajes_usar_api_alta) {
-      await altaApiMensajeEntrega({
-        nroTel: jid,
-        mensaje: msgEntregaCliente,
-        identificacion1: String(data1[j].codigo || data1[j].razon_social || 'entrega')
-      });
-    } else {
-      await safeSendMessage(jid, msgEntregaCliente);
-    }
+    try {
+      await safeSendMessage('5493462674128@c.us', msgEntregaAdmin);
+      if (entrega_mensajes_usar_api_alta) {
+        await altaApiMensajeEntrega({
+          nroTel: jid,
+          mensaje: msgEntregaCliente,
+          identificacion1: String(data1[j].codigo || data1[j].razon_social || 'entrega')
+        });
+      } else {
+        await safeSendMessage(jid, msgEntregaCliente);
+      }
 
-    await compraEntregaConnection.query("update es_datos_entregas set observaciones = '*'");
+      await compraEntregaConnection.query("update es_datos_entregas set observaciones = '*'");
+    } catch (e) {
+      console.log("ENTREGA: API Alta/sendMessage ERROR ->", jid, e?.message || e);
+      io.emit('message', 'ENTREGA: API Alta/sendMessage ERROR -> ' + data1[j].razon_social + ' ' + jid);
+    }
   }
 }
 
@@ -5732,6 +5754,7 @@ async function handleAdminDeliveryCommand(message, source = '') {
       console.log("update es_datos_entregas set observaciones = 'e' where nrotransaccion = '" + nro + "'");
       await cmdConnection.query("update es_datos_entregas set observaciones = 'e' where nrotransaccion = '" + nro + "'");
       await safeSendMessage(replyTo, 'Mensaje Entrega Actualizado');
+      startCompraEntregaLoopIfEnabled('admin_delivery_command');
       return true;
     } finally {
       try { await cmdConnection.close(); } catch {}
