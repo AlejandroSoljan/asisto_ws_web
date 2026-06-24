@@ -1,9 +1,16 @@
 /*script:app_asisto*/
-/*version: 4.00.93  23/06/2026   */
+/*version: 4.00.95  23/06/2026   */
 
 
 
+const dns = require("dns");
 
+try {
+  dns.setServers(["8.8.8.8", "1.1.1.1"]);
+  console.log("[DNS] Servidores DNS forzados para Node:", dns.getServers().join(", "));
+} catch (e) {
+  console.error("[DNS] No se pudieron configurar DNS:", e.message);
+}
 
 
 //const chatbot = require("./funciones_asisto.js")
@@ -455,6 +462,29 @@ function applyTenantConfig(conf) {
       conf.envio_mensajes_habilitado ??
       conf.envioMensajesHabilitado,
       consulta_api_mensajes_habilitado
+    );
+  }
+
+  if (
+    conf.habilitar_mensajes_info !== undefined ||
+    conf.habilitarMensajesInfo !== undefined ||
+    conf.mensajes_info_habilitado !== undefined ||
+    conf.mensajesInfoHabilitado !== undefined ||
+    conf.enviar_mensajes_info_habilitado !== undefined ||
+    conf.enviarMensajesInfoHabilitado !== undefined ||
+    conf.enable_mensajes_info !== undefined ||
+    conf.enableMensajesInfo !== undefined
+  ) {
+    habilitar_mensajes_info = parseBoolLike(
+      conf.habilitar_mensajes_info ??
+      conf.habilitarMensajesInfo ??
+      conf.mensajes_info_habilitado ??
+      conf.mensajesInfoHabilitado ??
+      conf.enviar_mensajes_info_habilitado ??
+      conf.enviarMensajesInfoHabilitado ??
+      conf.enable_mensajes_info ??
+     conf.enableMensajesInfo,
+      habilitar_mensajes_info
     );
   }
 
@@ -1782,6 +1812,14 @@ var consulta_api_mensajes_habilitado = parseBoolLike(
   false
 );
 
+// Habilita el envío desde es_mensajes por dominio/tenant.
+// Se puede configurar en tenant_config con habilitar_mensajes_info = true.
+var habilitar_mensajes_info = parseBoolLike(
+  process.env.HABILITAR_MENSAJES_INFO ?? process.env.MENSAJES_INFO_HABILITADO ?? process.env.ENVIAR_MENSAJES_INFO_HABILITADO,
+  false
+);
+
+
 var consulta_mensajes_respetar_horarios = parseBoolLike(
   process.env.CONSULTA_MENSAJES_RESPETAR_HORARIOS || process.env.CONSULTA_API_MENSAJES_RESPETAR_HORARIOS,
   true
@@ -1838,6 +1876,12 @@ var nom_chatbot;
 
 var Id_msj_dest ;
 var Id_msj_renglon;
+
+// id del registro es_mensajes que esperamos actualizar cuando llegue el ACK
+// (igual que app_chatbot_super)
+var id_msg = 0;
+// Mapa robusto: wsMsgId -> id (DB). Evita carreras cuando salen varios envíos seguidos.
+const pendingAck = new Map();
 
 var signatures = {
   JVBERi0: "application/pdf",
@@ -4926,6 +4970,7 @@ function getRuntimeConfigSnapshot() {
   return {
     habilitar_bot: habilitar_bot === true,
     habilitar_consulta_mensajes: consulta_api_mensajes_habilitado === true,
+    habilitar_mensajes_info: habilitar_mensajes_info === true,
     api2: String(api2 || ''),
     api3: String(api3 || ''),
     key_configurada: !!key,
@@ -5436,6 +5481,9 @@ async function queryAccessComprasEntregas(source = '') {
       RecuperarJsonConfMensajes();
       await enviar_mensajes_compra();
       await enviar_mensajes_entrega();
+      if (habilitar_mensajes_info === true) {
+        await enviar_mensajes_info();
+      }
       if (compraEntregaQueryStopRequested || !isOwner || !clientStarted || !client) break;
       await sleep(seg_msg);
     }
@@ -5558,6 +5606,97 @@ async function enviar_mensajes_entrega() {
     }
   }
 }
+
+
+
+async function enviar_mensajes_info() {
+  if (!compraEntregaConnection) return;
+
+  console.log('MENSAJES_INFO: consultando es_mensajes origen=' + telefono_qr);
+  const data = await compraEntregaConnection.query("select first * from es_mensajes where estado <> 'S' and tipo = 'WS' and origen =" + telefono_qr + ' order by prioridad asc');
+  const tam = data.length;
+  console.log('MENSAJES_INFO: pendientes=' + tam);
+
+  for (let i = 0; i < tam; i++) {
+    const data_img = await compraEntregaConnection.query("select first * from gen_imagenes where cod_imagen =" + data[i].cod_imagen);
+    const tam_img = data_img.length;
+    const segundos = Math.random() * (seg_hasta - seg_desde) + seg_desde;
+
+    let arrayTelefono = String(data[i].destino || '').split(';');
+    const tam2 = arrayTelefono.length;
+
+    for (let j = 0; j < tam2; j++) {
+      // Misma lógica de app_chatbot_super: normalizo y armo JID antes de validar/enviar.
+      const jid = toChatId(arrayTelefono[j]);
+      if (!jid) continue;
+
+      const telefono_api = validarTelefono(jid.replace('@c.us', ''));
+
+      if (telefono_api == true) {
+        const msg_utf = new String(data[i].cuerpo, 'UTF-8');
+        console.log('MENSAJE: ' + data[i].asunto + ' ' + msg_utf + ' ' + jid);
+        io.emit('message', 'MENSAJE: ' + data[i].asunto + ' ' + msg_utf + ' ' + jid + ' ' + segundos);
+
+        if (tam_img > 0) {
+          console.log('img ' + data_img[0].path);
+
+          function detectMimeType(b64) {
+            for (var s in signatures) {
+              if (b64.indexOf(s) === 0) return signatures[s];
+            }
+            return mime.lookup(data_img[0].nombre || data_img[0].path || '') || 'application/octet-stream';
+          }
+
+          const fileData = fs.readFileSync(data_img[0].path, { encoding: 'base64' });
+          console.log('tipo de dato: ' + detectMimeType(fileData));
+
+          const media = new MessageMedia(detectMimeType(fileData), fileData, data_img[0].nombre);
+          const isReg = await client.isRegisteredUser(jid).catch(() => false);
+          if (!isReg) {
+            console.log('numero no registrado');
+            await compraEntregaConnection.query("update es_mensajes set motivo_no_envio = 'numero no registrado' where id='" + data[i].id + "'");
+          } else {
+            // Guardamos wsMsgId -> id DB para que message_ack no dependa sólo de id_msg.
+            const sent = await safeSendMessage(jid, media, { caption: String(msg_utf) });
+            if (sent?.id?.id) pendingAck.set(sent.id.id, data[i].id);
+            if (!id_msg) id_msg = data[i].id;
+          }
+        } else {
+          const isReg2 = await client.isRegisteredUser(jid).catch(() => false);
+          if (!isReg2) {
+            console.log('numero no registrado');
+            await compraEntregaConnection.query("update es_mensajes set motivo_no_envio = 'numero no registrado' where id='" + data[i].id + "'");
+          } else {
+            const sent2 = await safeSendMessage(jid, String(msg_utf));
+            if (sent2?.id?.id) pendingAck.set(sent2.id.id, data[i].id);
+            if (!id_msg) id_msg = data[i].id;
+          }
+        }
+      } else {
+        console.log('TELEFONO BLOQUEADO: ' + arrayTelefono[j]);
+        io.emit('message', 'TELEFONO BLOQUEADO: ' + arrayTelefono[j]);
+      }
+
+      await compraEntregaConnection.query("update es_mensajes set estado = 'S' where id='" + data[i].id + "'");
+
+      let l_fecha = new Date();
+      const numberOfMlSeconds = l_fecha.getTime();
+      const addMlSeconds = 180 * 60000;
+      l_fecha = new Date(numberOfMlSeconds - addMlSeconds);
+      let l_fecha_txt = l_fecha.toISOString();
+      l_fecha_txt = l_fecha_txt.replace('T', ' ');
+      l_fecha_txt = l_fecha_txt.replace('Z', '');
+
+      await compraEntregaConnection.query("update es_mensajes set fecha_envio = '" + l_fecha_txt + "' where id='" + data[i].id + "'");
+      // No pisar id_msg si todavía esperamos ACK de otro envío.
+      if (!id_msg) id_msg = data[i].id;
+
+      console.log('segundos espera. ' + segundos);
+      await sleep(segundos);
+    }
+  }
+}
+
 
 const ADMIN_COMMAND_PHONE_FALLBACK = '5493462674128';
 
@@ -5683,8 +5822,9 @@ function adminReplyTarget(message) {
   return admins.length ? (admins[0] + '@c.us') : '';
 }
 
-async function safeSendMessage(to, text, opts) {
-  return await safeSend(to, String(text || ''), opts || { sendSeen: false });
+async function safeSendMessage(to, content, opts) {
+  const payload = (content === undefined || content === null) ? '' : content;
+  return await safeSend(to, payload, opts || { sendSeen: false });
 }
 
 function getMessageBodyText(message) {
@@ -6098,6 +6238,40 @@ client.on('message_create', async message => {
     try { EscribirLog('[message_create] incoming error: ' + String(e?.message || e), 'error'); } catch {}
   }
 });
+
+
+client.on('message_ack', (message2, ack) => {
+  // Mismo criterio que app_chatbot_super: actualizar es_mensajes con id_ws y estado_ws
+  // usando el wsMsgId devuelto por WhatsApp para los mensajes salientes.
+  try {
+    if (!compraEntregaConnection) return;
+    if (!message2 || !message2.id) return;
+    if (message2.fromMe !== true) return;
+
+    const wsId = message2.id.id;
+    if (!wsId) return;
+
+    const dbId = pendingAck.get(wsId) ?? id_msg;
+    const dbIdNum = Number(dbId);
+    if (!Number.isFinite(dbIdNum) || dbIdNum <= 0) {
+      console.log('ACK sin dbId válido (skip). wsId=' + wsId + ' id_msg=' + id_msg);
+      return;
+    }
+
+    console.log('ACK id_msg ' + dbIdNum);
+    compraEntregaConnection.query("update es_mensajes set id_ws = '" + wsId + "' where id='" + dbIdNum + "'");
+    compraEntregaConnection.query("update es_mensajes set estado_ws = '" + ack + "' where id_ws='" + wsId + "'");
+
+    pendingAck.delete(wsId);
+    if (dbId === id_msg) id_msg = 0;
+
+    console.log('Mensaje ' + wsId);
+    console.log('Estado ' + ack);
+  } catch (e) {
+    console.log('message_ack handler error:', e?.message || e);
+  }
+});
+
 
 client.on('message', async message => {
   try {
