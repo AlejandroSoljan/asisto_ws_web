@@ -12,6 +12,7 @@ LocalAuth/
 RemoteAuth/
 cache/
 tmp/
+imagenes/
 
 configuracion.json
 .env

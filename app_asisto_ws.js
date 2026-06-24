@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.95  23/06/2026   */
+/*version: 4.00.96  24/06/2026   */
 
 
 
@@ -487,6 +487,27 @@ function applyTenantConfig(conf) {
       habilitar_mensajes_info
     );
   }
+
+
+  if (
+    conf.habilitar_odbc_manager !== undefined ||
+    conf.habilitarOdbcManager !== undefined ||
+    conf.odbc_manager_habilitado !== undefined ||
+    conf.odbcManagerHabilitado !== undefined ||
+    conf.habilitar_manager_local !== undefined ||
+   conf.habilitarManagerLocal !== undefined
+  ) {
+    habilitar_odbc_manager = parseBoolLike(
+      conf.habilitar_odbc_manager ??
+      conf.habilitarOdbcManager ??
+      conf.odbc_manager_habilitado ??
+      conf.odbcManagerHabilitado ??
+      conf.habilitar_manager_local ??
+      conf.habilitarManagerLocal,
+      habilitar_odbc_manager
+    );
+  }
+
 
   if (
     conf.consulta_mensajes_respetar_horarios !== undefined ||
@@ -1817,6 +1838,13 @@ var consulta_api_mensajes_habilitado = parseBoolLike(
 var habilitar_mensajes_info = parseBoolLike(
   process.env.HABILITAR_MENSAJES_INFO ?? process.env.MENSAJES_INFO_HABILITADO ?? process.env.ENVIAR_MENSAJES_INFO_HABILITADO,
   false
+);
+
+// Habilita el loop local por ODBC/Manager (compras, entregas y es_mensajes).
+// Para tenants que solo usan Api_Mensajes/Consulta_no_enviados, poner false en tenant_config.
+var habilitar_odbc_manager = parseBoolLike(
+  process.env.HABILITAR_ODBC_MANAGER ?? process.env.ODBC_MANAGER_HABILITADO ?? process.env.HABILITAR_MANAGER_LOCAL,
+  true
 );
 
 
@@ -4665,7 +4693,10 @@ async function ConsultaApiMensajes(){
       try {
         //console.log("Conectando a API " + url);
         //EscribirLog("Conectando a API " + url, "event");
-        const resp = await fetch(url, { method: "GET" }).catch(err => {
+        const resp = await fetch(url, {
+          method: "GET",
+          headers: { 'Accept-Encoding': 'identity' }
+        }).catch(err => {
           EscribirLog("ConsultaApiMensajes fetch error: " + String(err?.message || err), "error");
           return null;
         });
@@ -4676,8 +4707,18 @@ async function ConsultaApiMensajes(){
           continue;
         }
 
-        const raw = await resp.text();
-       let jsonResp = null;
+        let raw = '';
+        try {
+          raw = await resp.text();
+        } catch (e) {
+          const msg = 'ConsultaApiMensajes response body error: ' + String(e?.message || e);
+          console.log(msg);
+          EscribirLog(msg, 'error');
+          await sleep(Math.max(5000, Number(devolver_seg_tele()) || 30000));
+          continue;
+        }
+
+        let jsonResp = null;
         try { jsonResp = raw ? JSON.parse(raw) : null; } catch {}
 
         if (!resp.ok) {
@@ -4971,6 +5012,7 @@ function getRuntimeConfigSnapshot() {
     habilitar_bot: habilitar_bot === true,
     habilitar_consulta_mensajes: consulta_api_mensajes_habilitado === true,
     habilitar_mensajes_info: habilitar_mensajes_info === true,
+    habilitar_odbc_manager: habilitar_odbc_manager === true,
     api2: String(api2 || ''),
     api3: String(api3 || ''),
     key_configurada: !!key,
@@ -5426,6 +5468,10 @@ let compraEntregaConnection = null;
 async function startCompraEntregaLoopIfEnabled(source = '') {
   try {
     
+    if (habilitar_odbc_manager !== true) {
+      try { EscribirLog('queryAccessComprasEntregas no inicia: habilitar_odbc_manager=false' + (source ? ' source=' + source : ''), 'event'); } catch {}
+      return;
+    }
     if (compraEntregaQueryRunning) return;
     queryAccessComprasEntregas(source).catch((e) => {
       compraEntregaQueryRunning = false;
@@ -5471,7 +5517,14 @@ async function queryAccessComprasEntregas(source = '') {
     }
 
     try { if (compraEntregaConnection && typeof compraEntregaConnection.close === 'function') await compraEntregaConnection.close(); } catch {}
-    compraEntregaConnection = await odbc.connect('DSN=' + dsn + '; charset=UTF8');
+    try {
+      compraEntregaConnection = await odbc.connect('DSN=' + dsn + '; charset=UTF8');
+    } catch (e) {
+      const msg = 'queryAccessComprasEntregas: no conecta ODBC DSN=' + dsn + ' -> ' + String(e?.message || e);
+      console.log(msg);
+      EscribirLog(msg, 'error');
+      return;
+    }
 
     console.log("conectado a Manager..." + dsn);
     console.log("esperando...");
