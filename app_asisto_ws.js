@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.96  24/06/2026   */
+/*version: 4.00.97  26/06/2026   */
 
 
 
@@ -4695,7 +4695,13 @@ async function ConsultaApiMensajes(){
         //EscribirLog("Conectando a API " + url, "event");
         const resp = await fetch(url, {
           method: "GET",
-          headers: { 'Accept-Encoding': 'identity' }
+          compress: false,
+          timeout: 60000,
+          headers: {
+            'Accept': 'application/json,text/plain,*/*',
+            'Accept-Encoding': 'identity',
+            'Connection': 'close'
+          }
         }).catch(err => {
           EscribirLog("ConsultaApiMensajes fetch error: " + String(err?.message || err), "error");
           return null;
