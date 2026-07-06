@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.98  06/07/2026   */
+/*version: 4.00.99  06/07/2026   */
 
 
 
@@ -1859,6 +1859,10 @@ var tel_array = [];
 var ver_whatsapp = "0";
 var dsn = "msm_manager";
 var api = "http://managermsm.ddns.net:2002/v200/api/Api_Chat_Cab/ProcesarMensajePost";
+// Modo fallback para mensajes entrantes por WhatsApp Web.
+// La prioridad real se resuelve por número en tenant_channels.
+// Si el canal no trae configuración, queda como antes: usa el API configurado.
+var wweb_bot_logic_mode = "api";
 // API de consulta/envío de mensajes salientes. Por defecto queda deshabilitada
 // hasta activarla en tenant_config o por variables de entorno.
 var api2 = String(process.env.API_MENSAJES_CONSULTA || process.env.API2 || "http://managermsm.ddns.net:2002/v200/api/Api_Mensajes/Consulta_no_enviados");
