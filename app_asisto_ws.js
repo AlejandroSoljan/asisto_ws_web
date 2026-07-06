@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.99  06/07/2026   */
+/*version: 4.01.00  06/07/2026   */
 
 
 
@@ -1316,18 +1316,10 @@ function phonesLookSame(a, b) {
   return false;
 }
 
-function buildApiChatCabUrlFromApi(baseApi) {
-  const raw = String(baseApi || '').trim();
-  if (!raw) return raw;
-  try {
-    const u = new URL(raw);
-    u.pathname = '/v200/api/Api_Chat_Cab/ProcesarMensajePost';
-    u.search = '';
-   u.hash = '';
-    return u.toString();
-  } catch {
-    return raw;
-  }
+const ASISTO_WWEB_CHATGPT_PROCESS_URL = 'https://www.asistobot.com.ar/api/ext/wweb/chatgpt/process';
+
+function getAsistoWwebChatgptProcessUrl() {
+  return ASISTO_WWEB_CHATGPT_PROCESS_URL;
 }
 
 let wwebBotLogicModeCache = { at: 0, numero: '', value: '' };
@@ -1369,7 +1361,7 @@ async function getWwebBotLogicModeForPhone(phoneNumber) {
 
 function getIncomingApiUrlForLogicMode(mode) {
   const m = normalizeWwebBotLogicMode(mode);
-  if (m === 'chatgpt') return buildApiChatCabUrlFromApi(api);
+  if (m === 'chatgpt') return getAsistoWwebChatgptProcessUrl();
   return api;
 }
 
