@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.01.00  06/07/2026   */
+/*version: 4.01.01  06/07/2026   */
 
 
 
@@ -5980,6 +5980,143 @@ function getMessageBodyText(message) {
   return String(message?.body || message?._data?.body || '').trim();
 }
 
+
+function getWwebIncomingMediaMaxBytes() {
+  const raw =
+    tenantConfig?.wweb_incoming_media_max_bytes ??
+    tenantConfig?.wwebIncomingMediaMaxBytes ??
+    process.env.WWEB_INCOMING_MEDIA_MAX_BYTES ??
+    process.env.ASISTO_WWEB_INCOMING_MEDIA_MAX_BYTES ??
+    (15 * 1024 * 1024);
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : (15 * 1024 * 1024);
+}
+
+function normalizeIncomingMessageType(message) {
+  return String(message?.type || message?._data?.type || 'chat').trim().toLowerCase() || 'chat';
+}
+
+function getIncomingMediaFilename(message, media, messageType) {
+  const fromWa =
+    message?._data?.filename ||
+   message?._data?.fileName ||
+    message?._data?.title ||
+    media?.filename ||
+    '';
+  if (fromWa) return String(fromWa);
+
+  const mimeType = String(media?.mimetype || message?._data?.mimetype || '').split(';')[0].trim();
+  const ext = mimeType ? (mime.extension(mimeType) || '') : '';
+  const cleanExt = ext ? ('.' + ext) : '';
+
+  if (messageType === 'image') return 'imagen' + cleanExt;
+  if (messageType === 'document') return 'documento' + cleanExt;
+  if (messageType === 'audio' || messageType === 'ptt' || messageType === 'voice') return 'audio' + (cleanExt || '.ogg');
+  if (messageType === 'video') return 'video' + cleanExt;
+  return 'archivo' + cleanExt;
+}
+
+function buildIncomingMediaText(messageType, caption, filename, mimeType, mediaAttached) {
+  const cap = String(caption || '').trim();
+  const file = filename ? (' Archivo: ' + filename + '.') : '';
+  const mimeTxt = mimeType ? (' Tipo: ' + mimeType + '.') : '';
+
+  if (messageType === 'audio' || messageType === 'ptt' || messageType === 'voice' || /^audio\//i.test(String(mimeType || ''))) {
+    return cap || ('El cliente envió un audio por WhatsApp Web.' + file + mimeTxt + ' Si el API recibe MediaBase64, transcribilo y procesalo como mensaje del cliente.');
+  }
+
+  if (messageType === 'image') {
+    return cap || ('El cliente envió una imagen adjunta por WhatsApp Web. Si estabas esperando el comprobante de transferencia, tomalo como comprobante enviado.' + file + mimeTxt);
+  }
+
+  if (messageType === 'document') {
+    return cap || ('El cliente envió un documento adjunto por WhatsApp Web. Si estabas esperando el comprobante de transferencia, tomalo como comprobante enviado.' + file + mimeTxt);
+  }
+
+  if (messageType === 'video') {
+    return cap || ('El cliente envió un video adjunto por WhatsApp Web.' + file + mimeTxt);
+ }
+
+  if (messageType === 'sticker') {
+    return cap || 'El cliente envió un sticker por WhatsApp Web.';
+  }
+
+  if (mediaAttached) {
+    return cap || ('El cliente envió un archivo adjunto por WhatsApp Web.' + file + mimeTxt);
+  }
+
+  return cap;
+}
+
+async function buildIncomingBotPayload(message) {
+  const messageType = normalizeIncomingMessageType(message);
+  const caption = String(message?.caption || message?._data?.caption || '').trim();
+  const body = String(message?.body || message?._data?.body || '').trim();
+
+  if (messageType === 'chat') {
+    return {
+      mensaje: body,
+      type: 'chat',
+      hasMedia: false,
+      media: null
+    };
+  }
+
+  let media = null;
+  let mediaError = '';
+  try {
+    if (message?.hasMedia === true && typeof message.downloadMedia === 'function') {
+      media = await message.downloadMedia();
+    }
+  } catch (e) {
+    mediaError = String(e?.message || e);
+    try { EscribirLog('[BOT_MEDIA] downloadMedia error type=' + messageType + ': ' + mediaError, 'error'); } catch {}
+  }
+
+  const mimeType = String(media?.mimetype || message?._data?.mimetype || '').trim();
+  const filename = getIncomingMediaFilename(message, media, messageType);
+  const mediaBytes = media?.data ? Buffer.byteLength(String(media.data), 'base64') : 0;
+  const maxBytes = getWwebIncomingMediaMaxBytes();
+  const includeBase64 = !!(media?.data && mediaBytes <= maxBytes);
+
+  if (media?.data && !includeBase64) {
+    try {
+      EscribirLog('[BOT_MEDIA] adjunto no se envía al API por tamaño. type=' + messageType + ' bytes=' + mediaBytes + ' max=' + maxBytes + ' file=' + filename, 'error');
+   } catch {}
+  }
+
+  const mensaje = buildIncomingMediaText(messageType, body || caption, filename, mimeType, !!media);
+
+  return {
+    mensaje,
+    type: messageType,
+    hasMedia: !!media,
+    media: media ? {
+      mimetype: mimeType,
+      filename,
+      data: includeBase64 ? String(media.data) : '',
+      bytes: mediaBytes,
+      omittedBySize: !!(media?.data && !includeBase64),
+      error: mediaError
+    } : null,
+    mediaError
+  };
+}
+
+function redactIncomingApiPayloadForLog(payload) {
+  try {
+    const copy = JSON.parse(JSON.stringify(payload || {}));
+    if (copy.MediaBase64) copy.MediaBase64 = '[base64 ' + String(copy.MediaBytes || '') + ' bytes]';
+    if (copy.MediaData) copy.MediaData = '[base64 ' + String(copy.MediaBytes || '') + ' bytes]';
+    if (copy.media && copy.media.data) copy.media.data = '[base64 ' + String(copy.MediaBytes || copy.media.bytes || '') + ' bytes]';
+    return copy;
+  } catch {
+    return payload;
+  }
+}
+
+
+
 function isAdminDeliveryCommandBody(body) {
   return /^\/e(?:\s|$)/i.test(String(body || '').trim());
 }
@@ -6155,8 +6292,14 @@ EscribirLog(message.from +' '+message.to+' '+message.type+' '+message.body ,"eve
       console.log("mensaje de estado");
       return
     }
-    if(message.type !== 'chat'){
-      console.log("mensaje <> texto");
+
+
+
+
+    
+    const incomingBotPayload = await buildIncomingBotPayload(message);
+    if (!incomingBotPayload || !String(incomingBotPayload.mensaje || '').trim()) {
+      console.log("mensaje sin texto/media procesable");
       return
     }
 
@@ -6183,7 +6326,11 @@ EscribirLog(message.from +' '+message.to+' '+message.type+' '+message.body ,"eve
     }
 telefonoFrom = telefonoFromApi;
     try {
-      await logMessageStat('in', telefonoFrom, { body: message.body || '', type: message.type || 'chat', hasMedia: !!message.hasMedia });
+      await logMessageStat('in', telefonoFrom, {
+        body: incomingBotPayload.mensaje || '',
+        type: incomingBotPayload.type || message.type || 'chat',
+        hasMedia: !!incomingBotPayload.hasMedia
+      });
     } catch {}
     console.log("mensaje");
    
@@ -6196,12 +6343,35 @@ telefonoFrom = telefonoFromApi;
         safeSend(message.from,msg_inicio );
       }
 
-      await io.emit('message', 'Mensaje: '+telefonoFrom+': '+ message.body );
+      await io.emit('message', 'Mensaje: '+telefonoFrom+': '+ incomingBotPayload.mensaje );
 
-      var jsonTexto = {  Tel_Origen: telefonoFrom ?? "",  Tel_Destino: telefonoTo ?? "",  Mensaje: message?.body ?? "",  Respuesta: ""};
-   
-      jsonTexto = {Tel_Origen:telefonoFrom,Tel_Destino:telefonoTo, Mensaje:message.body,Respuesta:''};
-      // jsonTexto = {Tel_Origen:'5493462674128',Tel_Destino:'5493424293943', Mensaje:message.body,Respuesta:''};
+      var jsonTexto = {
+        Tel_Origen: telefonoFrom ?? "",
+        Tel_Destino: telefonoTo ?? "",
+        Mensaje: incomingBotPayload.mensaje ?? "",
+        Respuesta: "",
+        TipoMensaje: incomingBotPayload.type || message.type || 'chat',
+        HasMedia: !!incomingBotPayload.hasMedia
+      };
+
+      if (incomingBotPayload.media) {
+        jsonTexto.MediaMimeType = incomingBotPayload.media.mimetype || '';
+        jsonTexto.MediaFilename = incomingBotPayload.media.filename || '';
+        jsonTexto.MediaBytes = incomingBotPayload.media.bytes || 0;
+        jsonTexto.MediaBase64 = incomingBotPayload.media.data || '';
+        jsonTexto.MediaData = incomingBotPayload.media.data || '';
+        jsonTexto.MediaOmittedBySize = !!incomingBotPayload.media.omittedBySize;
+        jsonTexto.MediaError = incomingBotPayload.media.error || incomingBotPayload.mediaError || '';
+        jsonTexto.media = {
+          mimetype: jsonTexto.MediaMimeType,
+          filename: jsonTexto.MediaFilename,
+          data: jsonTexto.MediaBase64,
+          bytes: jsonTexto.MediaBytes
+        };
+      }
+
+      // jsonTexto = {Tel_Origen:'5493462674128',Tel_Destino:'5493424293943', Mensaje:incomingBotPayload.mensaje,Respuesta:''};
+ 
 
      // let url =  api
       const botLogicMode = await getWwebBotLogicModeForPhone(telefonoTo);
@@ -6210,8 +6380,8 @@ telefonoFrom = telefonoFromApi;
       console.log('[BOT] logic_mode=' + botLogicMode + ' url=' + url);
       try { EscribirLog('[BOT] logic_mode=' + botLogicMode + ' url=' + url, 'event'); } catch {}
 
-      console.log(JSON.stringify(jsonTexto));
-      EscribirLog("Mensaje "+JSON.stringify(jsonTexto),'event');
+      console.log(JSON.stringify(redactIncomingApiPayloadForLog(jsonTexto)));
+      EscribirLog("Mensaje "+JSON.stringify(redactIncomingApiPayloadForLog(jsonTexto)),'event');
       
    let controller; let timeoutId;
    try{
@@ -6663,6 +6833,14 @@ async function procesar_mensaje(json, message){
     tam_json = tam_json + 1;
   }
 
+
+  // cant_lim = 0 debe significar "sin límite". Si no, la primera respuesta
+  // no se envía y aparece directamente "Continuar? S / N".
+  var limite_lote = Number(cant_lim);
+  if (!Number.isFinite(limite_lote) || limite_lote <= 0) {
+    limite_lote = tam_json;
+  }
+
   for( var i=jsonGlobal[indice][1]; i < tam_json; i++){
    
     if(l_json[i].cod_error){ 
@@ -6681,7 +6859,7 @@ async function procesar_mensaje(json, message){
     
         console.log("mensaje "+message.from+" - "+mensaje);
         
-        if(i<= cant_lim + jsonGlobal[indice][1] -1){
+        if(i<= limite_lote + jsonGlobal[indice][1] -1){
         
          await safeSend(message.from,mensaje );
          await sleep(segundos);
@@ -6702,7 +6880,7 @@ async function procesar_mensaje(json, message){
         if(tam_json  <= i + cant_lim  ){
           msg_loc = msg_loc.replace('<recuento>', tam_json  - i );
        }else{
-        msg_loc = msg_loc.replace('<recuento>', cant_lim+1);
+        msg_loc = msg_loc.replace('<recuento>', limite_lote+1);
        }
       
         msg_loc = msg_loc.replace('<recuento_lote>', tam_json - 2);
