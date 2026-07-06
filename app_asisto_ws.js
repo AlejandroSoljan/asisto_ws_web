@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.00.97  26/06/2026   */
+/*version: 4.00.98  06/07/2026   */
 
 
 
@@ -301,6 +301,20 @@ function applyTenantConfig(conf) {
   seg_msg = asNumber(conf.seg_msg, seg_msg);
   seg_tele = asNumber(conf.seg_tele, seg_tele);
   if (conf.api !== undefined) api = String(conf.api);
+  if (
+    conf.wweb_bot_logic_mode !== undefined ||
+    conf.wwebBotLogicMode !== undefined ||
+    conf.bot_logic_mode !== undefined ||
+    conf.botLogicMode !== undefined
+  ) {
+    wweb_bot_logic_mode = normalizeWwebBotLogicMode(
+      conf.wweb_bot_logic_mode ??
+      conf.wwebBotLogicMode ??
+      conf.bot_logic_mode ??
+      conf.botLogicMode ??
+      wweb_bot_logic_mode
+    );
+  }
 
   // Bot/API principal de mensajes entrantes. Es independiente de la consulta
   // de mensajes salientes. Por defecto queda habilitado para no cambiar el
@@ -1279,6 +1293,86 @@ function parseBoolLike(value, fallback = false) {
   if (["0", "false", "no", "off"].includes(v)) return false;
   return fallback;
 }
+
+function normalizeWwebBotLogicMode(value) {
+  const v = String(value || 'api').trim().toLowerCase();
+  if (['chatgpt', 'gpt', 'pedido', 'pedidos', 'asisto', 'ia', 'openai'].includes(v)) return 'chatgpt';
+  return 'api';
+}
+
+function normalizeWhatsappTransportLocal(value) {
+  const v = String(value || 'api').trim().toLowerCase();
+  if (['wweb', 'whatsapp_web', 'whatsappweb', 'web'].includes(v)) return 'wweb';
+  return 'api';
+}
+
+function phonesLookSame(a, b) {
+  const da = onlyDigits(a);
+  const db = onlyDigits(b);
+  if (!da || !db) return false;
+  if (da === db) return true;
+  if (da.startsWith('549') && db.startsWith('54') && !db.startsWith('549')) return da === ('549' + db.slice(2));
+  if (db.startsWith('549') && da.startsWith('54') && !da.startsWith('549')) return db === ('549' + da.slice(2));
+  return false;
+}
+
+function buildApiChatCabUrlFromApi(baseApi) {
+  const raw = String(baseApi || '').trim();
+  if (!raw) return raw;
+  try {
+    const u = new URL(raw);
+    u.pathname = '/v200/api/Api_Chat_Cab/ProcesarMensajePost';
+    u.search = '';
+   u.hash = '';
+    return u.toString();
+  } catch {
+    return raw;
+  }
+}
+
+let wwebBotLogicModeCache = { at: 0, numero: '', value: '' };
+
+async function getWwebBotLogicModeForPhone(phoneNumber) {
+ const fallback = normalizeWwebBotLogicMode(wweb_bot_logic_mode);
+  const phone = onlyDigits(phoneNumber || numero || '');
+  const now = Date.now();
+
+  if (wwebBotLogicModeCache.value && wwebBotLogicModeCache.numero === phone && (now - wwebBotLogicModeCache.at) < 30000) {
+    return wwebBotLogicModeCache.value;
+ }
+
+  try {
+    if (!tenantId || !phone) return fallback;
+    if (!await ensureMongo()) return fallback;
+    if (!mongoose?.connection?.db) return fallback;
+    const rows = await mongoose.connection.db.collection('tenant_channels')
+      .find({ tenantId: String(tenantId || '').trim(), channelType: 'whatsapp' })
+      .sort({ isDefault: -1, updatedAt: -1, createdAt: -1 })
+      .limit(200)
+      .toArray();
+    const row = (rows || []).find((it) => {
+      if (normalizeWhatsappTransportLocal(it?.whatsappTransport ?? it?.whatsapp_transport ?? it?.transport ?? 'api') !== 'wweb') return false;
+      return phonesLookSame(it?.displayPhoneNumber, phone) || phonesLookSame(it?.phoneNumberId, phone);
+    });
+
+    const mode = row
+      ? normalizeWwebBotLogicMode(row.wwebBotLogicMode ?? row.wweb_bot_logic_mode ?? row.botLogicMode ?? row.bot_logic_mode ?? fallback)
+      : fallback;
+
+    wwebBotLogicModeCache = { at: now, numero: phone, value: mode };
+    return mode;
+  } catch (e) {
+    try { EscribirLog('getWwebBotLogicModeForPhone error: ' + String(e?.message || e), 'error'); } catch {}
+    return fallback;
+  }
+}
+
+function getIncomingApiUrlForLogicMode(mode) {
+  const m = normalizeWwebBotLogicMode(mode);
+  if (m === 'chatgpt') return buildApiChatCabUrlFromApi(api);
+  return api;
+}
+
 
 function normalizeAutoUpdateConfig(conf) {
   if (!conf || typeof conf !== 'object') return {};
@@ -6113,7 +6207,12 @@ telefonoFrom = telefonoFromApi;
       jsonTexto = {Tel_Origen:telefonoFrom,Tel_Destino:telefonoTo, Mensaje:message.body,Respuesta:''};
       // jsonTexto = {Tel_Origen:'5493462674128',Tel_Destino:'5493424293943', Mensaje:message.body,Respuesta:''};
 
-      let url =  api
+     // let url =  api
+      const botLogicMode = await getWwebBotLogicModeForPhone(telefonoTo);
+      let url = getIncomingApiUrlForLogicMode(botLogicMode);
+
+      console.log('[BOT] logic_mode=' + botLogicMode + ' url=' + url);
+      try { EscribirLog('[BOT] logic_mode=' + botLogicMode + ' url=' + url, 'event'); } catch {}
 
       console.log(JSON.stringify(jsonTexto));
       EscribirLog("Mensaje "+JSON.stringify(jsonTexto),'event');
@@ -6379,7 +6478,7 @@ client.on('ready', async () => {
   try { await refreshTenantConfigFromDbPerMessage(); } catch {}
   try { RecuperarJsonConfMensajes(); } catch {}
   try {
-    console.log('[CONFIG] habilitar_bot=' + habilitar_bot + ' habilitar_consulta_mensajes=' + consulta_api_mensajes_habilitado + ' time_cad_ms=' + time_cad);
+     console.log('[CONFIG] habilitar_bot=' + habilitar_bot + ' habilitar_consulta_mensajes=' + consulta_api_mensajes_habilitado + ' wweb_bot_logic_mode=' + wweb_bot_logic_mode + ' time_cad_ms=' + time_cad);
   } catch {}
   startConsultaApiMensajesIfEnabled('ready');
   startCompraEntregaLoopIfEnabled('ready');
