@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.01.01  06/07/2026   */
+/*version: 4.01.02  14/07/2026   */
 
 
 
@@ -2191,6 +2191,12 @@ function initMongoModelsIfNeeded() {
           lockId: { type: String, index: true },
           action: { type: String, index: true },
           reason: { type: String },
+          to: { type: String },
+          waId: { type: String },
+          text: { type: String },
+          body: { type: String },
+          message: { type: String },
+          payload: { type: Object },
           requestedBy: { type: String },
           requestedAt: { type: Date, default: Date.now, index: true },
           consumedAt: { type: Date },
@@ -3483,7 +3489,21 @@ async function handleActionDoc(doc) {
       return ok ? 'whatsapp_restarted' : 'whatsapp_restart_skipped';
     }
 
-    
+    if (['send_message', 'send_text', 'admin_send_message', 'panel_send_message'].includes(action)) {
+      const payload = (doc && doc.payload && typeof doc.payload === 'object') ? doc.payload : {};
+      const toRaw = String(doc?.to || doc?.waId || payload.to || payload.waId || '').trim();
+      const text = String(doc?.text || doc?.body || doc?.message || payload.text || payload.body || payload.message || '').trim();
+      const target = normalizeWwebTargetChatId(toRaw);
+      if (!target || !text) {
+        EscribirLog('Accion SEND_MESSAGE incompleta: to=' + toRaw + ' textLen=' + text.length, 'error');
+        return 'send_message_missing_to_or_text';
+      }
+      EscribirLog('Accion SEND_MESSAGE recibida: to=' + target + ' len=' + text.length, 'event');
+      await safeSendMessage(target, text, { sendSeen: false });
+      return 'message_sent';
+    }
+
+
 
     if (action === 'release') {
       EscribirLog('Accion RELEASE recibida: ' + reason, 'event');
@@ -5975,6 +5995,16 @@ async function safeSendMessage(to, content, opts) {
   const payload = (content === undefined || content === null) ? '' : content;
   return await safeSend(to, payload, opts || { sendSeen: false });
 }
+
+function normalizeWwebTargetChatId(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (/@(c\.us|lid|g\.us|s\.whatsapp\.net)$/i.test(raw)) return raw;
+  const digits = onlyDigits(raw);
+  if (digits) return digits + '@c.us';
+  return raw;
+}
+
 
 function getMessageBodyText(message) {
   return String(message?.body || message?._data?.body || '').trim();
