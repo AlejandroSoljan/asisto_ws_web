@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.01.03  14/07/2026   */
+/*version: 4.01.04  14/07/2026   */
 
 
 
@@ -6052,7 +6052,10 @@ function buildIncomingMediaText(messageType, caption, filename, mimeType, mediaA
   const mimeTxt = mimeType ? (' Tipo: ' + mimeType + '.') : '';
 
   if (messageType === 'audio' || messageType === 'ptt' || messageType === 'voice' || /^audio\//i.test(String(mimeType || ''))) {
-    return cap || ('El cliente envió un audio por WhatsApp Web.' + file + mimeTxt + ' Si el API recibe MediaBase64, transcribilo y procesalo como mensaje del cliente.');
+    // Sin el archivo real no enviamos un texto ficticio a ChatGPT, porque termina
+    // entrando al historial como si fuera lo que dijo el cliente.
+    if (!mediaAttached) return cap;
+    return cap || ('El cliente envió un audio por WhatsApp Web.' + file + mimeTxt);
   }
 
   if (messageType === 'image') {
@@ -6078,6 +6081,64 @@ function buildIncomingMediaText(messageType, caption, filename, mimeType, mediaA
   return cap;
 }
 
+async function downloadIncomingMediaReliable(message, messageType) {
+  const stableId = String(
+    message?.id?._serialized ||
+    message?._data?.id?._serialized ||
+    message?._data?.id?.id ||
+    message?.id?.id ||
+    ''
+  ).trim();
+
+  const delays = [0, 500, 1500, 3000];
+  let lastError = '';
+
+  for (let attempt = 0; attempt < delays.length; attempt++) {
+    if (delays[attempt] > 0) await sleep(delays[attempt]);
+
+    const candidates = [{ source: 'evento', value: message }];
+
+    // En algunas sesiones MD/Linux el objeto recibido por el evento todavía no
+    // tiene listo el contenido del audio. Volvemos a pedir el mensaje completo
+    // por su id antes de darlo por perdido.
+    if (stableId && client && typeof client.getMessageById === 'function') {
+      try {
+        const refreshed = await client.getMessageById(stableId);
+        if (refreshed) candidates.push({ source: 'getMessageById', value: refreshed });
+      } catch (e) {
+        lastError = String(e?.message || e);
+      }
+    }
+
+    for (const candidate of candidates) {
+      try {
+        if (!candidate.value || typeof candidate.value.downloadMedia !== 'function') continue;
+        const media = await candidate.value.downloadMedia();
+        if (media && media.data) {
+          return {
+            media,
+            error: '',
+            source: candidate.source,
+            attempt: attempt + 1,
+            stableId
+          };
+        }
+      } catch (e) {
+        lastError = String(e?.message || e);
+      }
+    }
+  }
+
+  return {
+    media: null,
+    error: lastError,
+    source: '',
+    attempt: delays.length,
+    stableId
+  };
+}
+
+
 async function buildIncomingBotPayload(message) {
   const messageType = normalizeIncomingMessageType(message);
   const caption = String(message?.caption || message?._data?.caption || '').trim();
@@ -6095,21 +6156,17 @@ async function buildIncomingBotPayload(message) {
   let media = null;
   let mediaError = '';
 
-  // Para PTT/audio WhatsApp Web puede informar hasMedia=false o undefined aunque
-  // downloadMedia() sí tenga el archivo disponible. No usamos hasMedia como corte.
-  // Reintentamos porque los audios pueden tardar unos milisegundos en quedar listos.
-  if (typeof message?.downloadMedia === 'function') {
-    const delays = [0, 350, 900];
-    for (let attempt = 0; attempt < delays.length && !(media && media.data); attempt++) {
-      if (delays[attempt] > 0) await sleep(delays[attempt]);
-      try {
-        media = await message.downloadMedia();
-      } catch (e) {
-        mediaError = String(e?.message || e);
-      }
-    }
-  }
+  let mediaDownloadSource = '';
+  let mediaDownloadAttempt = 0;
+  let mediaStableId = '';
 
+  // Lectura robusta del adjunto entrante de WhatsApp Web.
+  const downloaded = await downloadIncomingMediaReliable(message, messageType);
+  media = downloaded.media;
+  mediaError = downloaded.error || '';
+  mediaDownloadSource = downloaded.source || '';
+  mediaDownloadAttempt = downloaded.attempt || 0;
+  mediaStableId = downloaded.stableId || '';
   // Mismo fallback que el script que ya reenvía correctamente los adjuntos:
   // algunas versiones dejan el base64 directamente en message._data.body.
   if ((!media || !media.data) && typeof message?._data?.body === 'string') {
@@ -6149,6 +6206,9 @@ async function buildIncomingBotPayload(message) {
     const mediaLog = '[BOT_MEDIA] type=' + messageType +
       ' hasMediaFlag=' + String(message?.hasMedia === true) +
       ' downloaded=' + String(mediaDownloaded) +
+      ' source=' + String(mediaDownloadSource || '-') +
+      ' attempt=' + String(mediaDownloadAttempt || 0) +
+      ' id=' + String(mediaStableId || '-') +
       ' bytes=' + String(mediaBytes) +
       ' omitted=' + String(!!(media?.data && !includeBase64)) +
       (mediaError ? (' error=' + mediaError) : '');
