@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.01.02  14/07/2026   */
+/*version: 4.01.03  14/07/2026   */
 
 
 
@@ -6094,12 +6094,41 @@ async function buildIncomingBotPayload(message) {
 
   let media = null;
   let mediaError = '';
-  try {
-    if (message?.hasMedia === true && typeof message.downloadMedia === 'function') {
-      media = await message.downloadMedia();
+
+  // Para PTT/audio WhatsApp Web puede informar hasMedia=false o undefined aunque
+  // downloadMedia() sí tenga el archivo disponible. No usamos hasMedia como corte.
+  // Reintentamos porque los audios pueden tardar unos milisegundos en quedar listos.
+  if (typeof message?.downloadMedia === 'function') {
+    const delays = [0, 350, 900];
+    for (let attempt = 0; attempt < delays.length && !(media && media.data); attempt++) {
+      if (delays[attempt] > 0) await sleep(delays[attempt]);
+      try {
+        media = await message.downloadMedia();
+      } catch (e) {
+        mediaError = String(e?.message || e);
+      }
     }
-  } catch (e) {
-    mediaError = String(e?.message || e);
+  }
+
+  // Mismo fallback que el script que ya reenvía correctamente los adjuntos:
+  // algunas versiones dejan el base64 directamente en message._data.body.
+  if ((!media || !media.data) && typeof message?._data?.body === 'string') {
+    const rawBody = String(message._data.body || '').replace(/\s+/g, '');
+    const looksLikeBase64 =
+      rawBody.length >= 128 &&
+      rawBody.length % 4 === 0 &&
+      /^[A-Za-z0-9+/]+={0,2}$/.test(rawBody);
+
+    if (looksLikeBase64) {
+      media = {
+        mimetype: String(message?._data?.mimetype || 'application/octet-stream'),
+        data: rawBody,
+        filename: String(message?._data?.filename || message?._data?.fileName || '')
+      };
+    }
+  }
+
+  if ((!media || !media.data) && mediaError) {
     try { EscribirLog('[BOT_MEDIA] downloadMedia error type=' + messageType + ': ' + mediaError, 'error'); } catch {}
   }
 
@@ -6115,12 +6144,24 @@ async function buildIncomingBotPayload(message) {
    } catch {}
   }
 
-  const mensaje = buildIncomingMediaText(messageType, body || caption, filename, mimeType, !!media);
+  const mediaDownloaded = !!(media && media.data);
+  try {
+    const mediaLog = '[BOT_MEDIA] type=' + messageType +
+      ' hasMediaFlag=' + String(message?.hasMedia === true) +
+      ' downloaded=' + String(mediaDownloaded) +
+      ' bytes=' + String(mediaBytes) +
+      ' omitted=' + String(!!(media?.data && !includeBase64)) +
+      (mediaError ? (' error=' + mediaError) : '');
+    console.log(mediaLog);
+    EscribirLog(mediaLog, mediaDownloaded ? 'event' : 'error');
+  } catch {}
+
+  const mensaje = buildIncomingMediaText(messageType, body || caption, filename, mimeType, mediaDownloaded);
 
   return {
     mensaje,
     type: messageType,
-    hasMedia: !!media,
+    hasMedia: mediaDownloaded,
     media: media ? {
       mimetype: mimeType,
       filename,
@@ -6389,13 +6430,11 @@ telefonoFrom = telefonoFromApi;
         jsonTexto.MediaFilename = incomingBotPayload.media.filename || '';
         jsonTexto.MediaBytes = incomingBotPayload.media.bytes || 0;
         jsonTexto.MediaBase64 = incomingBotPayload.media.data || '';
-        jsonTexto.MediaData = incomingBotPayload.media.data || '';
         jsonTexto.MediaOmittedBySize = !!incomingBotPayload.media.omittedBySize;
         jsonTexto.MediaError = incomingBotPayload.media.error || incomingBotPayload.mediaError || '';
         jsonTexto.media = {
           mimetype: jsonTexto.MediaMimeType,
           filename: jsonTexto.MediaFilename,
-          data: jsonTexto.MediaBase64,
           bytes: jsonTexto.MediaBytes
         };
       }
