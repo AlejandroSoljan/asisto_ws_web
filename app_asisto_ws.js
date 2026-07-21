@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.01.05  14/07/2026   */
+/*version: 4.01.06  14/07/2026   */
 
 
 
@@ -6109,6 +6109,275 @@ async function tryDownloadIncomingMedia(messageLike, source, timeoutMs) {
     return { media: null, error: String(e?.message || e) };
   }
 }
+// whatsapp-web.js corta Message.downloadMedia() inmediatamente cuando el objeto
+// Node llega con hasMedia=false. En algunas sesiones multidispositivo eso ocurre
+// aunque el mensaje real dentro del navegador sí tenga directPath/mediaKey.
+// Este fallback descarga desde el Store interno del navegador y evita ese corte.
+async function tryDownloadIncomingMediaFromBrowserStore(stableId, timeoutMs = 20000) {
+  const msgId = String(stableId || '').trim();
+  if (!msgId) {
+    return { media: null, error: 'browser_store_msg_id_missing', source: '' };
+  }
+
+  if (!client || !client.pupPage || typeof client.pupPage.evaluate !== 'function') {
+    return { media: null, error: 'browser_store_pupPage_unavailable', source: '' };
+  }
+
+  try {
+    const result = await promiseWithTimeout(
+      client.pupPage.evaluate(async (id) => {
+        const errors = [];
+
+        const errorText = (e) => {
+          try { return String(e && (e.message || e.stack) ? (e.message || e.stack) : e); }
+          catch { return 'unknown_error'; }
+        };
+
+        const toBase64 = async (arrayBuffer) => {
+          if (window.WWebJS && typeof window.WWebJS.arrayBufferToBase64Async === 'function') {
+            return await window.WWebJS.arrayBufferToBase64Async(arrayBuffer);
+          }
+
+          const bytes = new Uint8Array(arrayBuffer);
+          let binary = '';
+          const chunkSize = 0x8000;
+          for (let i = 0; i < bytes.length; i += chunkSize) {
+            const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+            binary += String.fromCharCode.apply(null, Array.from(chunk));
+          }
+          return window.btoa(binary);
+        };
+
+        const serializeBlob = async (blob, source, meta = {}) => {
+          if (!blob || typeof blob.arrayBuffer !== 'function') return null;
+          const arrayBuffer = await blob.arrayBuffer();
+          const data = await toBase64(arrayBuffer);
+          if (!data) return null;
+          return {
+            ok: true,
+            source,
+            data,
+            mimetype: String(meta.mimetype || blob.type || ''),
+            filename: String(meta.filename || ''),
+            filesize: Number(meta.filesize || blob.size || arrayBuffer.byteLength || 0)
+          };
+        };
+
+        // Camino moderno de whatsapp-web.js. Esta función trabaja con el mensaje
+        // real del Store del navegador y fuerza la descarga cuando hace falta.
+        try {
+          if (window.WWebJS && typeof window.WWebJS.resolveMediaBlob === 'function') {
+            const resolved = await window.WWebJS.resolveMediaBlob(id);
+            if (resolved && resolved.blob) {
+              const serialized = await serializeBlob(resolved.blob, 'resolveMediaBlob', {
+                mimetype: resolved.mimetype,
+                filename: resolved.filename,
+                filesize: resolved.filesize
+              });
+              if (serialized) return serialized;
+            }
+            errors.push('resolveMediaBlob_empty');
+          } else {
+            errors.push('resolveMediaBlob_unavailable');
+         }
+        } catch (e) {
+          errors.push('resolveMediaBlob:' + errorText(e));
+        }
+
+        let msg = null;
+
+        // Store actual.
+        try {
+          const collections = typeof window.require === 'function'
+            ? window.require('WAWebCollections')
+            : null;
+          const msgCollection = collections && collections.Msg;
+          if (msgCollection) {
+            if (typeof msgCollection.get === 'function') msg = msgCollection.get(id) || null;
+            if (!msg && typeof msgCollection.getMessagesById === 'function') {
+              const found = await msgCollection.getMessagesById([id]);
+              msg = found && found.messages && found.messages[0] ? found.messages[0] : null;
+            }
+          }
+        } catch (e) {
+          errors.push('WAWebCollections:' + errorText(e));
+        }
+
+        // Compatibilidad con versiones anteriores.
+        if (!msg) {
+          try {
+            const msgCollection = window.Store && window.Store.Msg;
+            if (msgCollection) {
+              if (typeof msgCollection.get === 'function') msg = msgCollection.get(id) || null;
+              if (!msg && typeof msgCollection.getMessagesById === 'function') {
+                const found = await msgCollection.getMessagesById([id]);
+                msg = found && found.messages && found.messages[0] ? found.messages[0] : null;
+              }
+            }
+          } catch (e) {
+            errors.push('Store.Msg:' + errorText(e));
+          }
+        }
+
+        if (!msg) {
+          return { ok: false, error: errors.concat(['browser_store_message_not_found']).join(' | ') };
+        }
+
+        // Forzar la descarga sobre el modelo interno del navegador. Este método no
+        // depende del hasMedia del wrapper Node recibido por el evento.
+        try {
+          if (typeof msg.downloadMedia === 'function') {
+            await msg.downloadMedia({
+              downloadEvenIfExpensive: true,
+              rmrReason: 1,
+              isUserInitiated: true
+            });
+          }
+        } catch (e) {
+          errors.push('store_msg_downloadMedia:' + errorText(e));
+        }
+
+        // Helper de descarga usado por varias versiones anteriores de
+        // whatsapp-web.js. También trabaja con el modelo interno, no con el wrapper Node.
+        try {
+          if (window.WWebJS && typeof window.WWebJS.downloadMedia === 'function') {
+            const downloaded = await window.WWebJS.downloadMedia(msg);
+            if (downloaded && downloaded.data) {
+              return {
+                ok: true,
+                source: 'WWebJS.downloadMedia',
+                data: String(downloaded.data),
+                mimetype: String(downloaded.mimetype || msg.mimetype || ''),
+                filename: String(downloaded.filename || msg.filename || ''),
+                filesize: Number(downloaded.filesize || msg.size || 0)
+              };
+            }
+            errors.push('WWebJS.downloadMedia_empty');
+          } else {
+            errors.push('WWebJS.downloadMedia_unavailable');
+          }
+        } catch (e) {
+          errors.push('WWebJS.downloadMedia:' + errorText(e));
+        }
+
+        // Blob cache de las versiones actuales.
+        try {
+          let blob = null;
+          try {
+            if (typeof window.require === 'function') {
+              const cacheModule = window.require('WAWebMediaInMemoryBlobCache');
+              const cache = cacheModule && cacheModule.InMemoryMediaBlobCache;
+              const filehash = msg && msg.mediaObject && msg.mediaObject.filehash;
+              if (cache && filehash && typeof cache.get === 'function') blob = cache.get(filehash) || null;
+            }
+          } catch (e) {
+            errors.push('media_blob_cache:' + errorText(e));
+          }
+
+          if (!blob && msg && msg.mediaObject && msg.mediaObject.mediaBlob) {
+            const mediaBlob = msg.mediaObject.mediaBlob;
+            if (typeof mediaBlob.forceToBlob === 'function') blob = mediaBlob.forceToBlob();
+            else if (typeof mediaBlob.arrayBuffer === 'function') blob = mediaBlob;
+          }
+
+          if (blob) {
+            const serialized = await serializeBlob(blob, 'browserMediaBlob', {
+              mimetype: msg.mimetype,
+              filename: msg.filename,
+              filesize: msg.size
+            });
+            if (serialized) return serialized;
+          }
+          errors.push('browserMediaBlob_empty');
+        } catch (e) {
+          errors.push('browserMediaBlob:' + errorText(e));
+        }
+
+        // Camino utilizado por versiones anteriores de whatsapp-web.js.
+        try {
+          const downloadManager = window.Store && window.Store.DownloadManager;
+          if (
+            downloadManager &&
+            typeof downloadManager.downloadAndMaybeDecrypt === 'function' &&
+            msg.directPath &&
+            msg.mediaKey
+          ) {
+            const decrypted = await downloadManager.downloadAndMaybeDecrypt({
+              directPath: msg.directPath,
+              encFilehash: msg.encFilehash,
+              filehash: msg.filehash,
+              mediaKey: msg.mediaKey,
+              mediaKeyTimestamp: msg.mediaKeyTimestamp,
+              type: msg.type,
+              signal: new AbortController().signal
+            });
+
+            if (decrypted) {
+              let arrayBuffer = null;
+              if (decrypted instanceof ArrayBuffer) {
+                arrayBuffer = decrypted;
+              } else if (decrypted.buffer instanceof ArrayBuffer) {
+                const offset = Number(decrypted.byteOffset || 0);
+                const length = Number(decrypted.byteLength || decrypted.length || decrypted.buffer.byteLength);
+                arrayBuffer = decrypted.buffer.slice(offset, offset + length);
+              }
+              if (arrayBuffer) {
+                const data = await toBase64(arrayBuffer);
+                if (data) {
+                  return {
+                    ok: true,
+                    source: 'downloadAndMaybeDecrypt',
+                    data,
+                    mimetype: String(msg.mimetype || ''),
+                    filename: String(msg.filename || ''),
+                    filesize: Number(msg.size || arrayBuffer.byteLength || 0)
+                  };
+                }
+              }
+            }
+            errors.push('downloadAndMaybeDecrypt_empty');
+          } else {
+            errors.push('downloadAndMaybeDecrypt_unavailable');
+          }
+        } catch (e) {
+          errors.push('downloadAndMaybeDecrypt:' + errorText(e));
+        }
+
+        return { ok: false, error: errors.join(' | ') || 'browser_store_media_empty' };
+      }, msgId),
+      timeoutMs,
+      'browser_store_media'
+    );
+
+    if (result && result.ok === true && result.data) {
+      const media = {
+        mimetype: String(result.mimetype || 'application/octet-stream'),
+        data: String(result.data),
+        filename: String(result.filename || '')
+      };
+
+      try {
+        const bytes = Buffer.byteLength(media.data, 'base64');
+        const log = '[BOT_MEDIA_BROWSER] id=' + msgId +
+          ' source=' + String(result.source || 'browser') +
+          ' bytes=' + String(bytes) +
+          ' mime=' + media.mimetype;
+        console.log(log);
+        EscribirLog(log, 'event');
+      } catch {}
+
+      return { media, error: '', source: String(result.source || 'browser') };
+    }
+
+    return {
+      media: null,
+      error: String(result?.error || 'browser_store_empty_media'),
+      source: String(result?.source || '')
+    };
+  } catch (e) {
+    return { media: null, error: String(e?.message || e), source: '' };
+  }
+}
 
 
 async function downloadIncomingMediaReliable(message, messageType) {
@@ -6120,86 +6389,96 @@ async function downloadIncomingMediaReliable(message, messageType) {
     ''
   ).trim();
 
-  // IMPORTANTE: primero se descarga desde el objeto entregado por el evento.
-  // No se llama antes a client.getMessageById(), porque en algunas sesiones esa
-  // consulta queda esperando y bloquea por completo el procesamiento del audio.
-  const delays = [0, 700, 1600, 3000];
+
   let lastError = '';
 
-  for (let attempt = 0; attempt < delays.length; attempt++) {
-    if (delays[attempt] > 0) await sleep(delays[attempt]);
+  // 1) Camino normal. Funciona cuando el wrapper Node llegó con hasMedia=true.
+  const direct = await tryDownloadIncomingMedia(message, 'evento', 7000);
+  if (direct.media) {
+    return {
+      media: direct.media,
+      error: '',
+      source: 'evento',
+      attempt: 1,
+      stableId
+    };
+  }
+  lastError = direct.error || lastError;
 
-    const direct = await tryDownloadIncomingMedia(message, 'evento', 10000);
-    if (direct.media) {
+  // 2) Camino principal para el problema actual: descargar desde el Store real
+  // de WhatsApp dentro de Chromium, aunque message.hasMedia haya llegado en false.
+  if (stableId) {
+    const browserDirect = await tryDownloadIncomingMediaFromBrowserStore(stableId, 20000);
+    if (browserDirect.media) {
       return {
-        media: direct.media,
+        media: browserDirect.media,
         error: '',
-        source: 'evento',
-        attempt: attempt + 1,
+        source: browserDirect.source || 'browserStore',
+        attempt: 1,
         stableId
       };
     }
-    lastError = direct.error || lastError;
-  
-    // Recién si falló el objeto original, intentamos recuperar otra instancia
-    // del mismo mensaje. Cada operación tiene timeout para que nunca deje al bot
-    // colgado sin responder.
-    if (stableId && client && typeof client.getMessageById === 'function') {
-      try {
-        const refreshed = await promiseWithTimeout(
-          client.getMessageById(stableId),
-          5000,
-          'getMessageById'
-        );
-        if (refreshed) {
-          const refreshedDownload = await tryDownloadIncomingMedia(refreshed, 'getMessageById', 10000);
-          if (refreshedDownload.media) {
-            return {
-              media: refreshedDownload.media,
-              error: '',
-              source: 'getMessageById',
-              attempt: attempt + 1,
-              stableId
-            };
-          }
-          lastError = refreshedDownload.error || lastError;
-        }
-      } catch (e) {
-        lastError = String(e?.message || e);
-      }
-    }
+    lastError = browserDirect.error || lastError;
+  }
 
-    // Último fallback: volver a leer los mensajes recientes del chat y buscar
-    // el mismo id. Esto ayuda en sesiones multidispositivo donde el evento llega
-    // antes de que el adjunto quede completamente hidratado.
+  // 3) Recargar el mismo Message y volver a intentar. Algunas versiones hidratan
+  // directPath después de reload().
+  try {
+    if (typeof message?.reload === 'function') {
+      await promiseWithTimeout(message.reload(), 6000, 'message_reload');
+      const reloaded = await tryDownloadIncomingMedia(message, 'message_reload', 7000);
+      if (reloaded.media) {
+        return {
+          media: reloaded.media,
+          error: '',
+          source: 'message_reload',
+          attempt: 2,
+          stableId
+        };
+      }
+      lastError = reloaded.error || lastError;
+    }
+  } catch (e) {
+    lastError = String(e?.message || e);
+  }
+
+  // 4) Un segundo intento corto desde el navegador, después de dar tiempo a que
+  // WhatsApp complete la descarga/hidratación del PTT.
+  await sleep(900);
+  if (stableId) {
+    const browserRetry = await tryDownloadIncomingMediaFromBrowserStore(stableId, 20000);
+    if (browserRetry.media) {
+      return {
+        media: browserRetry.media,
+        error: '',
+        source: browserRetry.source || 'browserStoreRetry',
+        attempt: 2,
+        stableId
+      };
+    }
+    lastError = browserRetry.error || lastError;
+  }
+  // 5) Respaldo final con getMessageById, sin repetir cuatro rondas inútiles.
+  if (stableId && client && typeof client.getMessageById === 'function') {
     try {
-      if (typeof message?.getChat === 'function') {
-        const chat = await promiseWithTimeout(message.getChat(), 5000, 'getChat');
-        if (chat && typeof chat.fetchMessages === 'function') {
-          const rows = await promiseWithTimeout(
-            chat.fetchMessages({ limit: 20 }),
-            7000,
-            'fetchMessages'
-          );
-          const list = Array.isArray(rows) ? rows : [];
-          const same = list.find((m) => String(
-            m?.id?._serialized || m?._data?.id?._serialized || m?._data?.id?.id || m?.id?.id || ''
-          ).trim() === stableId);
-          if (same) {
-            const fetchedDownload = await tryDownloadIncomingMedia(same, 'fetchMessages', 10000);
-            if (fetchedDownload.media) {
-              return {
-                media: fetchedDownload.media,
-                error: '',
-                source: 'fetchMessages',
-                attempt: attempt + 1,
-                stableId
-              };
-            }
-            lastError = fetchedDownload.error || lastError;
-          }
-          }
-        }
+      const refreshed = await promiseWithTimeout(
+        client.getMessageById(stableId),
+        6000,
+        'getMessageById'
+      );
+      if (refreshed) {
+        const refreshedDownload = await tryDownloadIncomingMedia(refreshed, 'getMessageById', 7000);
+        if (refreshedDownload.media) {
+          return {
+            media: refreshedDownload.media,
+            error: '',
+            source: 'getMessageById',
+            attempt: 3,
+            stableId
+          };
+         }
+        lastError = refreshedDownload.error || lastError;
+      }
     } catch (e) {
       lastError = String(e?.message || e);
       }
@@ -6210,7 +6489,7 @@ async function downloadIncomingMediaReliable(message, messageType) {
     media: null,
     error: lastError || 'media_not_available',
     source: '',
-    attempt: delays.length,
+    attempt: 3,
     stableId
   };
 }
