@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.01.06  14/07/2026   */
+/*version: 4.01.07  14/07/2026   */
 
 
 
@@ -6295,13 +6295,32 @@ async function tryDownloadIncomingMediaFromBrowserStore(stableId, timeoutMs = 20
 
         // Camino utilizado por versiones anteriores de whatsapp-web.js.
         try {
-          const downloadManager = window.Store && window.Store.DownloadManager;
+          // Usar el módulo real que usa Message.downloadMedia() en
+          // whatsapp-web.js. window.Store.DownloadManager no existe en las
+          // versiones actuales y por eso siempre terminaba en unavailable.
+          const downloadManagerModule = typeof window.require === 'function'
+            ? window.require('WAWebDownloadManager')
+            : null;
+          const downloadManager =
+            downloadManagerModule && (
+              downloadManagerModule.downloadManager ||
+              (downloadManagerModule.default && downloadManagerModule.default.downloadManager) ||
+              downloadManagerModule.DownloadManager ||
+              downloadManagerModule
+            );
+
           if (
             downloadManager &&
             typeof downloadManager.downloadAndMaybeDecrypt === 'function' &&
             msg.directPath &&
             msg.mediaKey
           ) {
+
+            const mockQpl = {
+              addAnnotations() { return this; },
+              addPoint() { return this; }
+            };
+
             const decrypted = await downloadManager.downloadAndMaybeDecrypt({
               directPath: msg.directPath,
               encFilehash: msg.encFilehash,
@@ -6309,7 +6328,8 @@ async function tryDownloadIncomingMediaFromBrowserStore(stableId, timeoutMs = 20
               mediaKey: msg.mediaKey,
               mediaKeyTimestamp: msg.mediaKeyTimestamp,
               type: msg.type,
-              signal: new AbortController().signal
+              signal: new AbortController().signal,
+              downloadQpl: mockQpl
             });
 
             if (decrypted) {
@@ -6369,9 +6389,15 @@ async function tryDownloadIncomingMediaFromBrowserStore(stableId, timeoutMs = 20
       return { media, error: '', source: String(result.source || 'browser') };
     }
 
+    const browserError = String(result?.error || 'browser_store_empty_media');
+    const browserFailLog = '[BOT_MEDIA_BROWSER] FAIL id=' + msgId + ' error=' + browserError;
+    console.log(browserFailLog);
+    try { EscribirLog(browserFailLog, 'event'); } catch {}
+    try { EscribirLog(browserFailLog, 'error'); } catch {}
+
     return {
       media: null,
-      error: String(result?.error || 'browser_store_empty_media'),
+      error: browserError,
       source: String(result?.source || '')
     };
   } catch (e) {
@@ -6569,7 +6595,8 @@ async function buildIncomingBotPayload(message) {
       ' omitted=' + String(!!(media?.data && !includeBase64)) +
       (mediaError ? (' error=' + mediaError) : '');
     console.log(mediaLog);
-    EscribirLog(mediaLog, mediaDownloaded ? 'event' : 'error');
+    EscribirLog(mediaLog, 'event');
+    if (!mediaDownloaded) EscribirLog(mediaLog, 'error');
   } catch {}
 
   const mensaje = buildIncomingMediaText(messageType, body || caption, filename, mimeType, mediaDownloaded);
@@ -6798,6 +6825,7 @@ EscribirLog(message.from +' '+message.to+' '+message.type+' '+message.body ,"eve
         ' type=' + incomingType + ' error=' + mediaError;
       console.log(audioLog);
       try { EscribirLog(audioLog, 'error'); } catch {}
+      try { EscribirLog(audioLog, 'event'); } catch {}
       try {
         await safeSendMessage(
           message.from,
