@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.01.08  14/07/2026   */
+/*version: 4.01.09  14/07/2026   */
 
 
 
@@ -6094,13 +6094,8 @@ function promiseWithTimeout(promise, timeoutMs, label) {
 
 
 
-function isIncomingMediaType(message, messageType) {
-  const type = String(messageType || message?.type || message?._data?.type || '').trim().toLowerCase();
-  const mimeType = String(message?._data?.mimetype || '').trim().toLowerCase();
-  return ['audio', 'ptt', 'voice', 'image', 'document', 'video', 'sticker'].includes(type) ||
-    /^(audio|image|video)\//.test(mimeType) ||
-    mimeType.includes('pdf');
-}
+
+
 
 
 async function downloadIncomingMediaReliable(message, messageType) {
@@ -6113,63 +6108,108 @@ async function downloadIncomingMediaReliable(message, messageType) {
   ).trim();
 
 
- if (!message || typeof message.downloadMedia !== 'function') {
-    return {
-      media: null,
-      error: 'downloadMedia_not_available',
-      source: '',
-      attempt: 0,
-      stableId
-    };
+  if (!message) {
+    return { media: null, error: 'message_missing', source: '', attempt: 0, stableId };
   }
-  // whatsapp-web.js usa hasMedia como corte previo. En algunos PTT el wrapper
-  // llega con hasMedia=false aunque el tipo sea audio y el archivo esté en el
-  // navegador. Forzamos ese indicador únicamente durante downloadMedia().
-  const hadOwnHasMedia = Object.prototype.hasOwnProperty.call(message, 'hasMedia');
-  const originalHasMedia = message.hasMedia;
-  const forceHasMedia = isIncomingMediaType(message, messageType) && originalHasMedia !== true;
-  let lastError = '';
+  
+  const isAudio = ['audio', 'ptt', 'voice'].includes(String(messageType || '').toLowerCase());
+  const delays = [0, 400, 900, 1600, 2600];
+    let lastError = '';
+  let lastSource = '';
 
+  for (let attempt = 0; attempt < delays.length; attempt++) {
+    if (delays[attempt] > 0) await sleep(delays[attempt]);
 
-  try {
-    if (forceHasMedia) message.hasMedia = true;
+    const candidates = [];
 
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      if (attempt === 2) await sleep(500);
+    // La API oficial de whatsapp-web.js expone reload(): vuelve a leer el mensaje
+    // desde el Store de WhatsApp y actualiza directPath/hasMedia. En PTT el evento
+    // puede llegar antes de que esos datos estén listos.
+    try {
+      if (typeof message.reload === 'function') {
+        const reloaded = await promiseWithTimeout(message.reload(), 10000, 'message_reload');
+        if (reloaded) candidates.push({ source: 'message.reload', value: reloaded });
+      }
+    } catch (e) {
+      lastError = 'message.reload:' + String(e?.message || e);
+    }
+
+    // El objeto del evento sigue siendo candidato aunque reload no exista en una
+    // versión vieja de whatsapp-web.js.
+    candidates.push({ source: 'event', value: message });
+
+    // Segundo camino oficial: recuperar nuevamente el mensaje por su ID.
+    if (stableId && client && typeof client.getMessageById === 'function') {
       try {
-        const media = await promiseWithTimeout(
-          message.downloadMedia(),
-          12000,
-          'downloadMedia'
+        const refreshed = await promiseWithTimeout(
+          client.getMessageById(stableId),
+          10000,
+          'getMessageById'
         );
+        if (refreshed) {
+          try {
+            if (typeof refreshed.reload === 'function') {
+              await promiseWithTimeout(refreshed.reload(), 10000, 'refreshed_reload');
+            }
+          } catch (e) {
+            lastError = 'refreshed.reload:' + String(e?.message || e);
+          }
+          candidates.push({ source: 'getMessageById', value: refreshed });
+       }
+      } catch (e) {
+        lastError = 'getMessageById:' + String(e?.message || e);
+      }
+    }
+
+    const seen = new Set();
+    for (const candidate of candidates) {
+      const msg = candidate.value;
+      if (!msg || typeof msg.downloadMedia !== 'function') continue;
+      if (seen.has(msg)) continue;
+      seen.add(msg);
+
+      const originalHasMedia = msg.hasMedia;
+      const forceHasMedia = isAudio && originalHasMedia !== true;
+
+
+      try {
+        // downloadMedia() corta inmediatamente cuando hasMedia=false. Después de
+        // reload/getMessageById el Store ya contiene el mensaje actualizado; para
+        // versiones que no repatchan el flag, se habilita solo durante esta llamada.
+        if (forceHasMedia) msg.hasMedia = true;
+
+        const media = await promiseWithTimeout(
+          msg.downloadMedia(),
+          15000,
+          candidate.source + '_downloadMedia'
+        );
+        lastSource = candidate.source + (forceHasMedia ? '+forceHasMedia' : '');
 
         if (media && media.data) {
           return {
             media,
             error: '',
-            source: forceHasMedia ? 'downloadMedia_force_hasMedia' : 'downloadMedia',
-            attempt,
+            source: lastSource,
+            attempt: attempt + 1,
             stableId
           };
         }
 
-        lastError = 'downloadMedia_empty';
+        lastError = candidate.source + ':downloadMedia_empty';
       } catch (e) {
-        lastError = String(e?.message || e);
+        lastError = candidate.source + ':' + String(e?.message || e);
+      } finally {
+        try { msg.hasMedia = originalHasMedia; } catch {}
       }
     }
-  } finally {
-    try {
-      if (hadOwnHasMedia) message.hasMedia = originalHasMedia;
-      else delete message.hasMedia;
-    } catch {}
+  
   }
 
   return {
     media: null,
-    error: lastError || 'media_not_available',
-    source: forceHasMedia ? 'downloadMedia_force_hasMedia' : 'downloadMedia',
-    attempt: 2,
+    error: lastError || 'media_not_available_after_reload',
+    source: lastSource,
+    attempt: delays.length,
     stableId
   };
 }
