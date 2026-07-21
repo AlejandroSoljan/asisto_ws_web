@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.01.09  14/07/2026   */
+/*version: 4.01.10  14/07/2026   */
 
 
 
@@ -1157,33 +1157,87 @@ function shouldProcessIncomingMessage(message, source) {
 function scheduleIncomingFromMessageCreate(message, handler) {
   try {
     if (!message || message.fromMe === true) return;
-   const id = getMessageStableId(message);
-    const delay = Math.max(500, Number(
+
+    const id = getMessageStableId(message);
+    const type = String(message?.type || message?._data?.type || '').trim().toLowerCase();
+    const mimeType = String(message?._data?.mimetype || '').trim().toLowerCase();
+    const isMedia = ['audio', 'ptt', 'voice', 'image', 'document', 'video', 'sticker'].includes(type) ||
+      /^(audio|image|video)\//.test(mimeType) || mimeType.includes('pdf');
+
+    const configuredDelay = Number(
       tenantConfig?.message_create_fallback_ms ||
       tenantConfig?.messageCreateFallbackMs ||
       process.env.MESSAGE_CREATE_FALLBACK_MS ||
-      1500
-    ));
+      0
+    );
 
-    // message tiene prioridad. message_create queda solo como fallback demorado.
-    if (!id) {
-      setTimeout(() => handler(message, 'message_create_fallback').catch(() => {}), delay);
-      return;
-     
-    }
-    if (recentIncomingProcessIds.has(id) || incomingCreateFallbackTimers.has(id)) return;
-    const timer = setTimeout(async () => {
-      incomingCreateFallbackTimers.delete(id);
-      if (recentIncomingProcessIds.has(id)) {
+    // Los PTT suelen aparecer primero por message_create sin directPath/mediaKey.
+    // Damos prioridad al evento message y usamos message_create solo si no llegó.
+    const delay = isMedia
+      ? Math.max(6000, Number.isFinite(configuredDelay) && configuredDelay > 0 ? configuredDelay : 6000)
+      : Math.max(500, Number.isFinite(configuredDelay) && configuredDelay > 0 ? configuredDelay : 1500);
+
+    const runFallback = async () => {
+      if (id) incomingCreateFallbackTimers.delete(id);
+      if (id && recentIncomingProcessIds.has(id)) {
         try { console.log('[INCOMING] message_create fallback skip id=' + id); } catch {}
         return;
       }
-     await handler(message, 'message_create_fallback');
-        }, delay);
+      let candidate = message;
+
+      // Para adjuntos intentamos rehidratar el mensaje antes de procesarlo.
+      // Esto evita usar el wrapper incompleto que suele llegar primero para PTT.
+      if (isMedia) {
+        try {
+          if (typeof candidate?.reload === 'function') {
+            await promiseWithTimeout(candidate.reload(), 4000, 'message_create_reload');
+          }
+        } catch {}
+
+        try {
+          if (id && client && typeof client.getMessageById === 'function') {
+            const hydrated = await promiseWithTimeout(
+              client.getMessageById(id),
+              5000,
+              'message_create_getMessageById'
+            );
+            if (hydrated) candidate = hydrated;
+          }
+        } catch {}
+      }
+
+      // Mientras hidratábamos pudo haber llegado el evento message completo.
+      if (id && recentIncomingProcessIds.has(id)) {
+        try { console.log('[INCOMING] message_create fallback hidratado skip id=' + id); } catch {}
+        return;
+      }
+
+      const fallbackLog = '[MESSAGE_CREATE_FALLBACK] procesando id=' + String(id || '') +
+        ' type=' + type + ' media=' + String(isMedia);
+      try { console.log(fallbackLog); } catch {}
+      try { EscribirLog(fallbackLog, 'event'); } catch {}
+
+      try {
+        await handler(candidate, 'message_create_fallback');
+      } catch (e) {
+        const errLog = '[MESSAGE_CREATE_FALLBACK] error id=' + String(id || '') + ': ' + String(e?.message || e);
+        try { console.log(errLog); } catch {}
+        try { EscribirLog(errLog, 'error'); } catch {}
+      }
+    };
+
+    if (!id) {
+      setTimeout(runFallback, delay);
+      return;
+    }
+
+    if (recentIncomingProcessIds.has(id) || incomingCreateFallbackTimers.has(id)) return;
+    const timer = setTimeout(runFallback, delay);
 
     incomingCreateFallbackTimers.set(id, timer);
   } catch (e) {
     try { console.log('[message_create] schedule error:', e?.message || e); } catch {}
+    try { EscribirLog('[message_create] schedule error: ' + String(e?.message || e), 'error'); } catch {}
   }
 }
 
@@ -6108,110 +6162,186 @@ async function downloadIncomingMediaReliable(message, messageType) {
   ).trim();
 
 
-  if (!message) {
-    return { media: null, error: 'message_missing', source: '', attempt: 0, stableId };
+  if (!message || !stableId) {
+    return { media: null, error: !message ? 'message_missing' : 'message_id_missing', source: '', attempt: 0, stableId };
   }
   
   const isAudio = ['audio', 'ptt', 'voice'].includes(String(messageType || '').toLowerCase());
-  const delays = [0, 400, 900, 1600, 2600];
-    let lastError = '';
-  let lastSource = '';
+  let directError = '';
 
-  for (let attempt = 0; attempt < delays.length; attempt++) {
-    if (delays[attempt] > 0) await sleep(delays[attempt]);
-
-    const candidates = [];
-
-    // La API oficial de whatsapp-web.js expone reload(): vuelve a leer el mensaje
-    // desde el Store de WhatsApp y actualiza directPath/hasMedia. En PTT el evento
-    // puede llegar antes de que esos datos estén listos.
+  // Primero usamos el método normal de whatsapp-web.js. Para PTT algunas versiones
+  // entregan hasMedia=false aunque el mensaje interno ya tiene el audio; el flag se
+  // fuerza solamente durante esta llamada porque downloadMedia() lo usa como corte.
+  if (typeof message.downloadMedia === 'function') {
+    const originalHasMedia = message.hasMedia;
     try {
-      if (typeof message.reload === 'function') {
-        const reloaded = await promiseWithTimeout(message.reload(), 10000, 'message_reload');
-        if (reloaded) candidates.push({ source: 'message.reload', value: reloaded });
+      if (isAudio && originalHasMedia !== true) message.hasMedia = true;
+      const media = await promiseWithTimeout(message.downloadMedia(), 10000, 'downloadMedia');
+      if (media && media.data) {
+        return { media, error: '', source: 'message.downloadMedia', attempt: 1, stableId };
       }
+      directError = 'downloadMedia_empty';
     } catch (e) {
-      lastError = 'message.reload:' + String(e?.message || e);
+      directError = String(e?.message || e);
+    } finally {
+      try { message.hasMedia = originalHasMedia; } catch {}
+    }
+  } else {
+    directError = 'downloadMedia_not_available';
+  }
+
+  // Respaldo puntual: ejecuta el mismo recorrido que Message.downloadMedia() pero
+  // directamente sobre el mensaje real del Store de WhatsApp dentro de Chromium.
+  // Así no depende del hasMedia/directPath que recibió el wrapper Node del evento.
+  try {
+    if (!client?.pupPage || typeof client.pupPage.evaluate !== 'function') {
+      return { media: null, error: directError || 'pupPage_not_available', source: '', attempt: 1, stableId };
     }
 
-    // El objeto del evento sigue siendo candidato aunque reload no exista en una
-    // versión vieja de whatsapp-web.js.
-    candidates.push({ source: 'event', value: message });
+    const browserResult = await promiseWithTimeout(
+      client.pupPage.evaluate(async (msgId) => {
+        const fail = (error) => ({ ok: false, error: String(error || 'media_not_available') });
 
-    // Segundo camino oficial: recuperar nuevamente el mensaje por su ID.
-    if (stableId && client && typeof client.getMessageById === 'function') {
-      try {
-        const refreshed = await promiseWithTimeout(
-          client.getMessageById(stableId),
-          10000,
-          'getMessageById'
-        );
-        if (refreshed) {
-          try {
-            if (typeof refreshed.reload === 'function') {
-              await promiseWithTimeout(refreshed.reload(), 10000, 'refreshed_reload');
-            }
-          } catch (e) {
-            lastError = 'refreshed.reload:' + String(e?.message || e);
+        const toBase64 = async (value) => {
+          let ab = null;
+          if (value instanceof ArrayBuffer) {
+            ab = value;
+          } else if (value && value.buffer instanceof ArrayBuffer) {
+            const offset = Number(value.byteOffset || 0);
+            const length = Number(value.byteLength || value.length || value.buffer.byteLength);
+            ab = value.buffer.slice(offset, offset + length);
+          } else if (value && typeof value.arrayBuffer === 'function') {
+            ab = await value.arrayBuffer();
           }
-          candidates.push({ source: 'getMessageById', value: refreshed });
-       }
-      } catch (e) {
-        lastError = 'getMessageById:' + String(e?.message || e);
-      }
-    }
+          if (!ab) return '';
+          if (window.WWebJS && typeof window.WWebJS.arrayBufferToBase64Async === 'function') {
+            return await window.WWebJS.arrayBufferToBase64Async(ab);
+          }
+          const bytes = new Uint8Array(ab);
+          let binary = '';
+          const chunk = 0x8000;
+          for (let i = 0; i < bytes.length; i += chunk) {
+            binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunk)));
+          }
+          return window.btoa(binary);
+        };
 
-    const seen = new Set();
-    for (const candidate of candidates) {
-      const msg = candidate.value;
-      if (!msg || typeof msg.downloadMedia !== 'function') continue;
-      if (seen.has(msg)) continue;
-      seen.add(msg);
+        let msg = null;
+        try {
+          const collections = typeof window.require === 'function'
+            ? window.require('WAWebCollections')
+            : null;
+          const store = collections?.Msg || window.Store?.Msg || null;
+          if (store?.get) msg = store.get(msgId) || null;
+          if (!msg && store?.getMessagesById) {
+            const found = await store.getMessagesById([msgId]);
+            msg = found?.messages?.[0] || null;
+          }
+        } catch (e) {
+          return fail('message_store:' + String(e?.message || e));
+        }
+        if (!msg) return fail('message_not_found_in_store');
 
-      const originalHasMedia = msg.hasMedia;
-      const forceHasMedia = isAudio && originalHasMedia !== true;
-
-
-      try {
-        // downloadMedia() corta inmediatamente cuando hasMedia=false. Después de
-        // reload/getMessageById el Store ya contiene el mensaje actualizado; para
-        // versiones que no repatchan el flag, se habilita solo durante esta llamada.
-        if (forceHasMedia) msg.hasMedia = true;
-
-        const media = await promiseWithTimeout(
-          msg.downloadMedia(),
-          15000,
-          candidate.source + '_downloadMedia'
-        );
-        lastSource = candidate.source + (forceHasMedia ? '+forceHasMedia' : '');
-
-        if (media && media.data) {
-          return {
-            media,
-            error: '',
-            source: lastSource,
-            attempt: attempt + 1,
-            stableId
-          };
+        try {
+          if (typeof msg.downloadMedia === 'function' && msg.mediaData?.mediaStage !== 'RESOLVED') {
+            await msg.downloadMedia({ downloadEvenIfExpensive: true, rmrReason: 1 });
+          }
+        } catch (e) {
+          // Se continúa: en algunas versiones downloadAndMaybeDecrypt funciona igual.
         }
 
-        lastError = candidate.source + ':downloadMedia_empty';
-      } catch (e) {
-        lastError = candidate.source + ':' + String(e?.message || e);
-      } finally {
-        try { msg.hasMedia = originalHasMedia; } catch {}
-      }
-    }
+        try {
+          if (window.WWebJS && typeof window.WWebJS.downloadMedia === 'function') {
+            const downloaded = await window.WWebJS.downloadMedia(msg);
+            if (downloaded?.data) {
+              return {
+                ok: true,
+                source: 'WWebJS.downloadMedia',
+                data: String(downloaded.data),
+                mimetype: String(downloaded.mimetype || msg.mimetype || ''),
+                filename: String(downloaded.filename || msg.filename || '')
+              };
+            }
+          }
+        } catch (e) {}
+ 
+        if (!msg.directPath || !msg.mediaKey) {
+          return fail('media_keys_not_ready');
+        }
+
+
+        try {
+          let module = null;
+          try { module = typeof window.require === 'function' ? window.require('WAWebDownloadManager') : null; } catch {}
+          const manager = module?.downloadManager || module?.default?.downloadManager || window.Store?.DownloadManager || null;
+          if (!manager || typeof manager.downloadAndMaybeDecrypt !== 'function') {
+            return fail('download_manager_not_available');
+          }
+
+          const qpl = {
+            addAnnotations() { return this; },
+            addPoint() { return this; }
+          };
+          const decrypted = await manager.downloadAndMaybeDecrypt({
+            directPath: msg.directPath,
+            encFilehash: msg.encFilehash,
+            filehash: msg.filehash,
+            mediaKey: msg.mediaKey,
+            mediaKeyTimestamp: msg.mediaKeyTimestamp,
+            type: msg.type,
+            signal: new AbortController().signal,
+            downloadQpl: qpl
+          });
+          const data = await toBase64(decrypted);
+          if (!data) return fail('decrypted_media_empty');
+
+          return {
+            ok: true,
+            source: 'downloadAndMaybeDecrypt',
+            data,
+            mimetype: String(msg.mimetype || ''),
+            filename: String(msg.filename || '')
+          };
+        } catch (e) {
+          return fail('downloadAndMaybeDecrypt:' + String(e?.message || e));
+        }
+      }, stableId),
+      15000,
+      'browser_media_download'
+    );
+
+    if (browserResult?.ok && browserResult.data) {
+      return {
+        media: {
+          mimetype: String(browserResult.mimetype || message?._data?.mimetype || 'audio/ogg; codecs=opus'),
+          data: String(browserResult.data),
+          filename: String(browserResult.filename || '')
+        },
+        error: '',
+        source: String(browserResult.source || 'browser'),
+        attempt: 2,
+        stableId
+      };
+    
   
   }
 
-  return {
-    media: null,
-    error: lastError || 'media_not_available_after_reload',
-    source: lastSource,
-    attempt: delays.length,
-    stableId
-  };
+    return {
+      media: null,
+      error: [directError, browserResult?.error].filter(Boolean).join(' | ') || 'media_not_available',
+      source: 'browser',
+      attempt: 2,
+      stableId
+    };
+  } catch (e) {
+    return {
+      media: null,
+      error: [directError, String(e?.message || e)].filter(Boolean).join(' | '),
+      source: 'browser',
+      attempt: 2,
+      stableId
+    };
+  }
 }
 
 
@@ -6235,6 +6365,16 @@ async function buildIncomingBotPayload(message) {
   let mediaDownloadSource = '';
   let mediaDownloadAttempt = 0;
   let mediaStableId = '';
+
+  // El log se escribe antes de descargar para que un PTT nunca quede invisible mientras espera.
+  if (['audio', 'ptt', 'voice'].includes(messageType)) {
+    const audioStartLog = '[BOT_AUDIO] recibido from=' + String(message?.from || '') +
+      ' id=' + String(message?.id?._serialized || message?._data?.id?._serialized || '') +
+      ' hasMedia=' + String(message?.hasMedia === true);
+    console.log(audioStartLog);
+    try { EscribirLog(audioStartLog, 'event'); } catch {}
+  }
+
 
   // Lectura robusta del adjunto entrante de WhatsApp Web.
   const downloaded = await downloadIncomingMediaReliable(message, messageType);
@@ -6409,7 +6549,14 @@ async function handleAdminDeliveryCommand(message, source = '') {
 function attachClientHandlers() {
 
 async function processIncomingAsistoMessage(message, source) {
- 
+   const rawIncomingLog = '[INCOMING_RAW] source=' + String(source || 'message') +
+    ' from=' + String(message?.from || '') +
+    ' to=' + String(message?.to || '') +
+    ' type=' + String(message?.type || message?._data?.type || '') +
+    ' id=' + String(message?.id?._serialized || message?._data?.id?._serialized || '');
+  try { console.log(rawIncomingLog); } catch {}
+  try { EscribirLog(rawIncomingLog, 'event'); } catch {}
+
   if (!shouldProcessIncomingMessage(message, source)) return;
 
 
@@ -6474,7 +6621,14 @@ EscribirLog(message.from +' '+message.to+' '+message.type+' '+message.body ,"eve
     var segundos = Math.random() * (devolver_seg_hasta() - devolver_seg_desde()) + devolver_seg_desde();
 
    
-   var telefonoTo = message.to;
+    var telefonoTo = String(
+     message?.to ||
+     message?._data?.to ||
+     client?.info?.me?.user ||
+     telefono_qr ||
+     numero ||
+     ''
+   );
   // var telefonoFrom = message.from;
 
       const remoteFrom = String(message.from || '').trim();
@@ -6508,14 +6662,51 @@ EscribirLog(message.from +' '+message.to+' '+message.type+' '+message.body ,"eve
     const incomingBotPayload = await buildIncomingBotPayload(message);
     
 
-    if (!incomingBotPayload || !String(incomingBotPayload.mensaje || '').trim()) {
-      console.log("mensaje sin texto/media procesable");
+    const incomingType = normalizeIncomingMessageType(message);
+    const incomingIsAudio = ['audio', 'ptt', 'voice'].includes(incomingType) ||
+      /^audio\//i.test(String(incomingBotPayload?.media?.mimetype || message?._data?.mimetype || ''));
+
+    // Nunca dejar un audio sin respuesta ni sin diagnóstico. Si WhatsApp Web no
+    // entregó el binario, no se manda un texto ficticio a ChatGPT.
+    if (incomingIsAudio && !String(incomingBotPayload?.media?.data || '').trim()) {
+      const mediaError = String(
+        incomingBotPayload?.mediaError ||
+        incomingBotPayload?.media?.error ||
+        'audio_sin_base64'
+      ).trim();
+      const audioFailLog = '[BOT_AUDIO] descarga fallida from=' + String(message?.from || '') +
+        ' id=' + String(message?.id?._serialized || message?._data?.id?._serialized || '') +
+        ' error=' + mediaError;
+      console.log(audioFailLog);
+      try { EscribirLog(audioFailLog, 'error'); } catch {}
+      try { EscribirLog(audioFailLog, 'event'); } catch {}
+      try {
+        await safeSendMessage(
+          message.from,
+          'No pude descargar ese audio. Reenviámelo una vez más o escribime el mensaje por acá.'
+        );
+      } catch (e) {
+        try { EscribirLog('[BOT_AUDIO] tampoco se pudo enviar aviso: ' + String(e?.message || e), 'error'); } catch {}
+      }
       return;
     }
 
-    if(message.to == ''|| message.to == null){
-      console.log("message.to VACIO");
-      return
+    const incomingHasText = !!String(incomingBotPayload?.mensaje || '').trim();
+    const incomingHasMediaData = !!String(incomingBotPayload?.media?.data || '').trim();
+    if (!incomingBotPayload || (!incomingHasText && !incomingHasMediaData)) {
+      const skipLog = '[BOT] mensaje sin texto/media procesable type=' + String(message?.type || '') +
+        ' mediaError=' + String(incomingBotPayload?.mediaError || incomingBotPayload?.media?.error || '');
+      console.log(skipLog);
+      try { EscribirLog(skipLog, 'error'); } catch {}
+      return;
+    }
+
+    if(!telefonoTo){
+      const toLog = '[BOT] telefono destino propio vacío. message.to=' + String(message?.to || '') +
+        ' telefono_qr=' + String(telefono_qr || '') + ' numero=' + String(numero || '');
+      console.log(toLog);
+      try { EscribirLog(toLog, 'error'); } catch {}
+      return;
     }
 
     if(message.from == ''|| message.from == null){
@@ -6692,6 +6883,13 @@ telefonoFrom = telefonoFromApi;
 
 client.on('message_create', async message => {
   try {
+    const createRawLog = '[MESSAGE_CREATE_RAW] fromMe=' + String(!!message?.fromMe) +
+      ' from=' + String(message?.from || message?._data?.from || '') +
+      ' to=' + String(message?.to || message?._data?.to || '') +
+      ' type=' + String(message?.type || message?._data?.type || '') +
+      ' id=' + String(message?.id?._serialized || message?._data?.id?._serialized || '');
+    try { console.log(createRawLog); } catch {}
+    try { EscribirLog(createRawLog, 'event'); } catch {}
     try {
       const b = String(message?.body || message?._data?.body || '').trim();
       if (api_mensajes_confirmacion_habilitada === true && b && respuestaConfirmaApiMensajes(b)) {
@@ -6762,9 +6960,10 @@ client.on('message_create', async message => {
       }
       return;
     }
-    // No procesar inmediatamente message_create: puede traer datos internos y
-    // duplicar el evento message. Se agenda solo como fallback si message no llega.
+    // El evento message tiene prioridad. message_create queda como respaldo demorado
+    // para instalaciones donde ciertos PTT solo aparecen por este evento.
     scheduleIncomingFromMessageCreate(message, processIncomingAsistoMessage);
+    return;
   } catch (e) {
     try { console.log('[message_create] incoming error:', e?.message || e); } catch {}
     try { EscribirLog('[message_create] incoming error: ' + String(e?.message || e), 'error'); } catch {}
