@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.01.04  14/07/2026   */
+/*version: 4.01.05  14/07/2026   */
 
 
 
@@ -6081,6 +6081,36 @@ function buildIncomingMediaText(messageType, caption, filename, mimeType, mediaA
   return cap;
 }
 
+function promiseWithTimeout(promise, timeoutMs, label) {
+  const ms = Math.max(1000, Number(timeoutMs) || 8000);
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise((_, reject) => {
+      const timer = setTimeout(() => reject(new Error(String(label || 'operation') + '_timeout_' + ms + 'ms')), ms);
+      if (timer && typeof timer.unref === 'function') timer.unref();
+    })
+  ]);
+}
+
+async function tryDownloadIncomingMedia(messageLike, source, timeoutMs) {
+  if (!messageLike || typeof messageLike.downloadMedia !== 'function') {
+    return { media: null, error: source + '_downloadMedia_not_available' };
+  }
+
+  try {
+    const media = await promiseWithTimeout(
+      messageLike.downloadMedia(),
+      timeoutMs,
+      source + '_downloadMedia'
+    );
+    if (media && media.data) return { media, error: '' };
+    return { media: null, error: source + '_empty_media' };
+  } catch (e) {
+    return { media: null, error: String(e?.message || e) };
+  }
+}
+
+
 async function downloadIncomingMediaReliable(message, messageType) {
   const stableId = String(
     message?.id?._serialized ||
@@ -6090,48 +6120,95 @@ async function downloadIncomingMediaReliable(message, messageType) {
     ''
   ).trim();
 
-  const delays = [0, 500, 1500, 3000];
+  // IMPORTANTE: primero se descarga desde el objeto entregado por el evento.
+  // No se llama antes a client.getMessageById(), porque en algunas sesiones esa
+  // consulta queda esperando y bloquea por completo el procesamiento del audio.
+  const delays = [0, 700, 1600, 3000];
   let lastError = '';
 
   for (let attempt = 0; attempt < delays.length; attempt++) {
     if (delays[attempt] > 0) await sleep(delays[attempt]);
 
-    const candidates = [{ source: 'evento', value: message }];
-
-    // En algunas sesiones MD/Linux el objeto recibido por el evento todavía no
-    // tiene listo el contenido del audio. Volvemos a pedir el mensaje completo
-    // por su id antes de darlo por perdido.
+    const direct = await tryDownloadIncomingMedia(message, 'evento', 10000);
+    if (direct.media) {
+      return {
+        media: direct.media,
+        error: '',
+        source: 'evento',
+        attempt: attempt + 1,
+        stableId
+      };
+    }
+    lastError = direct.error || lastError;
+  
+    // Recién si falló el objeto original, intentamos recuperar otra instancia
+    // del mismo mensaje. Cada operación tiene timeout para que nunca deje al bot
+    // colgado sin responder.
     if (stableId && client && typeof client.getMessageById === 'function') {
       try {
-        const refreshed = await client.getMessageById(stableId);
-        if (refreshed) candidates.push({ source: 'getMessageById', value: refreshed });
-      } catch (e) {
-        lastError = String(e?.message || e);
-      }
-    }
-
-    for (const candidate of candidates) {
-      try {
-        if (!candidate.value || typeof candidate.value.downloadMedia !== 'function') continue;
-        const media = await candidate.value.downloadMedia();
-        if (media && media.data) {
-          return {
-            media,
-            error: '',
-            source: candidate.source,
-            attempt: attempt + 1,
-            stableId
-          };
+        const refreshed = await promiseWithTimeout(
+          client.getMessageById(stableId),
+          5000,
+          'getMessageById'
+        );
+        if (refreshed) {
+          const refreshedDownload = await tryDownloadIncomingMedia(refreshed, 'getMessageById', 10000);
+          if (refreshedDownload.media) {
+            return {
+              media: refreshedDownload.media,
+              error: '',
+              source: 'getMessageById',
+              attempt: attempt + 1,
+              stableId
+            };
+          }
+          lastError = refreshedDownload.error || lastError;
         }
       } catch (e) {
         lastError = String(e?.message || e);
       }
     }
-  }
+
+    // Último fallback: volver a leer los mensajes recientes del chat y buscar
+    // el mismo id. Esto ayuda en sesiones multidispositivo donde el evento llega
+    // antes de que el adjunto quede completamente hidratado.
+    try {
+      if (typeof message?.getChat === 'function') {
+        const chat = await promiseWithTimeout(message.getChat(), 5000, 'getChat');
+        if (chat && typeof chat.fetchMessages === 'function') {
+          const rows = await promiseWithTimeout(
+            chat.fetchMessages({ limit: 20 }),
+            7000,
+            'fetchMessages'
+          );
+          const list = Array.isArray(rows) ? rows : [];
+          const same = list.find((m) => String(
+            m?.id?._serialized || m?._data?.id?._serialized || m?._data?.id?.id || m?.id?.id || ''
+          ).trim() === stableId);
+          if (same) {
+            const fetchedDownload = await tryDownloadIncomingMedia(same, 'fetchMessages', 10000);
+            if (fetchedDownload.media) {
+              return {
+                media: fetchedDownload.media,
+                error: '',
+                source: 'fetchMessages',
+                attempt: attempt + 1,
+                stableId
+              };
+            }
+            lastError = fetchedDownload.error || lastError;
+          }
+          }
+        }
+    } catch (e) {
+      lastError = String(e?.message || e);
+      }
+    }
+  
 
   return {
     media: null,
-    error: lastError,
+    error: lastError || 'media_not_available',
     source: '',
     attempt: delays.length,
     stableId
@@ -6429,9 +6506,31 @@ EscribirLog(message.from +' '+message.to+' '+message.type+' '+message.body ,"eve
 
     
     const incomingBotPayload = await buildIncomingBotPayload(message);
+    const incomingType = normalizeIncomingMessageType(message);
+    const incomingIsAudio = ['audio', 'ptt', 'voice'].includes(incomingType) ||
+      /^audio\//i.test(String(incomingBotPayload?.media?.mimetype || message?._data?.mimetype || ''));
+
+    // Nunca dejar un audio sin respuesta. Si WhatsApp Web todavía no entregó el
+    // archivo, no se llama a ChatGPT con un texto inventado, pero se informa el
+    // problema al cliente y queda un log exacto para diagnosticar la descarga.
+    if (incomingIsAudio && !(incomingBotPayload?.media?.data)) {
+      const mediaError = String(incomingBotPayload?.mediaError || incomingBotPayload?.media?.error || 'audio_sin_datos').trim();
+      const audioLog = '[BOT_AUDIO] no se pudo obtener el archivo del audio. from=' + String(message?.from || '') +
+        ' type=' + incomingType + ' error=' + mediaError;
+      console.log(audioLog);
+      try { EscribirLog(audioLog, 'error'); } catch {}
+      try {
+        await safeSendMessage(
+          message.from,
+          'No pude descargar ese audio. Por favor reenviámelo una vez más o escribime el pedido por acá.'
+        );
+      } catch {}
+      return;
+    }
+
     if (!incomingBotPayload || !String(incomingBotPayload.mensaje || '').trim()) {
       console.log("mensaje sin texto/media procesable");
-      return
+      return;
     }
 
     if(message.to == ''|| message.to == null){
