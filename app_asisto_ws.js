@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.01.10  14/07/2026   */
+/*version: 4.01.11  14/07/2026   */
 
 
 
@@ -6150,198 +6150,226 @@ function promiseWithTimeout(promise, timeoutMs, label) {
 
 
 
+function writeIncomingAudioTrace(message, level = 'event') {
+  const msg = String(message || '');
+  try { console.log(msg); } catch {}
+  try {
+    fs.appendFileSync(
+      path.join(__dirname, 'app_asisto_audio.log'),
+      '[' + nowArgentinaISO() + '] ' + msg + '\n',
+      'utf8'
+    );
+  } catch {}
+  try { EscribirLog(msg, level === 'error' ? 'error' : 'event'); } catch {}
+}
 
 
 async function downloadIncomingMediaReliable(message, messageType) {
-  const stableId = String(
+  if (!message) {
+    return { media: null, error: 'message_missing', source: '', attempt: 0, stableId: '' };
+  }
+
+  const serialized = String(
     message?.id?._serialized ||
     message?._data?.id?._serialized ||
-    message?._data?.id?.id ||
-    message?.id?.id ||
     ''
   ).trim();
 
+  const rawId = String(message?.id?.id || message?._data?.id?.id || '').trim();
+  const remote = String(
+    message?.id?.remote ||
+    message?._data?.id?.remote ||
+    message?.from ||
+    message?._data?.from ||
+    ''
+  ).trim();
+  const stableId = serialized || rawId;
+  const errors = [];
 
-  if (!message || !stableId) {
-    return { media: null, error: !message ? 'message_missing' : 'message_id_missing', source: '', attempt: 0, stableId };
-  }
-  
-  const isAudio = ['audio', 'ptt', 'voice'].includes(String(messageType || '').toLowerCase());
-  let directError = '';
-
-  // Primero usamos el método normal de whatsapp-web.js. Para PTT algunas versiones
-  // entregan hasMedia=false aunque el mensaje interno ya tiene el audio; el flag se
-  // fuerza solamente durante esta llamada porque downloadMedia() lo usa como corte.
-  if (typeof message.downloadMedia === 'function') {
-    const originalHasMedia = message.hasMedia;
-    try {
-      if (isAudio && originalHasMedia !== true) message.hasMedia = true;
-      const media = await promiseWithTimeout(message.downloadMedia(), 10000, 'downloadMedia');
-      if (media && media.data) {
+  // Camino normal. No se altera message.hasMedia: el wrapper puede venir viejo,
+  // pero el mensaje vivo del navegador se resuelve en el bloque siguiente.
+  if (message.hasMedia === true && typeof message.downloadMedia === 'function') {
+     try {   
+      const media = await promiseWithTimeout(message.downloadMedia(), 12000, 'message_downloadMedia');
+      if (media?.data) {
         return { media, error: '', source: 'message.downloadMedia', attempt: 1, stableId };
       }
-      directError = 'downloadMedia_empty';
+      errors.push('message.downloadMedia_empty');
     } catch (e) {
-      directError = String(e?.message || e);
-    } finally {
-      try { message.hasMedia = originalHasMedia; } catch {}
+    errors.push('message.downloadMedia:' + String(e?.message || e));
     }
   } else {
-    directError = 'downloadMedia_not_available';
+  
+
+    errors.push('message.hasMedia_false');
   }
 
-  // Respaldo puntual: ejecuta el mismo recorrido que Message.downloadMedia() pero
-  // directamente sobre el mensaje real del Store de WhatsApp dentro de Chromium.
-  // Así no depende del hasMedia/directPath que recibió el wrapper Node del evento.
-  try {
-    if (!client?.pupPage || typeof client.pupPage.evaluate !== 'function') {
-      return { media: null, error: directError || 'pupPage_not_available', source: '', attempt: 1, stableId };
-    }
+  if (!client?.pupPage || typeof client.pupPage.evaluate !== 'function') {
+    return { media: null, error: errors.concat('pupPage_not_available').join(' | '), source: '', attempt: 1, stableId };
+  }
 
-    const browserResult = await promiseWithTimeout(
-      client.pupPage.evaluate(async (msgId) => {
-        const fail = (error) => ({ ok: false, error: String(error || 'media_not_available') });
+  const lookup = {
+    serialized,
+    rawId,
+    remote,
+    mimetype: String(message?._data?.mimetype || '').trim(),
+    filename: String(message?._data?.filename || message?._data?.fileName || '').trim()
+  };
 
-        const toBase64 = async (value) => {
-          let ab = null;
-          if (value instanceof ArrayBuffer) {
-            ab = value;
-          } else if (value && value.buffer instanceof ArrayBuffer) {
-            const offset = Number(value.byteOffset || 0);
-            const length = Number(value.byteLength || value.length || value.buffer.byteLength);
-            ab = value.buffer.slice(offset, offset + length);
-          } else if (value && typeof value.arrayBuffer === 'function') {
-            ab = await value.arrayBuffer();
-          }
-          if (!ab) return '';
-          if (window.WWebJS && typeof window.WWebJS.arrayBufferToBase64Async === 'function') {
-            return await window.WWebJS.arrayBufferToBase64Async(ab);
-          }
-          const bytes = new Uint8Array(ab);
-          let binary = '';
-          const chunk = 0x8000;
-          for (let i = 0; i < bytes.length; i += chunk) {
-            binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunk)));
-          }
-          return window.btoa(binary);
-        };
+  // Mismo recorrido que usa whatsapp-web.js actual:
+  // resolveMediaBlob() o, si no existe en la versión instalada,
+  // msg.downloadMedia() + WAWebMediaInMemoryBlobCache.
+  for (const [index, delay] of [0, 500, 1500].entries()) {
+    if (delay) await sleep(delay);
 
-        let msg = null;
-        try {
-          const collections = typeof window.require === 'function'
-            ? window.require('WAWebCollections')
-            : null;
-          const store = collections?.Msg || window.Store?.Msg || null;
-          if (store?.get) msg = store.get(msgId) || null;
-          if (!msg && store?.getMessagesById) {
-            const found = await store.getMessagesById([msgId]);
-            msg = found?.messages?.[0] || null;
-          }
-        } catch (e) {
-          return fail('message_store:' + String(e?.message || e));
-        }
-        if (!msg) return fail('message_not_found_in_store');
-
-        try {
-          if (typeof msg.downloadMedia === 'function' && msg.mediaData?.mediaStage !== 'RESOLVED') {
-            await msg.downloadMedia({ downloadEvenIfExpensive: true, rmrReason: 1 });
-          }
-        } catch (e) {
-          // Se continúa: en algunas versiones downloadAndMaybeDecrypt funciona igual.
-        }
-
-        try {
-          if (window.WWebJS && typeof window.WWebJS.downloadMedia === 'function') {
-            const downloaded = await window.WWebJS.downloadMedia(msg);
-            if (downloaded?.data) {
-              return {
-                ok: true,
-                source: 'WWebJS.downloadMedia',
-                data: String(downloaded.data),
-                mimetype: String(downloaded.mimetype || msg.mimetype || ''),
-                filename: String(downloaded.filename || msg.filename || '')
-              };
-            }
-          }
-        } catch (e) {}
- 
-        if (!msg.directPath || !msg.mediaKey) {
-          return fail('media_keys_not_ready');
-        }
-
-
-        try {
-          let module = null;
-          try { module = typeof window.require === 'function' ? window.require('WAWebDownloadManager') : null; } catch {}
-          const manager = module?.downloadManager || module?.default?.downloadManager || window.Store?.DownloadManager || null;
-          if (!manager || typeof manager.downloadAndMaybeDecrypt !== 'function') {
-            return fail('download_manager_not_available');
-          }
-
-          const qpl = {
-            addAnnotations() { return this; },
-            addPoint() { return this; }
-          };
-          const decrypted = await manager.downloadAndMaybeDecrypt({
-            directPath: msg.directPath,
-            encFilehash: msg.encFilehash,
-            filehash: msg.filehash,
-            mediaKey: msg.mediaKey,
-            mediaKeyTimestamp: msg.mediaKeyTimestamp,
-            type: msg.type,
-            signal: new AbortController().signal,
-            downloadQpl: qpl
+    let result;
+    try {
+      result = await promiseWithTimeout(
+        client.pupPage.evaluate(async (info) => {
+          const fail = (error, msg) => ({
+            ok: false,
+            error: String(error || 'media_not_available'),
+            stage: String(msg?.mediaData?.mediaStage || ''),
+            hasMediaData: !!msg?.mediaData,
+            hasMediaObject: !!msg?.mediaObject,
+            hasDirectPath: !!msg?.directPath,
+            wwebVersion: String(window.Debug?.VERSION || '')
           });
-          const data = await toBase64(decrypted);
-          if (!data) return fail('decrypted_media_empty');
+
+          const idText = (value) => {
+            if (!value) return '';
+            if (typeof value === 'string') return value;
+            return String(value._serialized || value.id || '');
+          };
+
+          const toBase64 = async (blobValue) => {
+            let blob = blobValue;
+            if (blob?.blob) blob = blob.blob;
+            if (blob && typeof blob.forceToBlob === 'function') blob = blob.forceToBlob();
+            if (!blob || typeof blob.arrayBuffer !== 'function') return '';
+            const ab = await blob.arrayBuffer();
+            if (typeof window.WWebJS?.arrayBufferToBase64Async === 'function') {
+              return await window.WWebJS.arrayBufferToBase64Async(ab);
+            }
+            return await new Promise((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(String(reader.result || '').split(',')[1] || '');
+              reader.onerror = reject;
+              reader.readAsDataURL(new Blob([ab]));
+            });
+          };
+
+          let Msg;
+          try { Msg = window.require('WAWebCollections').Msg; }
+          catch (e) { return fail('WAWebCollections:' + String(e?.message || e)); }
+
+          let msg = null;
+          try {
+            if (info.serialized) msg = Msg.get(info.serialized) || null;
+            if (!msg && info.serialized && typeof Msg.getMessagesById === 'function') {
+              msg = (await Msg.getMessagesById([info.serialized]))?.messages?.[0] || null;
+            }
+            if (!msg && info.rawId) {
+              const list = typeof Msg.getModelsArray === 'function' ? Msg.getModelsArray() : (Msg._models || []);
+              msg = (list || []).find((m) => {
+                const sameId = String(m?.id?.id || '') === info.rawId;
+                const mRemote = idText(m?.id?.remote);
+                return sameId && (!info.remote || !mRemote || mRemote === info.remote);
+              }) || null;
+            }
+          } catch (e) {
+            return fail('message_lookup:' + String(e?.message || e));
+           }
+
+          if (!msg) return fail('message_not_found_in_store');
+
+          // Versiones nuevas.
+          if (typeof window.WWebJS?.resolveMediaBlob === 'function') {
+            try {
+              const resolved = await window.WWebJS.resolveMediaBlob(idText(msg.id) || info.serialized);
+              if (resolved?.blob) {
+                const data = await toBase64(resolved.blob);
+                if (data) return {
+                  ok: true,
+                  source: 'resolveMediaBlob',
+                  data,
+                  mimetype: String(resolved.mimetype || msg.mimetype || info.mimetype || 'audio/ogg; codecs=opus'),
+                  filename: String(resolved.filename || msg.filename || info.filename || '')
+                };
+              }
+            } catch (e) {}
+          }
+ 
+
+
+          // Versiones donde resolveMediaBlob todavía no existe.
+          try {
+            await msg.downloadMedia({
+              downloadEvenIfExpensive: true,
+              rmrReason: 1,
+              isUserInitiated: true
+            });
+          } catch (e) {}
+
+          let blob = null;
+          try {
+            const filehash = msg.mediaObject?.filehash || msg.filehash;
+            const cache = window.require('WAWebMediaInMemoryBlobCache').InMemoryMediaBlobCache;
+            if (filehash && cache?.get) blob = cache.get(filehash) || null;
+          } catch (e) {}
+          if (!blob) blob = msg.mediaObject?.mediaBlob || msg.mediaData?.mediaBlob || null;
+
+          const data = await toBase64(blob);
+          if (!data) return fail('media_blob_not_resolved', msg);
+   
 
           return {
             ok: true,
-            source: 'downloadAndMaybeDecrypt',
+            source: 'mediaBlobCache',
             data,
-            mimetype: String(msg.mimetype || ''),
-            filename: String(msg.filename || '')
+            mimetype: String(msg.mimetype || info.mimetype || 'audio/ogg; codecs=opus'),
+            filename: String(msg.filename || info.filename || '')
           };
-        } catch (e) {
-          return fail('downloadAndMaybeDecrypt:' + String(e?.message || e));
-        }
-      }, stableId),
-      15000,
-      'browser_media_download'
-    );
+        }, lookup),
+        20000,
+        'browser_resolve_media_blob'
+      );
+    } catch (e) {
+      result = { ok: false, error: String(e?.message || e) };
+    }
 
-    if (browserResult?.ok && browserResult.data) {
-      return {
-        media: {
-          mimetype: String(browserResult.mimetype || message?._data?.mimetype || 'audio/ogg; codecs=opus'),
-          data: String(browserResult.data),
-          filename: String(browserResult.filename || '')
-        },
-        error: '',
-        source: String(browserResult.source || 'browser'),
-        attempt: 2,
-        stableId
+    if (result?.ok && result.data) {
+      const media = {
+        mimetype: String(result.mimetype || lookup.mimetype || 'audio/ogg; codecs=opus'),
+        data: String(result.data),
+        filename: String(result.filename || lookup.filename || '')
       };
-    
-  
+      writeIncomingAudioTrace(
+        '[BOT_AUDIO_DOWNLOAD] ok source=' + String(result.source || 'browser') +
+        ' attempt=' + String(index + 1) +
+        ' id=' + stableId +
+        ' bytes=' + Buffer.byteLength(media.data, 'base64')
+      );
+      return { media, error: '', source: String(result.source || 'browser'), attempt: index + 1, stableId };
+    }
+
+    const detail = String(result?.error || 'media_not_available');
+    errors.push('browser_' + String(index + 1) + ':' + detail);
+    writeIncomingAudioTrace(
+      '[BOT_AUDIO_DOWNLOAD] fail attempt=' + String(index + 1) +
+      ' id=' + stableId +
+      ' error=' + detail +
+      ' stage=' + String(result?.stage || '') +
+      ' mediaData=' + String(!!result?.hasMediaData) +
+      ' mediaObject=' + String(!!result?.hasMediaObject) +
+      ' directPath=' + String(!!result?.hasDirectPath) +
+      ' wweb=' + String(result?.wwebVersion || ''),
+      'error'
+    );
   }
 
-    return {
-      media: null,
-      error: [directError, browserResult?.error].filter(Boolean).join(' | ') || 'media_not_available',
-      source: 'browser',
-      attempt: 2,
-      stableId
-    };
-  } catch (e) {
-    return {
-      media: null,
-      error: [directError, String(e?.message || e)].filter(Boolean).join(' | '),
-      source: 'browser',
-      attempt: 2,
-      stableId
-    };
-  }
+  return { media: null, error: errors.join(' | '), source: 'browser', attempt: 3, stableId };
+
 }
 
 
@@ -6371,8 +6399,7 @@ async function buildIncomingBotPayload(message) {
     const audioStartLog = '[BOT_AUDIO] recibido from=' + String(message?.from || '') +
       ' id=' + String(message?.id?._serialized || message?._data?.id?._serialized || '') +
       ' hasMedia=' + String(message?.hasMedia === true);
-    console.log(audioStartLog);
-    try { EscribirLog(audioStartLog, 'event'); } catch {}
+    writeIncomingAudioTrace(audioStartLog, 'event');
   }
 
 
@@ -6677,9 +6704,7 @@ EscribirLog(message.from +' '+message.to+' '+message.type+' '+message.body ,"eve
       const audioFailLog = '[BOT_AUDIO] descarga fallida from=' + String(message?.from || '') +
         ' id=' + String(message?.id?._serialized || message?._data?.id?._serialized || '') +
         ' error=' + mediaError;
-      console.log(audioFailLog);
-      try { EscribirLog(audioFailLog, 'error'); } catch {}
-      try { EscribirLog(audioFailLog, 'event'); } catch {}
+        writeIncomingAudioTrace(audioFailLog, 'error');
       try {
         await safeSendMessage(
           message.from,
