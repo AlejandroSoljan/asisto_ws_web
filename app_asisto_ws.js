@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.01.12  21/07/2026   */
+/*version: 4.01.13  21/07/2026   */
 
 
 
@@ -720,6 +720,116 @@ function stripWhatsappSuffix(value) {
 
 function onlyDigits(value) {
   return String(value || '').replace(/\D/g, '');
+}
+
+
+// =========================
+// Filtro global de clientes habilitados
+// - Configuración en settings._id = client_phone_access:<TENANT>
+// - Desactivado o inexistente: responden todos.
+// - Activado: solo responde a los números/IDs cargados.
+// =========================
+const clientPhoneAccessCache = new Map();
+const CLIENT_PHONE_ACCESS_CACHE_TTL_MS = Math.max(
+  1000,
+  Number(process.env.CLIENT_PHONE_ACCESS_CACHE_TTL_MS || 5000) || 5000
+);
+
+function normalizeClientAccessTenant(value) {
+  return String(value || 'default').trim().toUpperCase() || 'DEFAULT';
+}
+
+function normalizeClientAccessIdentifier(value) {
+  let d = onlyDigits(value);
+  if (!d) return '';
+  if (d.startsWith('00')) d = d.slice(2);
+
+  if (d.startsWith('549') && d.length >= 13) return d;
+  if (d.startsWith('54') && !d.startsWith('549') && d.length >= 12) {
+    return '549' + d.slice(2);
+  }
+  if (d.length === 10 && d.startsWith('3')) {
+    return '549' + d;
+  }
+  return d;
+}
+
+function normalizeClientAccessNumbers(raw) {
+  const arr = Array.isArray(raw) ? raw : [];
+  const set = new Set();
+  for (const item of arr) {
+    const source = item && typeof item === 'object'
+      ? (item.number ?? item.numero ?? item.phone ?? item.telefono ?? item.id ?? '')
+      : item;
+    const normalized = normalizeClientAccessIdentifier(source);
+    if (normalized) set.add(normalized);
+  }
+  return set;
+}
+
+async function loadClientPhoneAccessConfigLocal(force = false) {
+  const tenant = normalizeClientAccessTenant(tenantId);
+  const now = Date.now();
+  const cached = clientPhoneAccessCache.get(tenant);
+  if (!force && cached && (now - cached.at) < CLIENT_PHONE_ACCESS_CACHE_TTL_MS) {
+    return cached.value;
+ }
+
+  try {
+    if (!await ensureMongo() || !mongoose?.connection?.db) {
+      if (cached?.value) return cached.value;
+      return { enabled: false, numbers: new Set() };
+    }
+
+    const doc = await mongoose.connection.db.collection('settings').findOne({
+      _id: 'client_phone_access:' + tenant
+    });
+
+    const enabled = parseBoolLike(
+      doc?.enabled ?? doc?.filterEnabled ?? doc?.habilitado,
+      false
+    );
+    const value = {
+      enabled,
+      numbers: normalizeClientAccessNumbers(
+        doc?.numbers ?? doc?.numeros ?? doc?.allowedNumbers ?? []
+      )
+    };
+    clientPhoneAccessCache.set(tenant, { at: now, value });
+    return value;
+  } catch (e) {
+    if (cached?.value) return cached.value;
+    try {
+      EscribirLog('[CLIENT_ACCESS] error leyendo configuración: ' + String(e?.message || e), 'error');
+    } catch {}
+    // Compatibilidad: si no puede leerse la configuración y nunca hubo cache,
+    // se mantiene el comportamiento predeterminado de responder a todos.
+    return { enabled: false, numbers: new Set() };
+ }
+}
+
+async function isIncomingClientAllowedLocal(identifier) {
+  // La PC de WhatsApp Web es otro proceso: se fuerza lectura para que un cambio
+  // guardado en el panel se aplique al mensaje siguiente sin esperar el cache.
+  const config = await loadClientPhoneAccessConfigLocal(true);
+  const normalized = normalizeClientAccessIdentifier(identifier);
+
+  if (!config.enabled) {
+    return { allowed: true, enabled: false, normalized, reason: 'filter_disabled' };
+  }
+
+  if (!normalized) {
+    return { allowed: false, enabled: true, normalized: '', reason: 'identifier_missing' };
+  }
+
+  const allowed = config.numbers.has(normalized);
+  return {
+    allowed,
+    enabled: true,
+    normalized,
+    reason: allowed ? 'listed' : 'not_listed'
+  };
+
 }
 
 function normalizarNroTelFromApiMensajes(value) {
@@ -6605,6 +6715,26 @@ async function processIncomingAsistoMessage(message, source) {
     return;
   }
 
+  // El filtro se evalúa antes de confirmaciones, descarga de audios o cualquier
+  // llamada a la lógica API/ChatGPT. Un cliente no habilitado se ignora en silencio.
+  const rawAccessFrom = String(message?.from || message?._data?.from || '').trim();
+  if (rawAccessFrom === 'status@broadcast') return;
+
+  let resolvedAccessFrom = '';
+  try { resolvedAccessFrom = await resolvePhoneFromIncomingMessage(message); } catch {}
+  const clientAccess = await isIncomingClientAllowedLocal(resolvedAccessFrom || rawAccessFrom);
+  if (!clientAccess.allowed) {
+    const accessLog = '[CLIENT_ACCESS] ignorado tenant=' + String(tenantId || '') +
+      ' source=' + String(source || 'message') +
+      ' from=' + rawAccessFrom +
+      ' normalized=' + String(clientAccess.normalized || '') +
+      ' reason=' + String(clientAccess.reason || 'not_listed');
+    try { console.log(accessLog); } catch {}
+    try { EscribirLog(accessLog, 'event'); } catch {}
+    return;
+  }
+  try { message.__asistoResolvedClientPhone = resolvedAccessFrom || ''; } catch {}
+
 
   if (await registrarRespuestaConfirmacionApiMensajes(message)) {
     return;
@@ -6659,7 +6789,8 @@ EscribirLog(message.from +' '+message.to+' '+message.type+' '+message.body ,"eve
   // var telefonoFrom = message.from;
 
       const remoteFrom = String(message.from || '').trim();
-      var telefonoFrom = await resolvePhoneFromIncomingMessage(message);
+      var telefonoFrom = String(message?.__asistoResolvedClientPhone || '').trim() ||
+        await resolvePhoneFromIncomingMessage(message);
       if (remoteFrom && telefonoFrom && telefonoFrom !== stripWhatsappSuffix(remoteFrom)) {
         console.log('[LID] remitente resuelto: ' + remoteFrom + ' -> ' + telefonoFrom);
         try { EscribirLog('[LID] remitente resuelto: ' + remoteFrom + ' -> ' + telefonoFrom, 'event'); } catch {}
@@ -6834,6 +6965,16 @@ telefonoFrom = telefonoFromApi;
              EnviarEmail("ApiWhatsapp - Response ERROR ", detalle);
              if (msg_errores) await safeSend(message.from, msg_errores);
             return "error";
+                      }
+
+          // Respaldo del filtro central del servidor. No se envía msg_fin ni
+          // ninguna otra respuesta cuando el cliente quedó fuera del listado.
+          if (json && !Array.isArray(json) && json.ignored === true) {
+            try {
+              EscribirLog('[CLIENT_ACCESS] servidor ignoró mensaje from=' + String(telefonoFrom || '') +
+                ' reason=' + String(json.reason || ''), 'event');
+            } catch {}
+            return "ignored";
           }
 
       
