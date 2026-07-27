@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.01.15  27/07/2026   */
+/*version: 4.01.16  27/07/2026   */
 
 
 
@@ -51,7 +51,63 @@ let lockAcquiredAt = null;
 // --- LocalAuth backup/restore removido ---
 let authFailureHandling = false;
 const AR_TZ = 'America/Argentina/Cordoba';
+// Evita dos procesos app_asisto_ws.js simultáneos en la misma instalación.
+// Una tarea programada duplicada o un reinicio superpuesto multiplicaría el pool Mongo.
+const SINGLE_INSTANCE_LOCK_PATH = path.join(__dirname, 'logs', 'app_asisto_ws.pid');
+let singleInstanceLockOwned = false;
 
+function isPidAlive(pid) {
+  const n = Number(pid);
+  if (!Number.isInteger(n) || n <= 0) return false;
+  try {
+    process.kill(n, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function acquireSingleInstanceLock() {
+  try { fs.mkdirSync(path.dirname(SINGLE_INSTANCE_LOCK_PATH), { recursive: true }); } catch {}
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = fs.openSync(SINGLE_INSTANCE_LOCK_PATH, 'wx');
+      fs.writeFileSync(fd, String(process.pid), 'utf8');
+      fs.closeSync(fd);
+      singleInstanceLockOwned = true;
+      return true;
+    } catch (e) {
+      if (e?.code !== 'EEXIST') throw e;
+
+      let previousPid = 0;
+      try { previousPid = Number(fs.readFileSync(SINGLE_INSTANCE_LOCK_PATH, 'utf8').trim()); } catch {}
+      if (previousPid && previousPid !== process.pid && isPidAlive(previousPid)) {
+        console.error(`[INSTANCE] Ya existe app_asisto_ws.js activo pid=${previousPid}. Este proceso pid=${process.pid} finaliza.`);
+        return false;
+      }
+
+      try { fs.unlinkSync(SINGLE_INSTANCE_LOCK_PATH); } catch {}
+    }
+  }
+  return false;
+}
+
+function releaseSingleInstanceLock() {
+  if (!singleInstanceLockOwned) return;
+  try {
+    const current = Number(fs.readFileSync(SINGLE_INSTANCE_LOCK_PATH, 'utf8').trim());
+    if (!current || current === process.pid) fs.unlinkSync(SINGLE_INSTANCE_LOCK_PATH);
+  } catch {}
+  singleInstanceLockOwned = false;
+}
+
+if (!acquireSingleInstanceLock()) {
+  process.exit(72);
+}
+process.once('exit', releaseSingleInstanceLock);
+
+ 
 
 // Modo de reinicio solicitado desde el panel de sesiones.
 // task_runner: sale con código 77 y lo levanta el .cmd runner.
@@ -1428,8 +1484,10 @@ async function fastExitForSupervisorRestart(reason = 'SUPERVISOR_RESTART', exitC
   try { await Promise.race([forceReleaseLock('offline'), timeoutPromise(1800, 'release_lock_timeout')]); } catch {}
   try { isOwner = false; } catch {}
   try { await Promise.race([disconnectMongoSafe(String(signal || 'shutdown')), timeoutPromise(3000, 'mongo_disconnect_timeout')]); } catch {}
-  try { await Promise.race([disconnectMongoSafe(String(reason || 'supervisor_restart')), timeoutPromise(1500, 'mongo_disconnect_timeout')]); } catch {}
-
+  try { releaseSingleInstanceLock(); } catch {}
+  try { await Promise.race([disconnectMongoSafe(String(reason || 'supervisor_restart')), timeoutPromise(3000, 'mongo_disconnect_timeout')]); } catch {}
+  try { releaseSingleInstanceLock(); } catch {}
+ 
   try { process.exitCode = code; } catch {}
   setTimeout(() => { try { process.exit(code); } catch {} }, 100);
   setTimeout(() => { try { process.exit(code); } catch {} }, 1500);
@@ -2260,6 +2318,7 @@ async function disconnectMongoSafe(reason = 'shutdown') {
     try { EscribirLog('[MONGO] error al desconectar: ' + String(e?.message || e), 'error'); } catch {}
   } finally {
     mongoReady = false;
+    mongoConnectingPromise = null;
   }
 }
 
@@ -2281,7 +2340,7 @@ async function ensureMongo() {
 
     if (!mongo_uri) return false;
 
-    const maxPoolSize = readMongoInt(['MONGO_MAX_POOL_SIZE', 'MONGODB_MAX_POOL_SIZE'], 3, 1, 20);
+    const maxPoolSize = readMongoInt(['MONGO_MAX_POOL_SIZE', 'MONGODB_MAX_POOL_SIZE'], 1, 1, 5);
     const appName = buildMongoAppName();
     bindMongoConnectionEventsOnce();
 
@@ -3667,7 +3726,8 @@ async function restartScriptFromPanel(reason = 'panel_restart_script') {
     try { localWsPanelState = 'restarting'; } catch {}
     try { await updateLockStateSafe('restarting'); } catch {}
     try { await forceReleaseLock('restarting'); } catch {}
-    try { await Promise.race([disconnectMongoSafe('panel_restart'), timeoutPromise(1500, 'mongo_disconnect_timeout')]); } catch {}
+    try { await Promise.race([disconnectMongoSafe('panel_restart'), timeoutPromise(3000, 'mongo_disconnect_timeout')]); } catch {}
+    try { releaseSingleInstanceLock(); } catch {}
 
     try { EscribirLog('[PROCESS_RESTART] modo=' + restartMode + ' saliendo con exitCode=' + exitCode + ' pid=' + process.pid, 'event'); } catch {}
     setTimeout(() => {
