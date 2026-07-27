@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.01.14  21/07/2026   */
+/*version: 4.01.15  27/07/2026   */
 
 
 
@@ -161,13 +161,8 @@ function exitForFatalProcessError(label, reason) {
   }
 }
 
-process.on('unhandledRejection', (reason) => {
-  exitForFatalProcessError('unhandledRejection', reason);
-});
-
-process.on('uncaughtException', (err) => {
-  exitForFatalProcessError('uncaughtException', err);
-});
+// Los handlers fatales se registran una sola vez junto al cierre controlado,
+// más abajo, cuando ya están definidas las funciones de liberación de recursos.
 
 // =========================
 // Multi-PC failover (Opción B)
@@ -1432,6 +1427,8 @@ async function fastExitForSupervisorRestart(reason = 'SUPERVISOR_RESTART', exitC
   try { await Promise.race([updateLockStateSafe('offline'), timeoutPromise(1200, 'update_lock_timeout')]); } catch {}
   try { await Promise.race([forceReleaseLock('offline'), timeoutPromise(1800, 'release_lock_timeout')]); } catch {}
   try { isOwner = false; } catch {}
+  try { await Promise.race([disconnectMongoSafe(String(signal || 'shutdown')), timeoutPromise(3000, 'mongo_disconnect_timeout')]); } catch {}
+  try { await Promise.race([disconnectMongoSafe(String(reason || 'supervisor_restart')), timeoutPromise(1500, 'mongo_disconnect_timeout')]); } catch {}
 
   try { process.exitCode = code; } catch {}
   setTimeout(() => { try { process.exit(code); } catch {} }, 100);
@@ -2219,33 +2216,94 @@ function requireStatusToken(req, res, next) {
   return res.status(401).json({ ok: false, error: "unauthorized" });
 }
 
+let mongoConnectionEventsBound = false;
+
+function readMongoInt(envNames, fallback, min, max) {
+  const names = Array.isArray(envNames) ? envNames : [envNames];
+  let raw = NaN;
+  for (const name of names) {
+    if (process.env[name] !== undefined && process.env[name] !== '') {
+      raw = Number(process.env[name]);
+      break;
+    }
+  }
+  const value = Number.isFinite(raw) ? Math.trunc(raw) : fallback;
+  return Math.max(min, Math.min(max, value));
+}
+
+function buildMongoAppName() {
+  return `asisto-wweb-${tenantId || 'SIN_TENANT'}-${os.hostname()}-${process.pid}`
+    .replace(/[^a-zA-Z0-9_.-]+/g, '_')
+    .slice(0, 128);
+}
+
+function bindMongoConnectionEventsOnce() {
+  if (mongoConnectionEventsBound) return;
+  mongoConnectionEventsBound = true;
+
+  mongoose.connection.on('disconnected', () => {
+    mongoReady = false;
+  });
+  mongoose.connection.on('close', () => {
+    mongoReady = false;
+  });
+}
+
+async function disconnectMongoSafe(reason = 'shutdown') {
+  try {
+    if (mongoose?.connection?.readyState !== 0) {
+      try { EscribirLog(`[MONGO] desconectando reason=${String(reason || '')}`, 'event'); } catch {}
+      await mongoose.disconnect();
+    }
+  } catch (e) {
+    try { console.log('[MONGO] error al desconectar:', e?.message || e); } catch {}
+    try { EscribirLog('[MONGO] error al desconectar: ' + String(e?.message || e), 'error'); } catch {}
+  } finally {
+    mongoReady = false;
+  }
+}
+
+
 async function ensureMongo() {
   try {
     // Ya conectado
     if (mongoReady && mongoose?.connection?.readyState === 1 && mongoose?.connection?.db) {
-      // asegurar modelos
       initMongoModelsIfNeeded();
       return true;
     }
 
-    // Promise global para serializar conexión (evita ReferenceError aunque falte una variable global)
-    if (globalThis.__asistoMongoConnectingPromise) {
-      const ok = await globalThis.__asistoMongoConnectingPromise;
+    // Una única promesa compartida evita connect() concurrentes dentro del proceso.
+    if (mongoConnectingPromise) {
+      const ok = await mongoConnectingPromise;
       if (ok) initMongoModelsIfNeeded();
       return ok;
     }
 
     if (!mongo_uri) return false;
 
-    globalThis.__asistoMongoConnectingPromise = (async () => {
+    const maxPoolSize = readMongoInt(['MONGO_MAX_POOL_SIZE', 'MONGODB_MAX_POOL_SIZE'], 3, 1, 20);
+    const appName = buildMongoAppName();
+    bindMongoConnectionEventsOnce();
+
+    mongoConnectingPromise = (async () => {
       try {
         await mongoose.connect(mongo_uri, {
           dbName: (mongo_db || tenantId || "asisto"),
           autoIndex: true,
-          serverSelectionTimeoutMS: 15000
+          appName,
+
+          // Cada PC mantiene un pool pequeño. Atlas M0 limita conexiones globales.
+          maxPoolSize,
+          minPoolSize: 0,
+          maxConnecting: readMongoInt('MONGO_MAX_CONNECTING', 1, 1, Math.min(5, maxPoolSize)),
+          maxIdleTimeMS: readMongoInt('MONGO_MAX_IDLE_TIME_MS', 60000, 1000, 3600000),
+          waitQueueTimeoutMS: readMongoInt('MONGO_WAIT_QUEUE_TIMEOUT_MS', 10000, 1000, 120000),
+
+          serverSelectionTimeoutMS: readMongoInt('MONGO_SERVER_SELECTION_TIMEOUT_MS', 15000, 1000, 120000),
+          connectTimeoutMS: readMongoInt('MONGO_CONNECT_TIMEOUT_MS', 10000, 1000, 120000),
+          socketTimeoutMS: readMongoInt('MONGO_SOCKET_TIMEOUT_MS', 45000, 1000, 300000)
         });
 
-        // Asegurar que db exista (algunas veces tarda un tick)
         if (!mongoose.connection.db) {
           await new Promise((resolve, reject) => {
             const t = setTimeout(() => reject(new Error("mongo_db_not_ready")), 15000);
@@ -2258,8 +2316,9 @@ async function ensureMongo() {
         try {
           const host = mongoose?.connection?.host || "";
           const dbName = mongoose?.connection?.name || (mongo_db || tenantId || "asisto");
-          console.log(`Mongo conectado. dbName=${dbName} host=${host}`);
-          EscribirLog(`Mongo conectado. dbName=${dbName} host=${host}`, "event");
+          const msg = `Mongo conectado. dbName=${dbName} host=${host} appName=${appName} maxPoolSize=${maxPoolSize}`;
+          console.log(msg);
+          EscribirLog(msg, "event");
         } catch {}
 
         initMongoModelsIfNeeded();
@@ -2267,22 +2326,21 @@ async function ensureMongo() {
       } catch (e) {
         try { console.log("Mongo connect error:", e?.message || e); } catch {}
         try { EscribirLog("Mongo connect error: " + String(e?.message || e), "error"); } catch {}
-        try { await mongoose.disconnect(); } catch {}
-        mongoReady = false;
+        await disconnectMongoSafe('connect_error');
         return false;
       } finally {
-        globalThis.__asistoMongoConnectingPromise = null;
+        mongoConnectingPromise = null;
       }
     })();
 
-    const ok = await globalThis.__asistoMongoConnectingPromise;
+    const ok = await mongoConnectingPromise;
     if (ok) initMongoModelsIfNeeded();
     return ok;
   } catch (e) {
     try { console.log("ensureMongo error:", e?.message || e); } catch {}
     try { EscribirLog("ensureMongo error: " + String(e?.message || e), "error"); } catch {}
     mongoReady = false;
-    globalThis.__asistoMongoConnectingPromise = null;
+    mongoConnectingPromise = null;
     return false;
   }
 }
@@ -3609,6 +3667,7 @@ async function restartScriptFromPanel(reason = 'panel_restart_script') {
     try { localWsPanelState = 'restarting'; } catch {}
     try { await updateLockStateSafe('restarting'); } catch {}
     try { await forceReleaseLock('restarting'); } catch {}
+    try { await Promise.race([disconnectMongoSafe('panel_restart'), timeoutPromise(1500, 'mongo_disconnect_timeout')]); } catch {}
 
     try { EscribirLog('[PROCESS_RESTART] modo=' + restartMode + ' saliendo con exitCode=' + exitCode + ' pid=' + process.pid, 'event'); } catch {}
     setTimeout(() => {
@@ -3773,6 +3832,9 @@ function startActionPoller() {
 
 
 async function gracefulShutdown(signal) {
+  if (gracefulShutdown.inFlight) return;
+  gracefulShutdown.inFlight = true;
+
   if (String(signal || '').startsWith('AUTO_UPDATE')) {
     return fastExitForSupervisorRestart(signal);
   }
