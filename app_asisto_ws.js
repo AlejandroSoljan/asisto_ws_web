@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.01.16  27/07/2026   */
+/*version: 4.01.17  27/07/2026   */
 
 
 
@@ -2275,6 +2275,9 @@ function requireStatusToken(req, res, next) {
 }
 
 let mongoConnectionEventsBound = false;
+let mongoFullIdleTimer = null;
+let mongoLastUseAt = 0;
+let mongoIdleDisconnectPromise = null;
 
 function readMongoInt(envNames, fallback, min, max) {
   const names = Array.isArray(envNames) ? envNames : [envNames];
@@ -2288,6 +2291,58 @@ function readMongoInt(envNames, fallback, min, max) {
   const value = Number.isFinite(raw) ? Math.trunc(raw) : fallback;
   return Math.max(min, Math.min(max, value));
 }
+
+function readMongoFullIdleDisconnectMs() {
+  const raw = Number(
+    process.env.MONGO_FULL_IDLE_DISCONNECT_MS ??
+    process.env.MONGODB_FULL_IDLE_DISCONNECT_MS
+  );
+  if (Number.isFinite(raw) && raw <= 0) return 0;
+  const value = Number.isFinite(raw) ? Math.trunc(raw) : 300000;
+  return Math.max(60000, Math.min(86400000, value));
+}
+
+function clearMongoFullIdleTimer() {
+  if (!mongoFullIdleTimer) return;
+  try { clearTimeout(mongoFullIdleTimer); } catch {}
+  mongoFullIdleTimer = null;
+}
+
+function touchMongoActivity() {
+  mongoLastUseAt = Date.now();
+  armMongoFullIdleTimer();
+}
+
+function armMongoFullIdleTimer() {
+  clearMongoFullIdleTimer();
+
+  const idleMs = readMongoFullIdleDisconnectMs();
+  if (!idleMs || !mongoReady || mongoose?.connection?.readyState !== 1) return;
+
+  const elapsed = Math.max(0, Date.now() - (mongoLastUseAt || Date.now()));
+  const waitMs = Math.max(1000, idleMs - elapsed);
+
+  mongoFullIdleTimer = setTimeout(async () => {
+    mongoFullIdleTimer = null;
+    if (mongoIdleDisconnectPromise || mongoConnectingPromise) return;
+
+    const inactiveFor = Date.now() - (mongoLastUseAt || 0);
+    if (inactiveFor < idleMs) {
+      armMongoFullIdleTimer();
+      return;
+    }
+
+    mongoIdleDisconnectPromise = disconnectMongoSafe(`idle_timeout_${inactiveFor}ms`)
+      .catch(() => {})
+      .finally(() => { mongoIdleDisconnectPromise = null; });
+    await mongoIdleDisconnectPromise;
+  }, waitMs);
+
+  if (mongoFullIdleTimer && typeof mongoFullIdleTimer.unref === 'function') {
+    mongoFullIdleTimer.unref();
+  }
+}
+
 
 function buildMongoAppName() {
   return `asisto-wweb-${tenantId || 'SIN_TENANT'}-${os.hostname()}-${process.pid}`
@@ -2308,6 +2363,7 @@ function bindMongoConnectionEventsOnce() {
 }
 
 async function disconnectMongoSafe(reason = 'shutdown') {
+  clearMongoFullIdleTimer();
   try {
     if (mongoose?.connection?.readyState !== 0) {
       try { EscribirLog(`[MONGO] desconectando reason=${String(reason || '')}`, 'event'); } catch {}
@@ -2319,14 +2375,20 @@ async function disconnectMongoSafe(reason = 'shutdown') {
   } finally {
     mongoReady = false;
     mongoConnectingPromise = null;
+    mongoLastUseAt = 0;
   }
 }
 
 
 async function ensureMongo() {
   try {
+    if (mongoIdleDisconnectPromise) {
+      try { await mongoIdleDisconnectPromise; } catch {}
+    }
+
     // Ya conectado
     if (mongoReady && mongoose?.connection?.readyState === 1 && mongoose?.connection?.db) {
+      touchMongoActivity();
       initMongoModelsIfNeeded();
       return true;
     }
@@ -2375,7 +2437,7 @@ async function ensureMongo() {
         try {
           const host = mongoose?.connection?.host || "";
           const dbName = mongoose?.connection?.name || (mongo_db || tenantId || "asisto");
-          const msg = `Mongo conectado. dbName=${dbName} host=${host} appName=${appName} maxPoolSize=${maxPoolSize}`;
+          const msg = `Mongo conectado. dbName=${dbName} host=${host} appName=${appName} maxPoolSize=${maxPoolSize} fullIdleDisconnectMs=${readMongoFullIdleDisconnectMs()}`;
           console.log(msg);
           EscribirLog(msg, "event");
         } catch {}
