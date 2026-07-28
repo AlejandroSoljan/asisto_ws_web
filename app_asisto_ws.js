@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.02.03  27/07/2026   */
+/*version: 4.02.04  27/07/2026   */
 
 
 
@@ -484,6 +484,107 @@ function configureControlApiFromValues(values = {}) {
     numero,
   });
 }
+
+
+function readControlApiTokenFromTenantDoc(doc) {
+  try {
+    const nested = doc && doc.configuracion && typeof doc.configuracion === 'object'
+      ? doc.configuracion
+      : {};
+    return String(
+      nested.control_api_token ||
+      nested.controlApiToken ||
+      nested.status_token ||
+      nested.statusToken ||
+      doc?.control_api_token ||
+      doc?.controlApiToken ||
+      doc?.status_token ||
+      doc?.statusToken ||
+      ''
+    ).trim();
+  } catch {
+    return '';
+  }
+}
+
+// Migración sin intervención manual:
+// - la PC usa una última conexión Mongo que ya tenía configurada;
+// - si el tenant no tiene token, crea uno aleatorio en tenant_config;
+// - luego lo guarda automáticamente en configuracion.json y pasa a HTTPS.
+//
+// No se habilita una API pública sin autenticación. El token se genera dentro
+// de MongoDB usando las credenciales antiguas que la PC ya poseía.
+async function ensureControlApiBootstrapInTenantConfig(collection, doc) {
+  if (!doc || !collection || isControlApiConfigured()) return doc;
+
+ const existingToken = readControlApiTokenFromTenantDoc(doc);
+  if (existingToken) return doc;
+
+  const generatedToken = crypto.randomBytes(32).toString('hex');
+  const nested = !!(doc.configuracion && typeof doc.configuracion === 'object');
+  const selector = doc._id !== undefined && doc._id !== null
+    ? { _id: doc._id }
+    : { tenantId: tenantId };
+
+  const tokenPath = nested ? 'configuracion.control_api_token' : 'control_api_token';
+  const enabledPath = nested ? 'configuracion.control_api_enabled' : 'control_api_enabled';
+  const urlPath = nested ? 'configuracion.control_api_url' : 'control_api_url';
+
+  const tokenMissing = {
+    $or: [
+      { [tokenPath]: { $exists: false } },
+      { [tokenPath]: null },
+      { [tokenPath]: '' }
+    ]
+  };
+
+  try {
+    // findOneAndUpdate evita que dos PC del mismo tenant creen tokens distintos
+    // al mismo tiempo. Solo la primera que encuentre el campo vacío lo escribe.
+    const updatedResult = await collection.findOneAndUpdate(
+      { $and: [selector, tokenMissing] },
+      {
+        $set: {
+          [tokenPath]: generatedToken,
+         [enabledPath]: true,
+          [urlPath]: control_api_url
+        }
+      },
+      { returnDocument: 'after' }
+    );
+
+    // MongoDB Driver 5 puede devolver { value }, Driver 6 devuelve el documento.
+    let updatedDoc = updatedResult?.value || updatedResult || null;
+
+    // Si otra PC ganó la carrera, releemos el documento para tomar el mismo token.
+    if (!updatedDoc || !readControlApiTokenFromTenantDoc(updatedDoc)) {
+      updatedDoc = await collection.findOne(selector);
+    }
+
+    const finalToken = readControlApiTokenFromTenantDoc(updatedDoc);
+    if (!finalToken) {
+      throw new Error('control_api_token_generation_failed');
+    }
+
+    try {
+      console.log(`[CONTROL_API] token generado automáticamente para tenant=${tenantId}; no requiere modificar configuracion.json`);
+    } catch {}
+    try {
+      EscribirLog(`[CONTROL_API] token generado automáticamente para tenant=${tenantId}`, 'event');
+    } catch {}
+
+    return updatedDoc;
+  } catch (e) {
+    try {
+      console.log('[CONTROL_API] no se pudo generar token automático:', e?.message || e);
+    } catch {}
+    try {
+      EscribirLog('[CONTROL_API] no se pudo generar token automático: ' + String(e?.message || e), 'error');
+    } catch {}
+    return doc;
+  }
+}
+
 
 // =========================
 // Config por tenant (MongoDB)
@@ -1009,6 +1110,11 @@ async function loadTenantConfigFromDb() {
   if (!doc) doc = await coll.findOne({ tenantId: tenantId });
   if (!doc) throw new Error(`No existe configuración en BD para tenantId=${tenantId} (${collName})`);
 
+  // No requiere token ni edición manual previa. Si falta, esta primera conexión
+  // Mongo lo crea en tenant_config y continúa la migración a HTTPS.
+  if (!startedWithControlApi) {
+    doc = await ensureControlApiBootstrapInTenantConfig(coll, doc);
+  }
   const conf = extractTenantConfigFromDoc(doc);
   tenantConfig = conf;
   applyTenantConfig(conf);
@@ -2935,6 +3041,13 @@ async function loadTenantConfigFromDbMinimal() {
     if (!doc) {
       try { console.log(`[CONFIG] No existe config en BD para tenantId=${tenantId} (colección ${collName})`); } catch {}
       return null;
+    }
+
+    // Igual que en la carga inicial: si el tenant aún no tiene token, se crea
+    // automáticamente usando la última conexión Mongo directa de la PC.
+    if (!startedWithControlApi) {
+      doc = await ensureControlApiBootstrapInTenantConfig(coll, doc);
+     
     }
 
     const conf = extractTenantConfigFromDoc(doc);
