@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.01.17  27/07/2026   */
+/*version: 4.02.00  27/07/2026   */
 
 
 
@@ -35,6 +35,7 @@ try {
 const fetch = require('node-fetch');
 const fileUpload = require('express-fileupload');
 const axios = require('axios');
+const { createControlApiClient } = require('./wweb_control_client');
 const mime = require('mime-types');
 const { ClientInfo } = require('whatsapp-web.js/src/structures');
 const utf8 = require('utf8');
@@ -234,6 +235,45 @@ let status_token = process.env.STATUS_TOKEN || "";  // opcional para proteger /s
 // Para que quede en tu DB (ej: "CARICO"), seteá mongo_db en configuracion.json
 // o usaremos tenantId como dbName por defecto.
 let mongo_db = process.env.MONGO_DB || "";
+// Control HTTPS centralizado. Cuando está configurado, esta PC NO abre
+// conexiones directas a MongoDB; todas las operaciones pasan por Render.
+let control_api_url = String(process.env.WWEB_CONTROL_API_URL || process.env.CONTROL_API_URL || 'https://www.asistobot.com.ar/api/ext/wweb/agent').trim();
+let control_api_token = String(process.env.WWEB_CONTROL_API_TOKEN || process.env.CONTROL_API_TOKEN || '').trim();
+let control_api_enabled = String(process.env.WWEB_CONTROL_API_ENABLED || process.env.CONTROL_API_ENABLED || '').trim().toLowerCase() === 'true';
+let controlApiReadyLogged = false;
+let controlApiLastErrorLogAt = 0;
+const controlApi = createControlApiClient({
+  baseUrl: control_api_url,
+  token: control_api_token,
+  tenantId,
+  numero,
+});
+
+function isControlApiConfigured() {
+  return control_api_enabled === true && controlApi.isConfigured();
+}
+
+function configureControlApiFromValues(values = {}) {
+  const url = values.control_api_url ?? values.controlApiUrl ?? values.wweb_control_api_url ?? values.wwebControlApiUrl;
+  const token = values.control_api_token ?? values.controlApiToken ?? values.wweb_control_api_token ?? values.wwebControlApiToken ?? values.status_token ?? values.statusToken;
+  const enabled = values.control_api_enabled ?? values.controlApiEnabled ?? values.wweb_control_api_enabled ?? values.wwebControlApiEnabled;
+
+  if (url !== undefined && url !== null && String(url).trim()) control_api_url = String(url).trim().replace(/\/+$/, '');
+  if (token !== undefined && token !== null && String(token).trim()) control_api_token = String(token).trim();
+  if (enabled !== undefined && enabled !== null && enabled !== '') {
+    const normalized = String(enabled).trim().toLowerCase();
+    control_api_enabled = ['1', 'true', 'yes', 'si', 'sí', 'on'].includes(normalized);
+  } else if (control_api_url && control_api_token) {
+    control_api_enabled = true;
+  }
+
+  controlApi.configure({
+    baseUrl: control_api_url,
+    token: control_api_token,
+    tenantId,
+    numero,
+  });
+}
 
 // =========================
 // Config por tenant (MongoDB)
@@ -263,6 +303,47 @@ function readBootstrapFromFile() {
     return {};
   }
 }
+
+function persistControlApiBootstrap() {
+  try {
+    if (!control_api_url || !control_api_token) return false;
+    const candidates = [
+      path.join(__dirname, "configuracion.json"),
+      path.join(process.cwd(), "configuracion.json"),
+    ];
+    const configPath = candidates.find((candidate) => fs.existsSync(candidate)) || candidates[0];
+    let raw = {};
+    try { raw = JSON.parse(fs.readFileSync(configPath, 'utf8')); } catch {}
+    const nested = raw && raw.configuracion && typeof raw.configuracion === 'object';
+    const target = nested ? raw.configuracion : raw;
+    target.tenantId = target.tenantId || tenantId;
+    target.mongo_uri = target.mongo_uri || mongo_uri;
+    target.mongo_db = target.mongo_db || mongo_db;
+    target.control_api_url = control_api_url;
+    target.control_api_token = control_api_token;
+    target.control_api_enabled = true;
+    if (nested) raw.configuracion = target;
+    const tempPath = configPath + '.tmp';
+    fs.writeFileSync(tempPath, JSON.stringify(raw, null, 2), 'utf8');
+    fs.renameSync(tempPath, configPath);
+    try { EscribirLog('[CONTROL_API] configuración guardada localmente url=' + control_api_url, 'event'); } catch {}
+    return true;
+  } catch (e) {
+    try { EscribirLog('[CONTROL_API] no se pudo guardar configuracion.json: ' + String(e?.message || e), 'error'); } catch {}
+    return false;
+  }
+}
+
+function getDataCollection(name) {
+  if (isControlApiConfigured()) return controlApi.collection(name);
+  return mongoose?.connection?.db?.collection(name) || null;
+}
+
+function dataBackendReady() {
+  if (isControlApiConfigured()) return true;
+  return !!mongoose?.connection?.db;
+}
+
 
 function extractTenantConfigFromDoc(doc) {
   if (!doc || typeof doc !== "object") return {};
@@ -303,6 +384,7 @@ function applyTenantConfig(conf) {
   }
   if (!numero && (conf.numero || conf.NUMERO)) numero = asString(conf.numero || conf.NUMERO, numero);
   if (conf.status_token !== undefined) status_token = asString(conf.status_token, status_token);
+  configureControlApiFromValues(conf);
 
   // Lock/lease
   lease_ms = asNumber(conf.lease_ms, lease_ms);
@@ -698,14 +780,20 @@ async function loadTenantConfigFromDb() {
   if (!mongo_uri && (boot.mongo_uri || boot.mongoUri)) mongo_uri = String(boot.mongo_uri || boot.mongoUri).trim();
   if (!mongo_db && (boot.mongo_db || boot.mongoDb || boot.dbName)) mongo_db = String(boot.mongo_db || boot.mongoDb || boot.dbName).trim();
   if (!mongo_db) mongo_db = "Cluster0";
+  configureControlApiFromValues(boot);
+  controlApi.configure({ tenantId, numero });
 
-  if (!tenantId || !mongo_uri) throw new Error("Falta tenantId/mongo_uri en configuracion.json");
+  if (!tenantId || (!mongo_uri && !isControlApiConfigured())) {
+    throw new Error("Falta tenantId y backend de datos en configuracion.json");
+  }
+ 
+  const startedWithControlApi = isControlApiConfigured();
 
   const ok = await ensureMongo();
-  if (!ok || !mongoose?.connection?.db) throw new Error("No se pudo conectar a Mongo para cargar configuración");
+  if (!ok || !dataBackendReady()) throw new Error("No se pudo conectar al backend de configuración");
 
   const collName = String(process.env.ASISTO_CONFIG_COLLECTION || "tenant_config").trim() || "tenant_config";
-  const coll = mongoose.connection.db.collection(collName);
+  const coll = getDataCollection(collName);
 
   let doc = await coll.findOne({ _id: tenantId });
   if (!doc) doc = await coll.findOne({ tenantId: tenantId });
@@ -714,7 +802,16 @@ async function loadTenantConfigFromDb() {
   const conf = extractTenantConfigFromDoc(doc);
   tenantConfig = conf;
   applyTenantConfig(conf);
+  controlApi.configure({ tenantId, numero });
 
+  // Migración automática: la versión nueva lee una última vez tenant_config
+  // desde Mongo, guarda URL/token y libera inmediatamente el MongoClient local.
+  if (!startedWithControlApi && isControlApiConfigured()) {
+    persistControlApiBootstrap();
+    await disconnectMongoSafe('migrated_to_control_api');
+    try { console.log('[CONTROL_API] migración completada; MongoDB directo deshabilitado'); } catch {}
+    try { EscribirLog('[CONTROL_API] migración completada; MongoDB directo deshabilitado', 'event'); } catch {}
+  }
   try {
    // console.log(`[CONFIG] tenantId=${tenantId} numero=${numero || ""} puerto=${port} headless=${headless} seg_desde=${seg_desde}`);
   } catch {}
@@ -827,12 +924,12 @@ async function loadClientPhoneAccessConfigLocal(force = false) {
  }
 
   try {
-    if (!await ensureMongo() || !mongoose?.connection?.db) {
+    if (!await ensureMongo() || !dataBackendReady()) {
       if (cached?.value) return cached.value;
       return { enabled: false, numbers: new Set() };
     }
 
-    const doc = await mongoose.connection.db.collection('settings').findOne({
+    const doc = await getDataCollection('settings').findOne({
       _id: 'client_phone_access:' + tenant
     });
 
@@ -1004,11 +1101,11 @@ async function readPhoneFromMongoLidMap(rawId) {
   try {
     if (!looksLikeLid(rawId)) return '';
    if (!await ensureMongo()) return '';
-    if (!mongoose?.connection?.db) return '';
+    if (!dataBackendReady()) return '';
 
     const raw = String(rawId || '').trim();
     const lid = stripWhatsappSuffix(raw);
-    const coll = mongoose.connection.db.collection('wa_lid_phone_map');
+    const coll = getDataCollection('wa_lid_phone_map');
     const tenant = String(tenantId || '').trim();
 
     const baseOr = [
@@ -1555,8 +1652,8 @@ async function getWwebBotLogicModeForPhone(phoneNumber) {
   try {
     if (!tenantId || !phone) return fallback;
     if (!await ensureMongo()) return fallback;
-    if (!mongoose?.connection?.db) return fallback;
-    const rows = await mongoose.connection.db.collection('tenant_channels')
+    if (!dataBackendReady()) return fallback;
+    const rows = await getDataCollection('tenant_channels')
       .find({ tenantId: String(tenantId || '').trim(), channelType: 'whatsapp' })
       .sort({ isDefault: -1, updatedAt: -1, createdAt: -1 })
       .limit(200)
@@ -2382,6 +2479,25 @@ async function disconnectMongoSafe(reason = 'shutdown') {
 
 async function ensureMongo() {
   try {
+    if (isControlApiConfigured()) {
+      controlApi.configure({ tenantId, numero });
+      const ok = await controlApi.ensureReady();
+      if (ok) {
+        initMongoModelsIfNeeded();
+        if (!controlApiReadyLogged) {
+          controlApiReadyLogged = true;
+          const msg = `[CONTROL_API] conectado mode=https url=${control_api_url} tenant=${tenantId} numero=${numero || '(pendiente)'}`;
+          try { console.log(msg); } catch {}
+          try { EscribirLog(msg, 'event'); } catch {}
+        }
+      } else if ((Date.now() - controlApiLastErrorLogAt) > 30000) {
+        controlApiLastErrorLogAt = Date.now();
+        const msg = `[CONTROL_API] no disponible url=${control_api_url} tenant=${tenantId}`;
+        try { console.log(msg); } catch {}
+        try { EscribirLog(msg, 'error'); } catch {}
+      }
+      return ok;
+    }
     if (mongoIdleDisconnectPromise) {
       try { await mongoIdleDisconnectPromise; } catch {}
     }
@@ -2469,6 +2585,17 @@ async function ensureMongo() {
 // Inicializa modelos una sola vez (lock/policies/history/actions)
 function initMongoModelsIfNeeded() {
   try {
+    if (isControlApiConfigured()) {
+      // Sobrescribir modelos Mongoose que pudieron crearse durante la conexión
+      // de transición. Desde este punto todas las operaciones salen por HTTPS.
+      PolicyModel = controlApi.model('wa_wweb_policies');
+      HistoryModel = controlApi.model('wa_wweb_history');
+      LockModel = controlApi.model('wa_locks');
+      ActionModel = controlApi.model('wa_wweb_actions');
+      MessageLogModel = controlApi.model('wa_wweb_message_log');
+      return;
+    }
+
     if (!mongoose?.connection?.db) return;
 
     if (!PolicyModel) {
@@ -2583,14 +2710,14 @@ function initMongoModelsIfNeeded() {
 // =========================
 async function loadTenantConfigFromDbMinimal() {
   try {
-    // Necesitamos bootstrap mínimo antes
-    if (!tenantId || !mongo_uri) return null;
-
+    // Necesitamos bootstrap mínimo antes. En modo API ya no hace falta mongo_uri.
+    if (!tenantId || (!mongo_uri && !isControlApiConfigured())) return null;
+    const startedWithControlApi = isControlApiConfigured();
     const ok = await ensureMongo();
-    if (!ok || !mongoose?.connection?.db) return null;
+    if (!ok || !dataBackendReady()) return null;
 
     const collName = String(process.env.ASISTO_CONFIG_COLLECTION || "tenant_config").trim() || "tenant_config";
-    const coll = mongoose.connection.db.collection(collName);
+     const coll = getDataCollection(collName);
 
     // Soporta doc con _id=tenantId o con campo tenantId
     let doc = await coll.findOne({ _id: tenantId });
@@ -2605,7 +2732,14 @@ async function loadTenantConfigFromDbMinimal() {
     // Mantener la config completa del tenant en memoria y aplicarla al runtime.
     tenantConfig = conf;
     applyTenantConfig(conf);
+    controlApi.configure({ tenantId, numero });
 
+    if (!startedWithControlApi && isControlApiConfigured()) {
+      persistControlApiBootstrap();
+      await disconnectMongoSafe('migrated_to_control_api');
+      try { console.log('[CONTROL_API] migración completada; MongoDB directo deshabilitado'); } catch {}
+      try { EscribirLog('[CONTROL_API] migración completada; MongoDB directo deshabilitado', 'event'); } catch {}
+    }
     // Aplicar SOLO si vienen valores definidos (no pisar con vacíos)
     if (!numero && conf.numero) numero = String(conf.numero).trim();
 
@@ -2668,7 +2802,7 @@ async function loadTenantConfigFromDbMinimal() {
 
 async function refreshTenantConfigFromDbPerMessage() {
   try {
-    if (!tenantId || !mongo_uri) return tenantConfig;
+    if (!tenantId || (!mongo_uri && !isControlApiConfigured())) return tenantConfig;
     const conf = await loadTenantConfigFromDbMinimal();
     if (conf && typeof conf === "object") {
       tenantConfig = conf;
@@ -2734,8 +2868,8 @@ async function getPolicySafe() {
 
     // Leer directo desde Mongo para no depender de paths declarados en el schema.
    // La pausa del panel puede estar guardada como paused/messagesBlocked/etc.
-    if (mongoose?.connection?.db && or.length) {
-      const p0 = await mongoose.connection.db.collection('wa_wweb_policies').findOne({ $or: or });
+    if (dataBackendReady() && or.length) {
+      const p0 = await getDataCollection('wa_wweb_policies').findOne({ $or: or });
       if (p0) return p0;
     }
 
@@ -2936,6 +3070,8 @@ app.get("/status", requireStatusToken, async (req, res) => {
     waState,
     telefono_qr,
     runtimeInfo,
+    dataBackend: isControlApiConfigured() ? 'https_control_api' : 'mongodb_direct',
+    controlApiUrl: isControlApiConfigured() ? control_api_url : null,
     lock
   });
 });
@@ -4053,13 +4189,13 @@ async function loadConsultaMensajesHoursFromDb(force = false) {
     const now = Date.now();
     if (!force && consultaMensajesHoursCache.expiresAt > now) return consultaMensajesHoursCache.hours;
 
-    if (!tenantId || !await ensureMongo() || !mongoose?.connection?.db) {
+    if (!tenantId || !await ensureMongo() || !dataBackendReady()) {
       consultaMensajesHoursCache = { expiresAt: now + 30000, hours: null, updatedAt: null };
       return null;
     }
 
     const tenant = String(tenantId || '').trim();
-    const coll = mongoose.connection.db.collection('settings');
+    const coll = getDataCollection('settings');
     let doc = await coll.findOne({ _id: `store_hours:${tenant}` });
     if (!doc) doc = await coll.findOne({ tenantId: tenant, _id: /^store_hours:/ });
 
@@ -4150,8 +4286,8 @@ async function sleepConsultaMensajesFueraDeHorario() {
 
 function apiMensajesConfirmacionCollection() {
   try {
-    if (!mongoose?.connection?.db) return null;
-    return mongoose.connection.db.collection('wa_api_mensajes_confirmaciones');
+    if (!dataBackendReady()) return null;
+    return getDataCollection('wa_api_mensajes_confirmaciones');
   } catch {
     return null;
   }
@@ -7960,9 +8096,11 @@ function RecuperarJsonConf(){
     if (!mongo_uri && (boot.mongo_uri || boot.mongoUri)) mongo_uri = String(boot.mongo_uri || boot.mongoUri).trim();
     if (!mongo_db && (boot.mongo_db || boot.mongoDb || boot.dbName)) mongo_db = String(boot.mongo_db || boot.mongoDb || boot.dbName).trim();
     if (!mongo_db) mongo_db = "Cluster0";
+    configureControlApiFromValues(boot);
+    controlApi.configure({ tenantId, numero });
   } catch {}
 
-  // Si ya hay config de BD, aplicarla (no rompe si es null)
+  // Si ya hay config de BD/API, aplicarla (no rompe si es null)
   try { if (tenantConfig) applyTenantConfig(tenantConfig); } catch {}
 }
 
