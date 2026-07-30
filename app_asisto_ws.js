@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.02.04  27/07/2026   */
+/*version: 4.02.05  27/07/2026   */
 
 
 
@@ -1948,7 +1948,8 @@ function phonesLookSame(a, b) {
   return false;
 }
 
-const ASISTO_WWEB_CHATGPT_PROCESS_URL = 'https://www.asistobot.com.ar/api/ext/wweb/chatgpt/process';
+const ASISTO_WWEB_CHATGPT_PROCESS_URL = 'https://asistobot.com.ar/api/ext/wweb/chatgpt/process';
+ 
 
 function getAsistoWwebChatgptProcessUrl() {
   return ASISTO_WWEB_CHATGPT_PROCESS_URL;
@@ -7581,69 +7582,69 @@ telefonoFrom = telefonoFromApi;
       console.log(JSON.stringify(redactIncomingApiPayloadForLog(jsonTexto)));
       EscribirLog("Mensaje "+JSON.stringify(redactIncomingApiPayloadForLog(jsonTexto)),'event');
       
-   let controller; let timeoutId;
-   try{
-         controller = new AbortController();
-         timeoutId = setTimeout(() => controller.abort(), 55000);
- 
-         const resp = await fetch(url, {
-           method: "POST",
-           body: JSON.stringify(jsonTexto),
-           headers: {"Content-type": "application/json; charset=UTF-8"},
-        signal: controller.signal
+   try {
+         // Esta llamada usa Axios, igual que el Control API que ya funciona en esta PC.
+         // Se usa el dominio canónico sin redirecciones para que el POST llegue a Render
+         // con el body intacto. No se reintenta automáticamente para evitar duplicar pedidos.
+         const resp = await axios.post(url, jsonTexto, {
+           timeout: 55000,
+           maxRedirects: 0,
+           maxContentLength: 20 * 1024 * 1024,
+           maxBodyLength: 20 * 1024 * 1024,
+           validateStatus: () => true,
+           headers: { "Content-Type": "application/json; charset=UTF-8" }
          });
 
-           clearTimeout(timeoutId);
-        
-         const raw = await resp.text();
-        let json = null;
-        try { json = raw ? JSON.parse(raw) : null; } catch { /* no es JSON */ }
+         const raw = typeof resp.data === 'string' ? resp.data : '';
+         let json = resp.data;
+         if (raw) {
+           try { json = JSON.parse(raw); } catch { json = raw; }
+         }
 
-         //json = await resp.json();
-         console.log(json)
-         
-         if (!resp.ok) {
-            const detalle = json ? JSON.stringify(json) : raw;
-             EscribirLog("Error 02 ApiWhatsapp - Response ERROR " + detalle, "error");
-             EnviarEmail("ApiWhatsapp - Response ERROR ", detalle);
-             if (msg_errores) await safeSend(message.from, msg_errores);
-            return "error";
-                      }
+         console.log(json);
 
-          // Respaldo del filtro central del servidor. No se envía msg_fin ni
-          // ninguna otra respuesta cuando el cliente quedó fuera del listado.
-          if (json && !Array.isArray(json) && json.ignored === true) {
-            try {
-              EscribirLog('[CLIENT_ACCESS] servidor ignoró mensaje from=' + String(telefonoFrom || '') +
-                ' reason=' + String(json.reason || ''), 'event');
-            } catch {}
-            return "ignored";
-          }
+         if (resp.status < 200 || resp.status >= 300) {
+           const detalle = typeof json === 'string' ? json : JSON.stringify(json);
+           EscribirLog("Error 02 ApiWhatsapp - Response ERROR HTTP " + resp.status + " " + detalle, "error");
+           EnviarEmail("ApiWhatsapp - Response ERROR ", detalle);
+           if (msg_errores) await safeSend(message.from, msg_errores);
+           return "error";
+         }
 
-      
+         // Respaldo del filtro central del servidor. No se envía msg_fin ni
+         // ninguna otra respuesta cuando el cliente quedó fuera del listado.
+         if (json && !Array.isArray(json) && json.ignored === true) {
+           try {
+             EscribirLog('[CLIENT_ACCESS] servidor ignoró mensaje from=' + String(telefonoFrom || '') +
+               ' reason=' + String(json.reason || ''), 'event');
+           } catch {}
+           return "ignored";
+         }
 
-          tam_json = 0; // 👈 evitá globals sin const/let; ideal: const tam_json = 0;
-            recuperar_json(message.from, json);
-            await procesar_mensaje(json, message);
+        tam_json = 0; // 👈 evitá globals sin const/let; ideal: const tam_json = 0;
+         recuperar_json(message.from, json);
+         await procesar_mensaje(json, message);
 
-            if (msg_fin) {
-               await safeSend(message.from, msg_fin);
-            }
+         if (msg_fin) {
+           await safeSend(message.from, msg_fin);
+         }
 
+         return "ok";
 
-
-           return "ok";
-
-} catch (err) {
-  clearTimeout(timeoutId);
-  // Importante: no dependas de jsonTexto indefinido en el log
-  const detalle = "Error 03 Chatbot Error " + (err?.message || err) + " " + JSON.stringify(jsonTexto);
-  console.log(detalle);
-  EscribirLog(detalle, "error");
-  EnviarEmail("Chatbot Error ", detalle);
-  if (msg_errores) await safeSend(message.from, msg_errores);
-  return "error";
-}
+   } catch (err) {
+     const detalleTecnico = [
+       err?.message || String(err),
+       err?.code ? ('code=' + err.code) : '',
+       err?.response?.status ? ('http=' + err.response.status) : '',
+       err?.config?.url ? ('url=' + err.config.url) : ''
+     ].filter(Boolean).join(' ');
+     const detalle = "Error 03 Chatbot Error " + detalleTecnico + " " + JSON.stringify(jsonTexto);
+     console.log(detalle);
+     EscribirLog(detalle, "error");
+     EnviarEmail("Chatbot Error ", detalle);
+     if (msg_errores) await safeSend(message.from, msg_errores);
+     return "error";
+   }
 
 
 
