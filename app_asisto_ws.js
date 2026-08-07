@@ -57,26 +57,108 @@ let mongoConnectingPromise = null;
 //   reescribir la lógica de negocio.
 // ============================================================================
 let baileysModulePromise = null;
+let baileysInstallPromise = null;
+const BAILEYS_NPM_PACKAGE = 'baileys';
+const BAILEYS_NPM_VERSION = '7.0.0-rc14';
+
+async function importInstalledBaileysModule() {
+  let firstError = null;
+
+  try {
+    // Compatibilidad con instalaciones anteriores.
+    return await import('@whiskeysockets/baileys');
+  } catch (e) {
+    firstError = e;
+  }
+
+  try {
+    return await import('baileys');
+  } catch (secondError) {
+    const err = new Error('baileys_module_not_installed');
+    err.cause = secondError || firstError;
+    throw err;
+  }
+}
+
+async function ensureBaileysInstalledAutomatically() {
+  if (baileysInstallPromise) return baileysInstallPromise;
+
+  baileysInstallPromise = (async () => {
+    const spec = `${BAILEYS_NPM_PACKAGE}@${BAILEYS_NPM_VERSION}`;
+    const logPrefix = `[BAILEYS] dependencia faltante; instalando automáticamente ${spec}`;
+
+    try { console.log(logPrefix); } catch {}
+    try { EscribirLog(logPrefix, 'event'); } catch {}
+
+    try {
+      const result = await runCommand(
+        'npm',
+        [
+          'install',
+          spec,
+          '--omit=dev',
+          '--no-save',
+          '--package-lock=false',
+          '--no-audit',
+          '--no-fund'
+        ],
+        {
+          cwd: __dirname,
+          timeout: 10 * 60_000
+        }
+      );
+
+      const okMsg = `[BAILEYS] instalación automática finalizada ${spec}`;
+      try { console.log(okMsg); } catch {}
+      try { EscribirLog(okMsg, 'event'); } catch {}
+
+      if (result?.stderr && String(result.stderr).trim()) {
+        try { console.log('[BAILEYS] npm stderr:', String(result.stderr).trim()); } catch {}
+      }
+
+      return true;
+    } catch (e) {
+      const detail = String(e?.stderr || e?.message || e || '').trim();
+      const failMsg = `[BAILEYS] error instalando automáticamente ${spec}: ${detail || 'npm_install_failed'}`;
+      try { console.error(failMsg); } catch {}
+      try { EscribirLog(failMsg, 'error'); } catch {}
+      throw new Error(`baileys_auto_install_failed:${detail || 'npm_install_failed'}`);
+    }
+  })();
+
+  try {
+    return await baileysInstallPromise;
+  } finally {
+    baileysInstallPromise = null;
+  }
+}
 
 async function loadBaileysModule() {
   if (!baileysModulePromise) {
     baileysModulePromise = (async () => {
       try {
-        return await import('@whiskeysockets/baileys');
-     } catch (firstError) {
+        return await importInstalledBaileysModule();
+      } catch (missingError) {
+        // Solo se instala cuando realmente se intenta iniciar el motor Baileys.
+        await ensureBaileysInstalledAutomatically();
+
         try {
-          // Compatibilidad con el nombre de paquete nuevo utilizado por la documentación.
-          return await import('baileys');
-        } catch (secondError) {
+          return await importInstalledBaileysModule();
+        } catch (afterInstallError) {
           const err = new Error(
-            'Baileys no está instalado. Ejecutar: npm install baileys (también se admite @whiskeysockets/baileys)'
+            `Baileys no pudo cargarse después de la instalación automática (${BAILEYS_NPM_PACKAGE}@${BAILEYS_NPM_VERSION})`
           );
-          err.cause = firstError || secondError;
+          err.cause = afterInstallError || missingError;
           throw err;
         }
       }
-    })();
+      })().catch((e) => {
+      // Si npm falla temporalmente, permitimos reintentar en el próximo ciclo/reinicio.
+      baileysModulePromise = null;
+      throw e;
+    });
   }
+
   return baileysModulePromise;
 }
 
