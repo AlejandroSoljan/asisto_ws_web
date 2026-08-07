@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.03.02  07/08/2026   */
+/*version: 4.03.03  07/08/2026   */
 
 
 
@@ -2877,15 +2877,73 @@ function resolveCmdBin(name) {
   return name;
 }
 
+// En Windows, npm/npx son wrappers .cmd. Con Node recientes, intentar ejecutar
+// npm.cmd directamente mediante spawn(..., { shell:false }) puede fallar con
+// EINVAL. Preferimos ejecutar el CLI de npm con el mismo node.exe; si no está
+// en la instalación estándar, hacemos fallback a cmd.exe /c npm.
+function resolveCommandInvocation(bin, args = [], opts = {}) {
+  const rawBin = String(bin || '').trim();
+  const argv = Array.isArray(args) ? args.map((v) => String(v)) : [];
+  const useShell = !!opts.shell;
+
+  if (process.platform === 'win32' && !useShell) {
+    const lower = rawBin.toLowerCase();
+    const isNpm = lower === 'npm' || lower === 'npm.cmd';
+    const isNpx = lower === 'npx' || lower === 'npx.cmd';
+
+    if (isNpm || isNpx) {
+      const cliName = isNpx ? 'npx-cli.js' : 'npm-cli.js';
+      const cliPath = path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', cliName);
+
+      if (fs.existsSync(cliPath)) {
+        return {
+          bin: process.execPath,
+          args: [cliPath, ...argv],
+          shell: false,
+          description: `${process.execPath} ${cliPath}`
+        };
+      }
+
+      const comspec = process.env.ComSpec || process.env.COMSPEC || 'cmd.exe';
+      const tool = isNpx ? 'npx' : 'npm';
+      return {
+        bin: comspec,
+        args: ['/d', '/s', '/c', tool, ...argv],
+        shell: false,
+       description: `${comspec} /d /s /c ${tool}`
+      };
+    }
+  }
+
+  return {
+    bin: resolveCmdBin(rawBin),
+    args: argv,
+    shell: useShell,
+    description: rawBin
+  };
+}
+
+
 function runCommand(bin, args = [], opts = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(resolveCmdBin(bin), args, {
-      cwd: opts.cwd || process.cwd(),
-      shell: !!opts.shell,
-      env: { ...process.env, ...(opts.env || {}) },
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
+    const invocation = resolveCommandInvocation(bin, args, opts);
+    let child;
+
+    try {
+      child = spawn(invocation.bin, invocation.args, {
+        cwd: opts.cwd || process.cwd(),
+        shell: invocation.shell,
+        env: { ...process.env, ...(opts.env || {}) },
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+    } catch (spawnError) {
+      try {
+        spawnError.command = invocation.description;
+      } catch {}
+      reject(spawnError);
+      return;
+    }
 
     let stdout = '';
     let stderr = '';
@@ -2907,6 +2965,7 @@ function runCommand(bin, args = [], opts = {}) {
       if (finished) return;
       finished = true;
       if (timeoutId) clearTimeout(timeoutId);
+      try { err.command = invocation.description; } catch {}
       reject(err);
     });
     child.on('close', (code) => {
