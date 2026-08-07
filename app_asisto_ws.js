@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.03.03  07/08/2026   */
+/*version: 4.03.04  07/08/2026   */
 
 
 
@@ -61,23 +61,46 @@ let baileysInstallPromise = null;
 const BAILEYS_NPM_PACKAGE = 'baileys';
 const BAILEYS_NPM_VERSION = '7.0.0-rc14';
 
+function resolveInstalledBaileysEntry(packageName) {
+  try {
+    return require.resolve(String(packageName || ''), { paths: [__dirname] });
+  } catch {
+    return '';
+  }
+}
+
+
 async function importInstalledBaileysModule() {
-  let firstError = null;
+  // Preferimos el paquete actual "baileys". El nombre histórico queda como fallback
+  // para instalaciones viejas que todavía lo tengan en node_modules.
+  const candidates = [BAILEYS_NPM_PACKAGE, '@whiskeysockets/baileys'];
 
-  try {
-    // Compatibilidad con instalaciones anteriores.
-    return await import('@whiskeysockets/baileys');
-  } catch (e) {
-    firstError = e;
+  for (const packageName of candidates) {
+    const entry = resolveInstalledBaileysEntry(packageName);
+    if (!entry) continue;
+
+    try {
+      const mod = await import(packageName);
+      try {
+        const msg = `[BAILEYS] módulo cargado package=${packageName} entry=${entry}`;
+        console.log(msg);
+        if (typeof EscribirLog === 'function') EscribirLog(msg, 'event');
+      } catch {}
+      return mod;
+    } catch (e) {
+      // El paquete existe físicamente: si falla el import NO lo tratamos como
+      // "no instalado", porque podría ser una dependencia interna/ESM/Node.
+      const detail = String(e?.stack || e?.message || e || '').trim();
+      const err = new Error(`baileys_import_failed package=${packageName} entry=${entry}: ${detail || 'import_failed'}`);
+      err.code = 'BAILEYS_IMPORT_FAILED';
+      err.cause = e;
+      throw err;
+    }
   }
 
-  try {
-    return await import('baileys');
-  } catch (secondError) {
-    const err = new Error('baileys_module_not_installed');
-    err.cause = secondError || firstError;
-    throw err;
-  }
+  const err = new Error('baileys_module_not_installed');
+  err.code = 'BAILEYS_MODULE_NOT_INSTALLED';
+  throw err;
 }
 
 async function ensureBaileysInstalledAutomatically() {
@@ -138,22 +161,32 @@ async function loadBaileysModule() {
     baileysModulePromise = (async () => {
       try {
         return await importInstalledBaileysModule();
-      } catch (missingError) {
-        // Solo se instala cuando realmente se intenta iniciar el motor Baileys.
+      } catch (loadError) {
+        // Si el paquete YA existe pero falló su import, mostrar el error real y no
+        // entrar en un ciclo de npm install + restart.
+        if (loadError?.code !== 'BAILEYS_MODULE_NOT_INSTALLED') {
+          throw loadError;
+        }
+
+        // Primera ejecución de una PC que todavía no tiene Baileys: instalarlo.
         await ensureBaileysInstalledAutomatically();
 
-        try {
-          return await importInstalledBaileysModule();
-        } catch (afterInstallError) {
-          const err = new Error(
-            `Baileys no pudo cargarse después de la instalación automática (${BAILEYS_NPM_PACKAGE}@${BAILEYS_NPM_VERSION})`
-          );
-          err.cause = afterInstallError || missingError;
-          throw err;
-        }
+        // Baileys 7 es ESM. Si el import bare-specifier falló antes de instalarlo,
+        // Node puede conservar resolución/caché del loader durante este proceso.
+        // Reiniciamos el proceso para que el próximo arranque descubra node_modules
+        // desde cero. El runner de Asisto interpreta exitCode 77 y lo vuelve a iniciar.
+        const restartMsg = `[BAILEYS] instalado ${BAILEYS_NPM_PACKAGE}@${BAILEYS_NPM_VERSION}; reiniciando proceso para cargar el módulo ESM`;
+        try { console.log(restartMsg); } catch {}
+        try { if (typeof EscribirLog === 'function') EscribirLog(restartMsg, 'event'); } catch {}
+
+        await fastExitForSupervisorRestart('baileys_installed_restart', getSupervisorRestartExitCode());
+
+        // fastExit programa process.exit(). Dejamos esta promesa pendiente para que
+        // initialize() no siga y no registre un falso error mientras sale el proceso.
+        return await new Promise(() => {});
       }
-      })().catch((e) => {
-      // Si npm falla temporalmente, permitimos reintentar en el próximo ciclo/reinicio.
+    })().catch((e) => {
+      // Si npm o el import fallan realmente, permitimos reintentar en el próximo ciclo/reinicio.
       baileysModulePromise = null;
       throw e;
     });
