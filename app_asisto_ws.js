@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.04.03  07/08/2026   */
+/*version: 4.04.04  07/08/2026   */
 /*
  * Bootstrap mínimo de reparación.
  * Usa SOLO módulos built-in para poder reparar node_modules antes de cargar
@@ -9,7 +9,7 @@ const __bootFs = require('fs');
 const __bootPath = require('path');
 const { spawnSync: __bootSpawnSync } = require('child_process');
 
-const ASISTO_SCRIPT_VERSION = '4.04.03';
+const ASISTO_SCRIPT_VERSION = '4.04.04';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -75,15 +75,40 @@ function __bootRunNpmInstall() {
     }
   );
 }
+const __ASISTO_BOOT_CRITICAL_PACKAGES = [
+  'mongoose',
+  'express',
+  'express-validator',
+  'socket.io',
+  'qrcode',
+  'node-fetch',
+  'express-fileupload',
+  'axios',
+  'mime-types',
+  'utf8',
+  'nodemailer',
+  'baileys'
+];
+
+function __bootFindMissingCriticalDependencies() {
+  const missing = [];
+  for (const packageName of __ASISTO_BOOT_CRITICAL_PACKAGES) {
+    if (!__bootResolveLocal(packageName)) missing.push(packageName);
+  }
+  return missing;
+}
+
 
 function __bootRepairNodeModulesIfNeeded() {
-  // Este fue el módulo concreto que quedó faltante después de npm installs
-  // concurrentes. Si está presente no hacemos absolutamente nada.
-  if (__bootResolveLocal('agent-base')) return;
+  let missing = __bootFindMissingCriticalDependencies();
+  if (!missing.length) return;
 
   // Sólo intentamos reparar si existe package.json en la instalación.
   const packageJson = __bootPath.join(__dirname, 'package.json');
-  if (!__bootFs.existsSync(packageJson)) return;
+  if (!__bootFs.existsSync(packageJson)) {
+    console.error('[BOOT_REPAIR] faltan dependencias pero no existe package.json: ' + missing.join(', '));
+    return;
+  }
 
   const lockPath = __bootPath.join(__dirname, 'node_modules', '.asisto-bootstrap-repair.lock');
   let fd = null;
@@ -93,8 +118,8 @@ function __bootRepairNodeModulesIfNeeded() {
 
     const deadline = Date.now() + 10 * 60_000;
     while (Date.now() < deadline) {
-      // Otro proceso pudo terminar la reparación mientras esperábamos.
-      if (__bootResolveLocal('agent-base')) return;
+      missing = __bootFindMissingCriticalDependencies();
+      if (!missing.length) return;
 
       try {
         fd = __bootFs.openSync(lockPath, 'wx');
@@ -120,10 +145,11 @@ function __bootRepairNodeModulesIfNeeded() {
       return;
     }
 
-    // Revalidar tras tomar el lock.
-    if (__bootResolveLocal('agent-base')) return;
+    missing = __bootFindMissingCriticalDependencies();
+    if (!missing.length) return;
 
-    console.log('[BOOT_REPAIR] falta agent-base; reparando node_modules con npm install --omit=dev ...');
+    console.log('[BOOT_REPAIR] faltan dependencias críticas: ' + missing.join(', ') + '; ejecutando npm install --omit=dev ...');
+
 
     const result = __bootRunNpmInstall();
     const status = Number(result?.status);
@@ -139,12 +165,14 @@ function __bootRepairNodeModulesIfNeeded() {
       console.error('[BOOT_REPAIR] npm error:', result.error?.message || result.error);
     }
 
-    if (status !== 0 || !__bootResolveLocal('agent-base')) {
-      console.error(`[BOOT_REPAIR] reparación incompleta status=${Number.isFinite(status) ? status : 'null'} agent-base=${__bootResolveLocal('agent-base') || 'faltante'}`);
-      return;
+    missing = __bootFindMissingCriticalDependencies();
+    if (status !== 0 || missing.length) {
+      console.error(
+        `[BOOT_REPAIR] reparación incompleta status=${Number.isFinite(status) ? status : 'null'} faltantes=${missing.join(', ') || '(ninguno)'}`
+      );    return;
     }
 
-    console.log(`[BOOT_REPAIR] node_modules reparado correctamente agent-base=${__bootResolveLocal('agent-base')}`);
+    console.log('[BOOT_REPAIR] node_modules reparado correctamente');
   } catch (e) {
     try { console.error('[BOOT_REPAIR] error:', e?.stack || e?.message || e); } catch {}
   } finally {
@@ -217,7 +245,7 @@ const { eventNames } = require('process');
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
-const { Worker, isMainThread, threadId } = require('worker_threads');
+const { Worker, isMainThread, threadId, parentPort } = require('worker_threads');
 let mongoConnectingPromise = null;
 
 
@@ -258,6 +286,28 @@ async function acquireSharedNpmInstallLock(timeoutMs = 10 * 60_000) {
   }
 
   throw new Error('npm_install_lock_timeout');
+}
+
+async function runSharedNpmInstall(args = [], opts = {}, label = 'npm_install') {
+  let lockFd = null;
+  try {
+    lockFd = await acquireSharedNpmInstallLock(Number(opts.timeout || 10 * 60_000));
+    try {
+      const msg = `[NPM_LOCK] inicio label=${label}`;
+      console.log(msg);
+      if (typeof EscribirLog === 'function') EscribirLog(msg, 'event');
+    } catch {}
+
+    return await runCommand('npm', args, opts);
+  } finally {
+    try {
+      const msg = `[NPM_LOCK] fin label=${label}`;
+      console.log(msg);
+      if (typeof EscribirLog === 'function') EscribirLog(msg, 'event');
+    } catch {}
+    try { if (lockFd !== null) fs.closeSync(lockFd); } catch {}
+    try { if (lockFd !== null) fs.unlinkSync(ASISTO_NPM_INSTALL_LOCK_PATH); } catch {}
+  }
 }
 
 async function repairWwebJsDependenciesAutomatically() {
@@ -3678,7 +3728,7 @@ async function autoUpdateForceTargetTagOnBoot(reason = 'boot_target_tag_force') 
     const needsNpm = changedFiles.some((name) => /(^|\/)(package\.json|package-lock\.json)$/i.test(name));
     if (needsNpm) {
       autoUpdateLog('[AUTO_UPDATE] package*.json cambió, ejecutando npm install --omit=dev', 'event');
-      await runCommand('npm', ['install', '--omit=dev'], { cwd: repoPath, timeout: 10 * 60_000 });
+      await runSharedNpmInstall(['install', '--omit=dev'], { cwd: repoPath, timeout: 10 * 60_000 }, 'auto_update');
     }
   }
 
@@ -3753,7 +3803,7 @@ async function autoUpdateCheckAndApply(reason = 'interval') {
       const needsNpm = changedFiles.some((name) => /(^|\/)(package\.json|package-lock\.json)$/i.test(name));
       if (needsNpm) {
         autoUpdateLog('[AUTO_UPDATE] package*.json cambió, ejecutando npm install --omit=dev', 'event');
-        await runCommand('npm', ['install', '--omit=dev'], { cwd: repoPath, timeout: 10 * 60_000 });
+        await runSharedNpmInstall(['install', '--omit=dev'], { cwd: repoPath, timeout: 10 * 60_000 }, 'auto_update');
       }
     }
 
@@ -3781,6 +3831,13 @@ async function autoUpdateCheckAndApply(reason = 'interval') {
 }
 
 function startAutoUpdateScheduler() {
+  // En multi-sesión no modificamos Git/node_modules con workers activos.
+  // El worker primario ya hace la verificación forzada antes de habilitar al resto.
+  if (ASISTO_MULTI_WORKER) {
+    autoUpdateLog('[AUTO_UPDATE] scheduler periódico omitido en multi-sesión; update sólo al arranque del primario', 'event');
+    return;
+  }
+
   if (!auto_update_enabled) {
     autoUpdateLog('[AUTO_UPDATE] desactivado', 'event');
     return;
@@ -4942,8 +4999,27 @@ function getMultiPrimarySessionKey(sessions, boot = readBootstrapFromFile()) {
 
 
 function hashMultiSessionDefinition(session) {
-  try { return crypto.createHash('sha1').update(JSON.stringify(session.bootstrap || session)).digest('hex'); }
-  catch { return `${session.tenantId}:${session.numero}:${session.port}:${session.engine}`; }
+  try {
+    const stable = { ...(session?.bootstrap || session || {}) };
+
+    // Estos campos se escriben automáticamente durante la migración a Control API.
+    // No representan un cambio operativo de sesión y no deben provocar config_changed.
+    for (const key of [
+      'control_api_token', 'controlApiToken',
+      'wweb_control_api_token', 'wwebControlApiToken',
+      'control_api_url', 'controlApiUrl',
+      'wweb_control_api_url', 'wwebControlApiUrl',
+      'control_api_enabled', 'controlApiEnabled',
+      'wweb_control_api_enabled', 'wwebControlApiEnabled',
+      'status_token', 'statusToken'
+    ]) {
+      delete stable[key];
+    }
+
+    return crypto.createHash('sha1').update(JSON.stringify(stable)).digest('hex');
+  } catch {
+    return `${session.tenantId}:${session.numero}:${session.port}:${session.engine}`;
+  }
 }
 
 function pipeWorkerLines(stream, sessionKey, target) {
@@ -5028,11 +5104,13 @@ function startMultiWorkerRecord(state, session, isPrimary) {
     startedAt: 0,
     restartCount: 0,
     isPrimary: !!isPrimary,
+     exitScope: '',
   };
   record.session = session;
   record.hash = hash;
   record.intentionalStop = false;
   record.isPrimary = !!isPrimary;
+  record.exitScope = '';
   record.startedAt = Date.now();
 
   const worker = new Worker(__filename, {
@@ -5048,6 +5126,27 @@ function startMultiWorkerRecord(state, session, isPrimary) {
 
   try { console.log(`[MULTI] worker iniciado key=${session.key} threadId=${worker.threadId} port=${session.port} engine=${session.engine || 'tenant_config'}`); } catch {}
 
+  worker.on('message', (message) => {
+    try {
+      const type = String(message?.type || '');
+
+      if (type === 'multi_primary_bootstrap_ready' && record.isPrimary) {
+        if (!state.primaryBootstrapReady) {
+          state.primaryBootstrapReady = true;
+          console.log(`[MULTI] primario listo para habilitar workers secundarios key=${session.key}`);
+          setImmediate(() => { reconcileMultiSessionWorkers(state).catch(() => {}); });
+        }
+        return;
+      }
+
+      if (type === 'multi_worker_exit_scope') {
+        record.exitScope = String(message?.scope || '').trim().toLowerCase();
+        return;
+      }
+    } catch {}
+  });
+
+
   worker.on('error', (err) => {
     try { console.error(`[MULTI] worker error key=${session.key}:`, err?.stack || err?.message || err); } catch {}
   });
@@ -5055,13 +5154,17 @@ function startMultiWorkerRecord(state, session, isPrimary) {
   worker.on('exit', (code) => {
     const runtime = Date.now() - (record.startedAt || Date.now());
     record.worker = null;
-    try { console.log(`[MULTI] worker finalizó key=${session.key} code=${code} runtimeMs=${runtime}`); } catch {}
+    const exitScope = String(record.exitScope || '').trim().toLowerCase();
+    record.exitScope = '';
+    if (record.isPrimary) state.primaryBootstrapReady = false;
+
+    try { console.log(`[MULTI] worker finalizó key=${session.key} code=${code} runtimeMs=${runtime} scope=${exitScope || 'default'}`); } catch {}
     if (state.stopping || record.intentionalStop || !state.desired.has(session.key)) return;
 
     // El worker primario es el único autorizado a tocar git. Si sale con el código
     // de supervisor (normalmente 77), reiniciamos TODO el proceso para que supervisor
     // y workers carguen exactamente la misma versión del archivo.
-    if (record.isPrimary && Number(code) === getSupervisorRestartExitCode()) {
+    if (record.isPrimary && Number(code) === getSupervisorRestartExitCode() && exitScope !== 'worker') {
       try { console.log('[MULTI] worker primario solicitó reinicio global; saliendo para que el runner reinicie Asisto'); } catch {}
       setTimeout(() => { try { process.exit(getSupervisorRestartExitCode()); } catch {} }, 250);
       return;
@@ -5091,6 +5194,7 @@ async function reconcileMultiSessionWorkers(state) {
     // de configuracion.json (SDG en esta instalación). Fallback: primera sesión.
     const primaryKey = getMultiPrimarySessionKey(sessions, boot);
     if (state.primaryKey !== primaryKey) {
+      state.primaryBootstrapReady = false;
       try { console.log(`[MULTI] worker primario=${primaryKey || '(ninguno)'}`); } catch {}
     }
     state.primaryKey = primaryKey;
@@ -5106,15 +5210,28 @@ async function reconcileMultiSessionWorkers(state) {
       const nextHash = hashMultiSessionDefinition(next);
       const shouldBePrimary = key === primaryKey;
       if (record.hash !== nextHash || record.isPrimary !== shouldBePrimary) {
+        if (record.isPrimary) state.primaryBootstrapReady = false;
         if (record.restartTimer) { clearTimeout(record.restartTimer); record.restartTimer = null; }
         await stopMultiWorkerRecord(record, 'config_changed');
         state.workers.delete(key);
       }
     }
 
-    for (const session of sessions) {
-      if (!state.workers.get(session.key)?.worker) {
-        startMultiWorkerRecord(state, session, session.key === primaryKey);
+    // Fase 1: arrancar únicamente el primario. Puede hacer Git/npm sin que ningún
+    // otro worker esté importando o modificando node_modules.
+    const primarySession = desired.get(primaryKey);
+    if (primarySession && !state.workers.get(primaryKey)?.worker) {
+      startMultiWorkerRecord(state, primarySession, true);
+    }
+
+    // Fase 2: recién cuando el primario terminó su bootstrap/update inicial,
+    // habilitamos el resto de las sesiones.
+    if (state.primaryBootstrapReady) {
+      for (const session of sessions) {
+        if (session.key === primaryKey) continue;
+        if (!state.workers.get(session.key)?.worker) {
+          startMultiWorkerRecord(state, session, false);
+        }
       }
     }
   } catch (e) {
@@ -5154,6 +5271,7 @@ async function runMultiSessionSupervisor(boot) {
     reconcileBusy: false,
     timer: null,
     primaryKey: '',
+    primaryBootstrapReady: false,
   };
   multiSessionSupervisorState = state;
 
@@ -5214,6 +5332,29 @@ async function runMultiSessionSupervisor(boot) {
     } catch (e) {
        try { console.log('boot_target_tag_force auto-update error:', e?.message || e); } catch {}
       try { EscribirLog('boot_target_tag_force auto-update error: ' + String(e?.message || e), 'error'); } catch {}
+    }
+    // Si un npm/update de arranque dejó dependencias directas faltantes, no soltamos
+    // todavía los otros workers: reiniciamos para que el BOOT_REPAIR las restaure.
+    if (ASISTO_MULTI_WORKER && ASISTO_MULTI_PRIMARY_WORKER) {
+      try {
+        const missingAfterBootstrap = __bootFindMissingCriticalDependencies();
+        if (missingAfterBootstrap.length) {
+          const depMsg = `[MULTI] primario detectó dependencias faltantes después del bootstrap: ${missingAfterBootstrap.join(', ')}; reiniciando para reparación`;
+          console.error(depMsg);
+          try { EscribirLog(depMsg, 'error'); } catch {}
+          await fastExitForSupervisorRestart('MULTI_BOOTSTRAP_DEPENDENCY_REPAIR', getSupervisorRestartExitCode());
+          return;
+        }
+      } catch {}
+
+      try {
+        parentPort?.postMessage({
+          type: 'multi_primary_bootstrap_ready',
+          key: ASISTO_MULTI_SESSION_KEY,
+          pid: process.pid,
+          threadId
+        });
+      } catch {}
     }
 
     server.listen(port, function() {
@@ -6067,6 +6208,20 @@ async function restartScriptFromPanel(reason = 'panel_restart_script') {
     try { await forceReleaseLock('restarting'); } catch {}
     try { await Promise.race([disconnectMongoSafe('panel_restart'), timeoutPromise(3000, 'mongo_disconnect_timeout')]); } catch {}
     try { releaseSingleInstanceLock(); } catch {}
+
+    // En multi-sesión, el botón Reiniciar pertenece a ESTA sesión/worker.
+    // Avisamos al supervisor para que un exitCode=77 del primario SDG no provoque
+    // el reinicio global de CARICO/MSM/PRUEBAS.
+    if (ASISTO_MULTI_WORKER) {
+      try {
+        parentPort?.postMessage({
+          type: 'multi_worker_exit_scope',
+          scope: 'worker',
+          reason: restartReason,
+          key: ASISTO_MULTI_SESSION_KEY
+        });
+      } catch {}
+    }
 
     try { EscribirLog('[PROCESS_RESTART] modo=' + restartMode + ' saliendo con exitCode=' + exitCode + ' pid=' + process.pid, 'event'); } catch {}
     setTimeout(() => {
