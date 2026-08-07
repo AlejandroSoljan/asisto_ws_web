@@ -1,5 +1,160 @@
 /*script:app_asisto*/
-/*version: 4.04.02  07/08/2026   */
+/*version: 4.04.03  07/08/2026   */
+/*
+ * Bootstrap mínimo de reparación.
+ * Usa SOLO módulos built-in para poder reparar node_modules antes de cargar
+ * Express/Mongoose/whatsapp-web.js/Puppeteer/Baileys.
+ */
+const __bootFs = require('fs');
+const __bootPath = require('path');
+const { spawnSync: __bootSpawnSync } = require('child_process');
+
+const ASISTO_SCRIPT_VERSION = '4.04.03';
+try {
+  console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
+} catch {}
+
+function __bootResolveLocal(packageName) {
+  try {
+    return require.resolve(String(packageName || ''), { paths: [__dirname] });
+  } catch {
+    return '';
+  }
+}
+
+function __bootSleepSync(ms) {
+  try {
+    const sab = new SharedArrayBuffer(4);
+    const ia = new Int32Array(sab);
+    Atomics.wait(ia, 0, 0, Math.max(1, Number(ms) || 1));
+  } catch {}
+}
+
+function __bootFindNpmCli() {
+  const exeDir = __bootPath.dirname(process.execPath);
+  const candidates = [
+    __bootPath.join(exeDir, 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    __bootPath.join(exeDir, '..', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    __bootPath.join(process.env.APPDATA || '', 'npm', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    try {
+      if (__bootFs.existsSync(candidate)) return candidate;
+    } catch {}
+  }
+  return '';
+}
+
+function __bootRunNpmInstall() {
+  const args = ['install', '--omit=dev', '--no-audit', '--no-fund'];
+  const npmCli = __bootFindNpmCli();
+
+  if (npmCli) {
+    return __bootSpawnSync(
+      process.execPath,
+      [npmCli, ...args],
+      {
+        cwd: __dirname,
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: 10 * 60_000,
+      }
+    );
+  }
+
+  const comspec = String(process.env.ComSpec || process.env.COMSPEC || 'cmd.exe');
+  return __bootSpawnSync(
+    comspec,
+    ['/d', '/s', '/c', 'npm', ...args],
+    {
+      cwd: __dirname,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 10 * 60_000,
+    }
+  );
+}
+
+function __bootRepairNodeModulesIfNeeded() {
+  // Este fue el módulo concreto que quedó faltante después de npm installs
+  // concurrentes. Si está presente no hacemos absolutamente nada.
+  if (__bootResolveLocal('agent-base')) return;
+
+  // Sólo intentamos reparar si existe package.json en la instalación.
+  const packageJson = __bootPath.join(__dirname, 'package.json');
+  if (!__bootFs.existsSync(packageJson)) return;
+
+  const lockPath = __bootPath.join(__dirname, 'node_modules', '.asisto-bootstrap-repair.lock');
+  let fd = null;
+
+  try {
+    try { __bootFs.mkdirSync(__bootPath.dirname(lockPath), { recursive: true }); } catch {}
+
+    const deadline = Date.now() + 10 * 60_000;
+    while (Date.now() < deadline) {
+      // Otro proceso pudo terminar la reparación mientras esperábamos.
+      if (__bootResolveLocal('agent-base')) return;
+
+      try {
+        fd = __bootFs.openSync(lockPath, 'wx');
+        break;
+      } catch (e) {
+        if (e?.code !== 'EEXIST') throw e;
+
+        // Lock viejo: si tiene más de 15 minutos lo eliminamos.
+        try {
+          const st = __bootFs.statSync(lockPath);
+          if ((Date.now() - st.mtimeMs) > 15 * 60_000) {
+            __bootFs.unlinkSync(lockPath);
+            continue;
+          }
+        } catch {}
+
+        __bootSleepSync(500);
+      }
+    }
+
+    if (fd === null) {
+      console.error('[BOOT_REPAIR] timeout esperando lock de reparación de node_modules');
+      return;
+    }
+
+    // Revalidar tras tomar el lock.
+    if (__bootResolveLocal('agent-base')) return;
+
+    console.log('[BOOT_REPAIR] falta agent-base; reparando node_modules con npm install --omit=dev ...');
+
+    const result = __bootRunNpmInstall();
+    const status = Number(result?.status);
+
+    if (result?.stdout && String(result.stdout).trim()) {
+      console.log('[BOOT_REPAIR] npm stdout:', String(result.stdout).trim());
+    }
+    if (result?.stderr && String(result.stderr).trim()) {
+      console.log('[BOOT_REPAIR] npm stderr:', String(result.stderr).trim());
+    }
+
+    if (result?.error) {
+      console.error('[BOOT_REPAIR] npm error:', result.error?.message || result.error);
+    }
+
+    if (status !== 0 || !__bootResolveLocal('agent-base')) {
+      console.error(`[BOOT_REPAIR] reparación incompleta status=${Number.isFinite(status) ? status : 'null'} agent-base=${__bootResolveLocal('agent-base') || 'faltante'}`);
+      return;
+    }
+
+    console.log(`[BOOT_REPAIR] node_modules reparado correctamente agent-base=${__bootResolveLocal('agent-base')}`);
+  } catch (e) {
+    try { console.error('[BOOT_REPAIR] error:', e?.stack || e?.message || e); } catch {}
+  } finally {
+    try { if (fd !== null) __bootFs.closeSync(fd); } catch {}
+    try { if (fd !== null) __bootFs.unlinkSync(lockPath); } catch {}
+  }
+}
+
+__bootRepairNodeModulesIfNeeded();
+
  
 
 const dns = require("dns");
