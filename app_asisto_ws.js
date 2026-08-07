@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.03.00  07/08/2026   */
+/*version: 4.03.02  07/08/2026   */
 
 
 
@@ -2633,16 +2633,17 @@ async function fastExitForSupervisorRestart(reason = 'SUPERVISOR_RESTART', exitC
 
   clearRuntimeTimersForExit(reason);
 
-  // En auto-update/reinicio supervisado NO esperamos destroyClientHard/client.destroy(),
-  // porque WhatsApp Web/Puppeteer puede quedar colgado en Windows.
-  // Liberamos estado/lock con timeout corto y dejamos que el runner/PM2 levante el nuevo proceso.
+  // Cierre acotado del transporte antes de salir. Con whatsapp-web.js intentamos
+  // cerrar Puppeteer/Chromium y, si no responde dentro del timeout, terminamos
+  // SOLO el árbol del Chromium asociado a este Client (no todos los chrome.exe).
+  try { await closeWhatsappClientForProcessExit(client, 'fast_exit:' + String(reason || ''), 1800); } catch {}
+  try { client = null; } catch {}
   try { resetClientRuntimeFlags('fast_exit:' + String(reason || '')); } catch {}
   try { localWsPanelState = 'offline'; } catch {}
   try { await Promise.race([updateLockStateSafe('offline'), timeoutPromise(1200, 'update_lock_timeout')]); } catch {}
   try { await Promise.race([forceReleaseLock('offline'), timeoutPromise(1800, 'release_lock_timeout')]); } catch {}
   try { isOwner = false; } catch {}
-  try { await Promise.race([disconnectMongoSafe(String(signal || 'shutdown')), timeoutPromise(3000, 'mongo_disconnect_timeout')]); } catch {}
-  try { releaseSingleInstanceLock(); } catch {}
+
   try { await Promise.race([disconnectMongoSafe(String(reason || 'supervisor_restart')), timeoutPromise(3000, 'mongo_disconnect_timeout')]); } catch {}
   try { releaseSingleInstanceLock(); } catch {}
  
@@ -4239,6 +4240,11 @@ app.post("/control/release", requireStatusToken, async (req, res) => {
 
     // Cargar resto de configuración desde Mongo (numero/puerto/headless/etc.)
     await loadTenantConfigFromDbMinimal();
+    try {
+      const engineBootMsg = `[WWEB_ENGINE] configuración al arranque=${getWwebEngine()} tenant=${tenantId} numero=${numero || '(pendiente)'}`;
+      console.log(engineBootMsg);
+      EscribirLog(engineBootMsg, 'event');
+    } catch {}
 
     // Si el tenant pide una TAG concreta, validar al iniciar antes de levantar WhatsApp.
     try {
@@ -4708,23 +4714,19 @@ async function restartFullProcessFromPanel(reason = 'panel_restart_script') {
     try { child.unref(); } catch {}
     try { EscribirLog('[PROCESS_RESTART] nuevo proceso programado; cerrando proceso actual pid=' + process.pid, 'event'); } catch {}
 
-    setTimeout(() => {
-      // Reinicio completo desde panel: NO esperamos destroyClientHard/gracefulShutdown.
-      // En Windows + tarea programada, whatsapp-web.js/Puppeteer puede colgar destroy()
-      // y el helper queda esperando eternamente el PID viejo. Cerramos el proceso rápido;
-      // Windows libera puerto/handles y el helper arranca un Node nuevo.
-      try { EscribirLog('[PROCESS_RESTART] salida rapida del proceso actual pid=' + process.pid, 'event'); } catch {}
-      try { if (autoUpdateTimer) { clearInterval(autoUpdateTimer); autoUpdateTimer = null; } } catch {}
-      try { if (runtimeConfigPollTimer) { clearInterval(runtimeConfigPollTimer); runtimeConfigPollTimer = null; } } catch {}
-      try { if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; } } catch {}
-      try { if (actionTimer) { clearInterval(actionTimer); actionTimer = null; } } catch {}
-      try { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } } catch {}
-      try { clearAuthReadyWatchdog('process_restart_fast_exit'); } catch {}
-      try { localWsPanelState = 'restarting'; } catch {}
+    setTimeout(async () => {
+      // Cierre con timeout: evita dejar Chromium huérfano pero tampoco permite que
+      // Puppeteer bloquee indefinidamente el reinicio.
+      try { EscribirLog('[PROCESS_RESTART] preparando salida del proceso actual pid=' + process.pid, 'event'); } catch {}
+      clearRuntimeTimersForExit('process_restart_full');
+      try { await closeWhatsappClientForProcessExit(client, 'process_restart_full', 2200); } catch {}
       try { client = null; } catch {}
+      try { resetClientRuntimeFlags('process_restart_full'); } catch {}
+      try { localWsPanelState = 'restarting'; } catch {}
+      try { releaseSingleInstanceLock(); } catch {}
       try { isOwner = false; } catch {}
       try { process.exit(0); } catch {}
-    }, 500);
+    }, 250);
 
     return true;
   } catch (e) {
@@ -5081,6 +5083,16 @@ async function restartScriptFromPanel(reason = 'panel_restart_script') {
     // - pm2: salimos con exitCode=0 para que PM2 reinicie el proceso.
     try { localWsPanelState = 'restarting'; } catch {}
     try { await updateLockStateSafe('restarting'); } catch {}
+
+    // El botón Reiniciar del panel llegaba hasta acá y salía sin cerrar el Client.
+    // Con whatsapp-web.js eso podía dejar chrome.exe huérfano. Intentamos un cierre
+    // normal por un tiempo corto y, si Puppeteer no responde, terminamos únicamente
+    // el Chromium perteneciente a esta sesión antes de salir.
+    clearRuntimeTimersForExit('panel_restart');
+    try { await closeWhatsappClientForProcessExit(client, 'panel_restart', 2200); } catch {}
+    try { client = null; } catch {}
+    try { resetClientRuntimeFlags('panel_restart'); } catch {}
+
     try { await forceReleaseLock('restarting'); } catch {}
     try { await Promise.race([disconnectMongoSafe('panel_restart'), timeoutPromise(3000, 'mongo_disconnect_timeout')]); } catch {}
     try { releaseSingleInstanceLock(); } catch {}
@@ -5261,7 +5273,8 @@ async function gracefulShutdown(signal) {
   try { if (actionTimer) { clearInterval(actionTimer); actionTimer = null; } } catch {}
   try { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } } catch {}
   try { clearAuthReadyWatchdog('shutdown'); } catch {}
-  try { if (client) { try { await destroyClientHard(client); } catch { try { await client.destroy(); } catch {} } } } catch {}
+  try { await closeWhatsappClientForProcessExit(client, 'shutdown:' + String(signal || ''), 3000); } catch {}
+  try { client = null; } catch {}
   try { resetClientRuntimeFlags('shutdown'); } catch {}
   try { localWsPanelState = 'offline'; } catch {}
   try { await updateLockStateSafe('offline'); } catch {}
@@ -6767,6 +6780,7 @@ function startConsultaApiMensajesIfEnabled(source = '') {
 
 function getRuntimeConfigSnapshot() {
   return {
+    wweb_engine: getWwebEngine(),
     habilitar_bot: habilitar_bot === true,
     habilitar_consulta_mensajes: consulta_api_mensajes_habilitado === true,
     habilitar_mensajes_info: habilitar_mensajes_info === true,
@@ -6831,6 +6845,26 @@ async function refreshRuntimeDomainConfig(source = 'runtime_config_poll') {
     const next = getRuntimeConfigSnapshot();
     logRuntimeConfigChanges(prev, next, source);
     lastRuntimeConfigSnapshot = next;
+
+    // Si el dominio cambió wweb_engine con el proceso vivo, la variable en memoria
+    // cambia al refrescar tenant_config, pero el Client ya creado sigue usando el
+    // transporte anterior. Recrearlo para que el cambio wwebjs <-> baileys se aplique
+    // sin necesitar acceso a la terminal ni reiniciar Windows.
+    const desiredEngine = getWwebEngine();
+    const activeEngine = String(client?.__transport || '').trim().toLowerCase();
+    if (client && activeEngine && activeEngine !== desiredEngine) {
+      const engineMsg = `[WWEB_ENGINE] cambio detectado active=${activeEngine} configured=${desiredEngine} source=${String(source || '')}`;
+      try { console.log(engineMsg); } catch {}
+      try { EscribirLog(engineMsg, 'event'); } catch {}
+
+      if (isOwner && !restartInFlight && !startingNow && !clearAuthInFlight && !fullProcessRestartInFlight) {
+        await restartClientSession(`wweb_engine_changed:${activeEngine}->${desiredEngine}`, 3500);
+      } else {
+        try { EscribirLog('[WWEB_ENGINE] cambio pendiente; no se reinicia ahora porque hay otra operación/reinicio en curso', 'event'); } catch {}
+      }
+      return;
+    }
+
     if (next.habilitar_consulta_mensajes === true && canStartConsultaApiMensajesNow()) {
       startConsultaApiMensajesIfEnabled(source);
     }
@@ -9144,6 +9178,95 @@ function isExecutionContextError(err) {
          msg.includes("Target closed") ||
          msg.includes("Protocol error");
 }
+
+function getWwebChromiumPid(c) {
+  if (!c || c.__transport === 'baileys') return 0;
+  try {
+    const pid = Number(c?.pupBrowser?.process?.()?.pid || 0);
+    return Number.isInteger(pid) && pid > 0 ? pid : 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function forceTerminateProcessTree(pid, reason = '') {
+  const n = Number(pid);
+  if (!Number.isInteger(n) || n <= 0) return false;
+  if (!isPidAlive(n)) return true;
+
+  const prefix = `[WWEB_CLEANUP] force kill pid=${n} reason=${String(reason || '')}`;
+  try { console.log(prefix); } catch {}
+  try { EscribirLog(prefix, 'event'); } catch {}
+
+  try {
+    if (process.platform === 'win32') {
+      // /T mata solo el árbol del Chromium lanzado por Puppeteer para ESTA sesión.
+      await runCommand('taskkill', ['/PID', String(n), '/T', '/F'], { cwd: __dirname, timeout: 5000 });
+    } else {
+      try { process.kill(n, 'SIGTERM'); } catch {}
+      await sleep(300);
+      if (isPidAlive(n)) {
+        try { process.kill(n, 'SIGKILL'); } catch {}
+      }
+    }
+  } catch (e) {
+    // Si ya terminó entre la comprobación y taskkill, no es un error funcional.
+    if (isPidAlive(n)) {
+      try { EscribirLog('[WWEB_CLEANUP] no se pudo terminar pid=' + n + ': ' + String(e?.message || e), 'error'); } catch {}
+      return false;
+    }
+  }
+  return !isPidAlive(n);
+}
+
+async function closeWhatsappClientForProcessExit(c, reason = 'process_exit', timeoutMs = 2200) {
+  if (!c) return { ok: true, skipped: true, engine: '' };
+
+  const engine = String(c.__transport || (isBaileysEngine() ? 'baileys' : 'wwebjs')).trim().toLowerCase();
+  const browserPid = engine === 'wwebjs' ? getWwebChromiumPid(c) : 0;
+  const timeout = Math.max(500, Number(timeoutMs) || 2200);
+  const timeoutMarker = Symbol('client_close_timeout');
+
+  const closePromise = (async () => {
+    if (engine === 'baileys') {
+      try { await c.destroy?.(); } catch {}
+      return 'closed';
+    }
+
+    // No usamos destroyClientHard acá porque incluye esperas largas pensadas para
+    // reintentos normales. En salida de proceso queremos liberar Chromium rápido.
+    try { await c.destroy?.(); } catch {}
+    try { await c.pupPage?.close?.(); } catch {}
+    try { await c.pupBrowser?.close?.(); } catch {}
+    return 'closed';
+  })();
+
+  let result = null;
+  try {
+    result = await Promise.race([
+      closePromise,
+      new Promise((resolve) => setTimeout(() => resolve(timeoutMarker), timeout))
+    ]);
+  } catch {}
+
+  const timedOut = result === timeoutMarker;
+  if (timedOut) {
+    try { EscribirLog(`[WWEB_CLEANUP] timeout engine=${engine} reason=${String(reason || '')} timeoutMs=${timeout}`, 'event'); } catch {}
+  }
+
+  let forced = false;
+  if (browserPid && isPidAlive(browserPid)) {
+    forced = true;
+    await forceTerminateProcessTree(browserPid, reason);
+  }
+
+  try {
+    EscribirLog(`[WWEB_CLEANUP] fin engine=${engine} reason=${String(reason || '')} browserPid=${browserPid || 0} timedOut=${timedOut} forced=${forced}`, 'event');
+  } catch {}
+
+  return { ok: true, engine, browserPid, timedOut, forced };
+}
+
 
 async function destroyClientHard(c) {
   if (!c) return;
