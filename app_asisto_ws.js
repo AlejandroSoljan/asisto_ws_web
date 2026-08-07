@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.02.05  27/07/2026   */
+/*version: 4.03.00  07/08/2026   */
 
 
 
@@ -14,7 +14,8 @@ try {
 
 
 //const chatbot = require("./funciones_asisto.js")
-const { Client, MessageMedia, LocalAuth, RemoteAuth } = require('whatsapp-web.js');
+const { EventEmitter } = require('events');
+const { Client: WwebClient, MessageMedia, LocalAuth, RemoteAuth } = require('whatsapp-web.js');
 const mongoose = require('mongoose');
 const { MongoStore } = require('wwebjs-mongo');
 const os = require('os');
@@ -46,6 +47,648 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 let mongoConnectingPromise = null;
+
+
+// ============================================================================
+// Baileys compatibility layer
+// - Se usa solo cuando wweb_engine=baileys; whatsapp-web.js sigue disponible.
+// - Mantiene la interfaz que usa el resto de app_asisto_ws (MessageMedia,
+//   eventos message/message_create/message_ack/ready/qr, etc.) para evitar
+//   reescribir la lógica de negocio.
+// ============================================================================
+let baileysModulePromise = null;
+
+async function loadBaileysModule() {
+  if (!baileysModulePromise) {
+    baileysModulePromise = (async () => {
+      try {
+        return await import('@whiskeysockets/baileys');
+     } catch (firstError) {
+        try {
+          // Compatibilidad con el nombre de paquete nuevo utilizado por la documentación.
+          return await import('baileys');
+        } catch (secondError) {
+          const err = new Error(
+            'Baileys no está instalado. Ejecutar: npm install baileys (también se admite @whiskeysockets/baileys)'
+          );
+          err.cause = firstError || secondError;
+          throw err;
+        }
+      }
+    })();
+  }
+  return baileysModulePromise;
+}
+
+const BAILEYS_SILENT_LOGGER = {
+  level: 'silent',
+  child() { return this; },
+  trace() {}, debug() {}, info() {}, warn() {}, error() {}, fatal() {}
+};
+
+
+function baileysOnlyDigits(value) {
+  return String(value || '').replace(/\D/g, '');
+}
+
+function baileysNormalizeDeviceJid(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  // 549...:12@s.whatsapp.net -> 549...@s.whatsapp.net
+  return raw.replace(/:\d+@/i, '@');
+}
+
+function baileysToJid(value) {
+  let raw = String(value || '').trim();
+  if (!raw) return '';
+  raw = raw.replace(/^whatsapp:/i, '');
+  if (/@c\.us$/i.test(raw)) return raw.replace(/@c\.us$/i, '@s.whatsapp.net');
+  if (/@s\.whatsapp\.net$/i.test(raw) || /@lid$/i.test(raw) || /@g\.us$/i.test(raw) || /@broadcast$/i.test(raw)) {
+    return baileysNormalizeDeviceJid(raw);
+  }
+  const digits = baileysOnlyDigits(raw);
+  return digits ? `${digits}@s.whatsapp.net` : raw;
+}
+
+function baileysToCompatJid(value) {
+  const raw = baileysNormalizeDeviceJid(value);
+  if (!raw) return '';
+  if (/@s\.whatsapp\.net$/i.test(raw)) return raw.replace(/@s\.whatsapp\.net$/i, '@c.us');
+  return raw;
+}
+
+function baileysMessageIdSerialized(key, compatRemote) {
+  const id = String(key?.id || '').trim();
+  const remote = String(compatRemote || baileysToCompatJid(key?.remoteJid || '')).trim();
+  return `${key?.fromMe ? 'true' : 'false'}_${remote}_${id}`;
+}
+
+function baileysStatusToWwebAck(status) {
+  const n = Number(status);
+  if (!Number.isFinite(n)) return 0;
+  // Baileys: ERROR=0,PENDING=1,SERVER_ACK=2,DELIVERY_ACK=3,READ=4,PLAYED=5
+  // wwebjs: ACK_ERROR=-1,ACK_PENDING=0,ACK_SERVER=1,ACK_DEVICE=2,ACK_READ=3,ACK_PLAYED=4
+  return n <= 0 ? -1 : Math.min(4, n - 1);
+}
+
+class BaileysCompatClient extends EventEmitter {
+  constructor(options = {}) {
+    super();
+    this.__transport = 'baileys';
+    this.clientId = String(options.clientId || 'asisto');
+    this.authDir = String(options.authDir || '');
+    this.info = { me: { user: '' } };
+    this.pupPage = null;
+    this.pupBrowser = null;
+    this._socket = null;
+    this._baileys = null;
+    this._saveCreds = null;
+    this._state = 'DISCONNECTED';
+    this._manualClose = false;
+    this._authenticatedEmitted = false;
+    this._messageById = new Map();
+    this._messagesByChat = new Map();
+    this._contacts = new Map();
+    this._lidToPn = new Map();
+    this._pnToLid = new Map();
+    this._maxMessagesPerChat = 100;
+  }
+
+  async initialize() {
+    if (this._socket) return;
+    this._manualClose = false;
+    this._state = 'OPENING';
+
+    const b = await loadBaileysModule();
+    this._baileys = b;
+    const makeWASocket = b.default || b.makeWASocket;
+    if (typeof makeWASocket !== 'function') throw new Error('baileys_makeWASocket_missing');
+    if (typeof b.useMultiFileAuthState !== 'function') throw new Error('baileys_useMultiFileAuthState_missing');
+
+    if (!this.authDir) throw new Error('baileys_auth_dir_missing');
+    await fs.promises.mkdir(this.authDir, { recursive: true });
+
+    const { state, saveCreds } = await b.useMultiFileAuthState(this.authDir);
+    this._saveCreds = saveCreds;
+
+    const authKeys = (typeof b.makeCacheableSignalKeyStore === 'function')
+      ? b.makeCacheableSignalKeyStore(state.keys, BAILEYS_SILENT_LOGGER)
+      : state.keys;
+
+    const socket = makeWASocket({
+      auth: { creds: state.creds, keys: authKeys },
+      logger: BAILEYS_SILENT_LOGGER,
+      printQRInTerminal: false,
+      markOnlineOnConnect: false,
+      syncFullHistory: false,
+      emitOwnEvents: true,
+      getMessage: async (key) => {
+        const cached = this._findCachedRawMessage(key?.id);
+        return cached?.message || undefined;
+      }
+    });
+
+    this._socket = socket;
+    this._wireSocket(socket);
+  }
+
+  _wireSocket(socket) {
+    socket.ev.on('creds.update', async () => {
+      try { if (this._saveCreds) await this._saveCreds(); } catch (e) {
+        try { console.log('[BAILEYS] creds.update error:', e?.message || e); } catch {}
+      }
+    });
+
+    socket.ev.on('connection.update', async (update = {}) => {
+      try {
+        if (update.qr) {
+          this._state = 'QR';
+          this.emit('qr', update.qr);
+        }
+
+        if (update.connection === 'connecting') {
+          this._state = 'OPENING';
+        }
+
+        if (update.connection === 'open') {
+          this._state = 'CONNECTED';
+          const ownJid = baileysNormalizeDeviceJid(socket?.user?.phoneNumber || socket?.user?.id || '');
+          const ownDigits = baileysOnlyDigits(String(ownJid).split('@')[0]);
+          if (ownDigits) this.info.me.user = ownDigits;
+          if (!this._authenticatedEmitted) {
+            this._authenticatedEmitted = true;
+            this.emit('authenticated');
+          }
+          this.emit('ready');
+        }
+
+        if (update.connection === 'close' && !this._manualClose) {
+          this._state = 'DISCONNECTED';
+          const err = update?.lastDisconnect?.error;
+          const statusCode = Number(
+            err?.output?.statusCode ??
+            err?.data?.statusCode ??
+            err?.statusCode ??
+            err?.status ??
+            0
+          );
+          const reasons = this._baileys?.DisconnectReason || {};
+          const loggedOut = statusCode && statusCode === Number(reasons.loggedOut);
+          const restartRequired = statusCode && statusCode === Number(reasons.restartRequired);
+
+          // Baileys fuerza este cierre inmediatamente después de vincular el QR.
+          // Es un paso normal: recreamos solamente el socket interno, sin avisar al
+          // supervisor de Asisto ni generar un falso "WhatsApp desconectado".
+          if (restartRequired) {
+            this._socket = null;
+            setTimeout(() => {
+              this.initialize().catch((e) => {
+                this.emit('disconnected', `baileys_restart_required_failed:${String(e?.message || e)}`);
+              });
+            }, 300);
+            return;
+          }
+
+          this._socket = null;
+          if (loggedOut) {
+            this.emit('auth_failure', `baileys_logged_out:${statusCode}`);
+          } else {
+            this.emit('disconnected', `baileys:${statusCode || 'connection_closed'}`);
+          }
+        }
+      } catch (e) {
+        try { console.log('[BAILEYS] connection.update error:', e?.message || e); } catch {}
+      }
+    });
+
+    socket.ev.on('messages.upsert', async (event = {}) => {
+      try {
+        const messages = Array.isArray(event.messages) ? event.messages : [];
+        for (const raw of messages) {
+          if (!raw?.key?.id || !raw?.message) continue;
+          const wrapped = this._cacheAndWrap(raw);
+          // append suele ser historial/sync; no debe disparar el bot.
+          if (event.type !== 'notify') continue;
+          this.emit('message_create', wrapped);
+          if (wrapped.fromMe !== true) this.emit('message', wrapped);
+        }
+      } catch (e) {
+        try { console.log('[BAILEYS] messages.upsert error:', e?.message || e); } catch {}
+      }
+    });
+
+    socket.ev.on('messages.update', async (updates = []) => {
+      try {
+        for (const row of (Array.isArray(updates) ? updates : [])) {
+          const id = String(row?.key?.id || '').trim();
+          if (!id || row?.update?.status === undefined || row?.update?.status === null) continue;
+          let wrapped = this._findCachedWrappedMessage(id);
+          if (!wrapped) {
+            const raw = this._findCachedRawMessage(id);
+            if (raw) wrapped = this._wrapMessage(raw);
+          }
+          if (!wrapped) {
+            wrapped = this._wrapMessage({
+              key: row.key || { id },
+              messageTimestamp: Math.floor(Date.now() / 1000),
+              message: { conversation: '' }
+            });
+          }
+          this.emit('message_ack', wrapped, baileysStatusToWwebAck(row.update.status));
+        }
+      } catch (e) {
+        try { console.log('[BAILEYS] messages.update error:', e?.message || e); } catch {}
+      }
+    });
+
+    socket.ev.on('messaging-history.set', async (history = {}) => {
+      try {
+        for (const c of (history.contacts || [])) this._cacheContact(c);
+        for (const m of (history.messages || [])) {
+          if (m?.key?.id && m?.message) this._cacheAndWrap(m);
+        }
+        for (const map of (history.lidPnMappings || [])) this._rememberLidMapping(map);
+      } catch (e) {
+        try { console.log('[BAILEYS] history cache error:', e?.message || e); } catch {}
+      }
+    });
+
+    socket.ev.on('contacts.upsert', (contacts = []) => {
+      for (const c of (Array.isArray(contacts) ? contacts : [])) this._cacheContact(c);
+    });
+    socket.ev.on('contacts.update', (contacts = []) => {
+      for (const c of (Array.isArray(contacts) ? contacts : [])) this._cacheContact(c);
+    });
+    socket.ev.on('lid-mapping.update', (mapping) => {
+      try {
+        if (Array.isArray(mapping)) mapping.forEach((m) => this._rememberLidMapping(m));
+        else this._rememberLidMapping(mapping);
+      } catch {}
+    });
+  }
+
+  _rememberLidMapping(mapping) {
+   if (!mapping) return;
+    let lid = mapping.lid || mapping.lidJid || mapping.id || mapping.key || '';
+    let pn = mapping.pn || mapping.phoneNumber || mapping.phone || mapping.value || '';
+    if (!lid && mapping.mapping && typeof mapping.mapping === 'object') {
+      for (const [k, v] of Object.entries(mapping.mapping)) this._rememberLidMapping({ lid: k, pn: v });
+      return;
+    }
+    lid = baileysToJid(lid);
+    pn = baileysToJid(pn);
+    if (lid && /@lid$/i.test(lid) && pn && /@s\.whatsapp\.net$/i.test(pn)) {
+      this._lidToPn.set(lid, pn);
+      this._pnToLid.set(pn, lid);
+    }
+  }
+
+  _cacheContact(contact) {
+    if (!contact || typeof contact !== 'object') return;
+    const ids = [contact.id, contact.lid, contact.phoneNumber]
+      .map(baileysToJid)
+      .filter(Boolean);
+    for (const id of ids) this._contacts.set(id, { ...(this._contacts.get(id) || {}), ...contact });
+    if (contact.lid && contact.phoneNumber) this._rememberLidMapping({ lid: contact.lid, pn: contact.phoneNumber });
+  }
+
+  _messageRemoteJid(raw) {
+    const key = raw?.key || {};
+    let remote = baileysNormalizeDeviceJid(key.remoteJid || '');
+    const alt = baileysNormalizeDeviceJid(key.remoteJidAlt || '');
+    if (/@lid$/i.test(remote) && /@s\.whatsapp\.net$/i.test(alt)) {
+      this._rememberLidMapping({ lid: remote, pn: alt });
+      remote = alt;
+    } else if (/@lid$/i.test(remote) && this._lidToPn.get(remote)) {
+      remote = this._lidToPn.get(remote);
+    }
+    return remote;
+  }
+
+  _messageParticipantJid(raw) {
+    const key = raw?.key || {};
+    let participant = baileysNormalizeDeviceJid(key.participant || '');
+    const alt = baileysNormalizeDeviceJid(key.participantAlt || '');
+    if (/@lid$/i.test(participant) && /@s\.whatsapp\.net$/i.test(alt)) {
+      this._rememberLidMapping({ lid: participant, pn: alt });
+      participant = alt;
+    } else if (/@lid$/i.test(participant) && this._lidToPn.get(participant)) {
+      participant = this._lidToPn.get(participant);
+    }
+    return participant;
+  }
+
+  _cacheAndWrap(raw) {
+    const wrapped = this._wrapMessage(raw);
+    const id = String(raw?.key?.id || '').trim();
+    if (id) {
+      this._messageById.set(id, { raw, wrapped });
+      if (wrapped?.id?._serialized) this._messageById.set(wrapped.id._serialized, { raw, wrapped });
+    }
+
+    const chatKey = baileysToJid(this._messageRemoteJid(raw));
+    if (chatKey) {
+      const list = this._messagesByChat.get(chatKey) || [];
+      const filtered = list.filter((x) => String(x?.key?.id || '') !== id);
+      filtered.push(raw);
+      filtered.sort((a, b) => Number(a?.messageTimestamp || 0) - Number(b?.messageTimestamp || 0));
+      while (filtered.length > this._maxMessagesPerChat) filtered.shift();
+      this._messagesByChat.set(chatKey, filtered);
+    }
+    return wrapped;
+  }
+
+  _findCachedRawMessage(id) {
+    return this._messageById.get(String(id || ''))?.raw || null;
+  }
+
+  _findCachedWrappedMessage(id) {
+    return this._messageById.get(String(id || ''))?.wrapped || null;
+  }
+
+  _messageContent(raw) {
+    let content = raw?.message || {};
+    try {
+      if (typeof this._baileys?.normalizeMessageContent === 'function') {
+        content = this._baileys.normalizeMessageContent(content) || content;
+      }
+    } catch {}
+    return content || {};
+  }
+
+  _messageTypeAndData(raw) {
+    const content = this._messageContent(raw);
+    let key = '';
+    try {
+      if (typeof this._baileys?.getContentType === 'function') key = this._baileys.getContentType(content) || '';
+    } catch {}
+    if (!key) key = Object.keys(content || {}).find((k) => content[k] != null) || '';
+    const data = key ? (content[key] || {}) : {};
+
+    let type = 'chat';
+    if (key === 'imageMessage') type = 'image';
+    else if (key === 'videoMessage') type = 'video';
+    else if (key === 'documentMessage' || key === 'documentWithCaptionMessage') type = 'document';
+    else if (key === 'audioMessage') type = data?.ptt ? 'ptt' : 'audio';
+    else if (key === 'stickerMessage') type = 'sticker';
+    else if (key === 'contactMessage' || key === 'contactsArrayMessage') type = 'vcard';
+    else if (key === 'locationMessage' || key === 'liveLocationMessage') type = 'location';
+
+    let body = '';
+    if (key === 'conversation') body = String(content.conversation || '');
+    else if (key === 'extendedTextMessage') body = String(data?.text || '');
+    else if (key === 'buttonsResponseMessage') body = String(data?.selectedDisplayText || data?.selectedButtonId || '');
+    else if (key === 'listResponseMessage') body = String(data?.title || data?.singleSelectReply?.selectedRowId || '');
+    else if (key === 'templateButtonReplyMessage') body = String(data?.selectedDisplayText || data?.selectedId || '');
+    else if (key === 'interactiveResponseMessage') body = String(data?.body?.text || data?.nativeFlowResponseMessage?.paramsJson || '');
+    else if (data && typeof data === 'object') body = String(data.text || data.caption || '');
+
+    const caption = String(data?.caption || '');
+    const mimetype = String(data?.mimetype || '');
+    const filename = String(data?.fileName || data?.filename || '');
+    const hasMedia = ['imageMessage', 'videoMessage', 'documentMessage', 'documentWithCaptionMessage', 'audioMessage', 'stickerMessage'].includes(key);
+    return { key, data, type, body, caption, mimetype, filename, hasMedia };
+  }
+
+  _wrapMessage(raw) {
+    const key = raw?.key || {};
+    const remoteBaileys = this._messageRemoteJid(raw);
+    const remote = baileysToCompatJid(remoteBaileys);
+    const participant = baileysToCompatJid(this._messageParticipantJid(raw));
+    const own = this.info?.me?.user ? `${this.info.me.user}@c.us` : '';
+    const md = this._messageTypeAndData(raw);
+    const fromMe = key.fromMe === true;
+    const isGroup = /@g\.us$/i.test(remoteBaileys);
+    const from = fromMe ? own : remote;
+    const to = fromMe ? remote : own;
+    const serialized = baileysMessageIdSerialized(key, remote);
+    const timestamp = Number(raw?.messageTimestamp || raw?.messageTimestamp?.low || Math.floor(Date.now() / 1000));
+
+    const wrapper = {
+      id: {
+        id: String(key.id || ''),
+        remote,
+        fromMe,
+        _serialized: serialized
+      },
+      from,
+      to,
+      author: isGroup ? participant : undefined,
+      fromMe,
+      body: md.body,
+      caption: md.caption,
+      type: md.type,
+      timestamp,
+      hasMedia: md.hasMedia,
+      _data: {
+        id: { id: String(key.id || ''), remote, fromMe, _serialized: serialized },
+        from,
+        to,
+        author: isGroup ? participant : undefined,
+        body: md.body,
+        caption: md.caption,
+        type: md.type,
+        mimetype: md.mimetype,
+        filename: md.filename,
+        fileName: md.filename,
+        t: timestamp,
+        mediaKey: md.data?.mediaKey || undefined,
+        directPath: md.data?.directPath || undefined,
+        isViewOnce: !!md.data?.viewOnce
+      },
+      __baileysRaw: raw,
+      getContact: async () => this.getContactById(isGroup && participant ? participant : (fromMe ? to : from)),
+      downloadMedia: async () => this._downloadMedia(raw, md)
+    };
+    return wrapper;
+ }
+
+  async _downloadMedia(raw, md = this._messageTypeAndData(raw)) {
+    if (!md.hasMedia) return undefined;
+    const b = this._baileys || await loadBaileysModule();
+    if (typeof b.downloadMediaMessage !== 'function') throw new Error('baileys_downloadMediaMessage_missing');
+
+    const ctx = {
+      logger: BAILEYS_SILENT_LOGGER,
+      reuploadRequest: async (msg) => {
+        if (!this._socket?.updateMediaMessage) throw new Error('baileys_updateMediaMessage_missing');
+        return this._socket.updateMediaMessage(msg);
+      }
+    };
+
+    let buffer;
+    try {
+      buffer = await b.downloadMediaMessage(raw, 'buffer', {}, ctx);
+    } catch (firstError) {
+      if (this._socket?.updateMediaMessage) {
+        try { await this._socket.updateMediaMessage(raw); } catch {}
+      }
+      buffer = await b.downloadMediaMessage(raw, 'buffer', {}, ctx);
+    }
+    if (!buffer) return undefined;
+    const buf = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+    return {
+      data: buf.toString('base64'),
+      mimetype: md.mimetype || 'application/octet-stream',
+      filename: md.filename || ''
+    };
+  }
+
+  async getState() {
+    return this._state;
+  }
+
+  async sendMessage(to, content, options = {}) {
+    if (!this._socket || this._state !== 'CONNECTED') throw new Error(`baileys_not_connected:${this._state}`);
+    const jid = baileysToJid(to);
+    if (!jid) throw new Error('baileys_invalid_recipient');
+
+    let payload;
+    if (content instanceof MessageMedia || (content && typeof content === 'object' && content.data && content.mimetype)) {
+      const mimetype = String(content.mimetype || 'application/octet-stream');
+      const filename = String(content.filename || options.filename || 'archivo');
+      const caption = String(options.caption || '');
+      const data = Buffer.from(String(content.data || ''), 'base64');
+
+      if (/^image\//i.test(mimetype) && !/^image\/webp/i.test(mimetype)) {
+        payload = { image: data, caption, mimetype };
+      } else if (/^video\//i.test(mimetype)) {
+        payload = { video: data, caption, mimetype };
+      } else if (/^audio\//i.test(mimetype)) {
+        payload = { audio: data, mimetype, ptt: options.sendAudioAsVoice === true };
+      } else if (/^image\/webp/i.test(mimetype) && options.sendMediaAsSticker === true) {
+        payload = { sticker: data };
+      } else {
+        payload = { document: data, mimetype, fileName: filename, caption };
+      }
+    } else {
+      payload = { text: String(content ?? '') };
+    }
+
+    const sent = await this._socket.sendMessage(jid, payload);
+    return this._cacheAndWrap(sent);
+  }
+
+  async isRegisteredUser(id) {
+    const jid = baileysToJid(id);
+    if (!jid || /@g\.us$/i.test(jid) || /@broadcast$/i.test(jid)) return false;
+    if (/@lid$/i.test(jid)) return true;
+    if (!this._socket?.onWhatsApp) return true;
+    try {
+      const result = await this._socket.onWhatsApp(jid);
+      if (!Array.isArray(result) || !result.length) return false;
+      return result.some((row) => row?.exists !== false);
+    } catch {
+      return false;
+    }
+  }
+
+  async _resolvePnForLid(jid) {
+    const raw = baileysToJid(jid);
+    if (!/@lid$/i.test(raw)) return raw;
+    if (this._lidToPn.has(raw)) return this._lidToPn.get(raw);
+    try {
+      const pn = await this._socket?.signalRepository?.lidMapping?.getPNForLID?.(raw);
+      const normalized = baileysToJid(pn);
+      if (normalized && /@s\.whatsapp\.net$/i.test(normalized)) {
+        this._rememberLidMapping({ lid: raw, pn: normalized });
+        return normalized;
+      }
+    } catch {}
+    return raw;
+  }
+
+  async getContactById(id) {
+    const requested = baileysToJid(id);
+    const resolved = await this._resolvePnForLid(requested);
+    let contact = this._contacts.get(requested) || this._contacts.get(resolved) || {};
+
+    for (const c of this._contacts.values()) {
+      if (!contact || !Object.keys(contact).length) {
+        const ids = [c?.id, c?.lid, c?.phoneNumber].map(baileysToJid);
+        if (ids.includes(requested) || ids.includes(resolved)) contact = c;
+      }
+    }
+
+    let businessProfile = null;
+    try {
+      if (this._socket?.getBusinessProfile && /@s\.whatsapp\.net$/i.test(resolved)) {
+        businessProfile = await this._socket.getBusinessProfile(resolved);
+      }
+    } catch {}
+
+    const compat = baileysToCompatJid(resolved);
+    const number = /@s\.whatsapp\.net$/i.test(resolved)
+      ? baileysOnlyDigits(resolved.split('@')[0])
+      : '';
+    const user = number || baileysOnlyDigits(String(requested).split('@')[0]);
+    const name = contact?.name || contact?.verifiedName || contact?.notify || '';
+    const pushname = contact?.notify || contact?.name || contact?.verifiedName || '';
+
+    return {
+      number,
+      id: { user, _serialized: compat || baileysToCompatJid(requested) },
+      isBusiness: !!businessProfile,
+      businessProfile: businessProfile ? {
+        email: businessProfile.email || null,
+        address: businessProfile.address || null,
+        description: businessProfile.description || null,
+        website: businessProfile.website || null
+      } : null,
+      name: name || null,
+      pushname: pushname || null,
+      shortName: name || pushname || null,
+      _data: {
+        id: { user, _serialized: compat || baileysToCompatJid(requested) },
+        number,
+        wid: { user, _serialized: compat || baileysToCompatJid(requested) },
+        userid: user,
+        phone: number
+      }
+    };
+  }
+
+  async getChatById(id) {
+    const jid = baileysToJid(id);
+    const self = this;
+    return {
+      _data: { id: jid },
+      async fetchMessages(options = {}) {
+        const limit = Math.max(1, Number(options.limit || 50) || 50);
+        let list = self._messagesByChat.get(jid) || [];
+        if (!list.length && /@s\.whatsapp\.net$/i.test(jid)) {
+          const lid = self._pnToLid.get(jid);
+          if (lid) list = self._messagesByChat.get(lid) || [];
+        }
+        return list.slice(-limit).reverse().map((raw) => self._findCachedWrappedMessage(raw?.key?.id) || self._wrapMessage(raw));
+      }
+    };
+  }
+
+  async getMessageById(id) {
+    return this._findCachedWrappedMessage(id) || null;
+  }
+
+  async logout() {
+    this._manualClose = true;
+    this._state = 'DISCONNECTED';
+    try { await this._socket?.logout?.(); } finally { this._socket = null; }
+  }
+
+  async destroy() {
+    this._manualClose = true;
+    this._state = 'DISCONNECTED';
+    const socket = this._socket;
+    this._socket = null;
+    try {
+      if (socket?.end) socket.end(new Error('asisto_baileys_destroy'));
+      else if (socket?.ws?.close) socket.ws.close();
+    } catch {}
+  }
+}
+
+
+
 
 // Momento en el que ESTA instancia tomó el lock (para ignorar acciones viejas en wa_wweb_actions)
 let lockAcquiredAt = null;
@@ -693,6 +1336,22 @@ function applyTenantConfig(conf) {
   if (conf.headless !== undefined) {
     headless = parseBoolLike(conf.headless, !!headless);
   }
+
+  // Motor usado para la conexión de WhatsApp Web. No confundir con whatsapp_transport,
+  // que en otras partes del script significa API vs WWEB para determinados envíos.
+  const engineRaw =
+    conf.wweb_engine ?? conf.wwebEngine ??
+    conf.whatsapp_web_engine ?? conf.whatsappWebEngine ??
+    conf.whatsapp_client_engine ?? conf.whatsappClientEngine;
+  if (engineRaw !== undefined && engineRaw !== null && String(engineRaw).trim() !== '') {
+    wweb_engine = normalizeWwebEngine(engineRaw);
+  }
+
+  const baileysAuthPathRaw = conf.baileys_auth_base_path ?? conf.baileysAuthBasePath ?? conf.baileys_auth_path ?? conf.baileysAuthPath;
+  if (baileysAuthPathRaw !== undefined && baileysAuthPathRaw !== null && String(baileysAuthPathRaw).trim() !== '') {
+    baileys_auth_base_path = String(baileysAuthPathRaw).trim();
+  }
+
   if (!numero && (conf.numero || conf.NUMERO)) numero = asString(conf.numero || conf.NUMERO, numero);
   if (conf.status_token !== undefined) status_token = asString(conf.status_token, status_token);
   configureControlApiFromValues(conf);
@@ -1830,8 +2489,12 @@ const MIN_LEASE_MS = Number(process.env.MIN_LEASE_MS || 180000);
 let lease_ms = Number(process.env.LEASE_MS || MIN_LEASE_MS);
 let heartbeat_ms = Number(process.env.HEARTBEAT_MS || 5000);
 let backup_every_ms = Number(process.env.BACKUP_EVERY_MS || 300000);
-let auth_base_path = process.env.ASISTO_AUTH_PATH || "";            // LocalAuth dataPath override
-let auth_mode = String(process.env.ASISTO_AUTH_MODE || '').trim().toLowerCase(); // 'remote' | 'local' (default: local)
+let auth_base_path = process.env.ASISTO_AUTH_PATH || "";            // whatsapp-web.js LocalAuth dataPath override
+let baileys_auth_base_path = process.env.ASISTO_BAILEYS_AUTH_PATH || ""; // Baileys auth-state base path override
+let auth_mode = String(process.env.ASISTO_AUTH_MODE || '').trim().toLowerCase(); // wwebjs: 'remote' | 'local'
+let wweb_engine = normalizeWwebEngine(
+  process.env.ASISTO_WWEB_ENGINE || process.env.WWEB_ENGINE || process.env.WHATSAPP_WEB_ENGINE || 'wwebjs'
+); // 'wwebjs' | 'baileys' (default: wwebjs)
 
 // =========================
 // Auto-update desde repositorio (opcional, NO rompe comportamiento actual)
@@ -1906,8 +2569,27 @@ async function fastExitForSupervisorRestart(reason = 'SUPERVISOR_RESTART', exitC
   setTimeout(() => { try { process.exit(code); } catch {} }, 1500);
 }
 // opcional para proteger /status
+function normalizeWwebEngine(value) {
+  const v = String(value || 'wwebjs').trim().toLowerCase();
+  if (['baileys', 'bailey', 'socket', 'websocket', 'ws'].includes(v)) return 'baileys';
+  return 'wwebjs';
+}
+
+function getWwebEngine() {
+  return normalizeWwebEngine(wweb_engine);
+}
+
+function isBaileysEngine() {
+  return getWwebEngine() === 'baileys';
+}
+
+function isWwebJsEngine() {
+  return getWwebEngine() === 'wwebjs';
+}
 
 function isRemoteAuthMode() {
+  // RemoteAuth pertenece a whatsapp-web.js. Baileys utiliza su propio auth-state local.
+  if (!isWwebJsEngine()) return false;
   const mode = String(auth_mode || 'local').trim().toLowerCase();
   return mode && mode !== 'local';
 }
@@ -3102,6 +3784,18 @@ async function loadTenantConfigFromDbMinimal() {
       auth_mode = String(conf.auth_mode).trim().toLowerCase();
     }
 
+    const engineRaw =
+      conf.wweb_engine ?? conf.wwebEngine ??
+      conf.whatsapp_web_engine ?? conf.whatsappWebEngine ??
+      conf.whatsapp_client_engine ?? conf.whatsappClientEngine;
+    if (engineRaw !== undefined && engineRaw !== null && String(engineRaw).trim()) {
+      wweb_engine = normalizeWwebEngine(engineRaw);
+    }
+
+    const baileysAuthPathRaw = conf.baileys_auth_base_path ?? conf.baileysAuthBasePath ?? conf.baileys_auth_path ?? conf.baileysAuthPath;
+    if (baileysAuthPathRaw !== undefined && baileysAuthPathRaw !== null && String(baileysAuthPathRaw).trim()) {
+      baileys_auth_base_path = String(baileysAuthPathRaw).trim();
+    }
 
     if (!status_token && conf.status_token) status_token = String(conf.status_token).trim();
 
@@ -3365,6 +4059,8 @@ async function getLockDocSafe() {
     host: os.hostname(),
     pid: process.pid,
     state: localWsPanelState,
+    wwebEngine: getWwebEngine(),
+    activeWwebEngine: client?.__transport || '',
     startedAt: lockAcquiredAt || null,
     lastSeenAt: new Date(),
     lastQrAt,
@@ -3391,6 +4087,8 @@ app.get("/status", requireStatusToken, async (req, res) => {
     lockId,
     isOwner,
     clientStarted,
+    wwebEngine: getWwebEngine(),
+    activeWwebEngine: client?.__transport || null,
     waState,
     telefono_qr,
     runtimeInfo,
@@ -3417,6 +4115,8 @@ app.get("/status/qr", requireStatusToken, async (req, res) => {
     lockId,
     isOwner,
     clientStarted,
+    wwebEngine: getWwebEngine(),
+    activeWwebEngine: client?.__transport || null,
     lastQrAt,
     lastQrRaw,
     lastQrDataUrl,
@@ -3513,6 +4213,18 @@ function getLocalAuthSessionDir(clientId) {
   return path.join(getAuthBasePath(), `session-${clientId}`);
 }
 
+function getBaileysAuthBasePath() {
+  if (baileys_auth_base_path && String(baileys_auth_base_path).trim()) return String(baileys_auth_base_path).trim();
+  const envp = process.env.ASISTO_BAILEYS_AUTH_PATH;
+  if (envp && String(envp).trim()) return String(envp).trim();
+  return path.join(os.homedir(), '.asisto_baileys_auth');
+}
+
+function getBaileysAuthSessionDir(clientId) {
+  return path.join(getBaileysAuthBasePath(), `baileys-${clientId}`);
+}
+
+
 function getWwebClientId() {
   return `asisto_${tenantId}_${numero}`;
 }
@@ -3539,10 +4251,21 @@ async function clearLocalAuthFilesSafe(clientId) {
   try {
     const sessionDir = getLocalAuthSessionDir(clientId);
     const removed = await removePathSafe(sessionDir, 'LocalAuth sessionDir');
-    return { removed, sessionDir };
+    return { removed, sessionDir, engine: 'wwebjs', authMode: 'local' };
   } catch (e) {
     try { EscribirLog('[CLEAR_AUTH] clearLocalAuthFilesSafe error: ' + String(e?.message || e), 'error'); } catch {}
-    return { removed: false, error: String(e?.message || e) };
+    return { removed: false, error: String(e?.message || e), engine: 'wwebjs', authMode: 'local' };
+  }
+}
+
+async function clearBaileysAuthFilesSafe(clientId) {
+  try {
+    const sessionDir = getBaileysAuthSessionDir(clientId);
+    const removed = await removePathSafe(sessionDir, 'Baileys authDir');
+    return { removed, sessionDir, engine: 'baileys', authMode: 'local' };
+  } catch (e) {
+    try { EscribirLog('[CLEAR_AUTH] clearBaileysAuthFilesSafe error: ' + String(e?.message || e), 'error'); } catch {}
+    return { removed: false, error: String(e?.message || e), engine: 'baileys', authMode: 'local' };
   }
 }
 
@@ -3609,13 +4332,14 @@ function dirLooksPopulated(p) {
 }
 
 /**
- * Crea el cliente WhatsApp SOLO cuando Mongo está listo (mongoose.connection.db disponible).
- * Esto evita el crash de wwebjs-mongo: Cannot read properties of undefined (reading 'collection')
+ * Crea el cliente WhatsApp usando el motor configurado en wweb_engine.
+ * - wwebjs  : comportamiento histórico con whatsapp-web.js + Chromium/Puppeteer.
+ * - baileys : socket WebSocket sin Chromium, manteniendo una interfaz compatible.
  */
 async function createClientIfNeeded(opts = {}) {
   if (client) return client;
 
-  // Necesitamos Mongo para lock y estado del panel
+  // El backend sigue siendo necesario para lock, configuración y panel en ambos motores.
   const ok = await ensureMongo();
   if (!ok) throw new Error("mongo_not_ready");
 
@@ -3623,40 +4347,52 @@ async function createClientIfNeeded(opts = {}) {
 
   const clientId = `asisto_${tenantId}_${numero}`;
 
-  const useRemoteAuth = isRemoteAuthMode();
-  if (useRemoteAuth) {
-    if (!store) store = new MongoStore({ mongoose });
-  }
+  const engine = getWwebEngine();
 
-  client = new Client({
-     // Con LocalAuth + restore/backup propio NO queremos que whatsapp-web.js borre la carpeta de sesión en auth_failure.
-    // Con RemoteAuth sí conviene reiniciar.
-    restartOnAuthFail: useRemoteAuth,
-    puppeteer: {
-      headless: headless,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--disable-gpu',
-        '--disable-features=IsolateOrigins,site-per-process',
-        '--disable-site-isolation-trials'
-      ],
-    },
-    authStrategy: useRemoteAuth
-      ? new RemoteAuth({
-          clientId,
-          store,
-          backupSyncIntervalMs: Math.max(60_000, Number(backup_every_ms) || 300_000)
-        })
-      : new LocalAuth({
-          clientId,
-          dataPath: getAuthBasePath()
-        })
-  });
+  if (engine === 'baileys') {
+    client = new BaileysCompatClient({
+      clientId,
+      authDir: getBaileysAuthSessionDir(clientId)
+    });
+    try { EscribirLog(`[WWEB_ENGINE] usando baileys clientId=${clientId} authDir=${getBaileysAuthSessionDir(clientId)}`, 'event'); } catch {}
+  } else {
+    const useRemoteAuth = isRemoteAuthMode();
+    if (useRemoteAuth) {
+      if (!store) store = new MongoStore({ mongoose });
+    }
+
+    client = new WwebClient({
+      // Con LocalAuth no queremos que whatsapp-web.js borre la carpeta de sesión en auth_failure.
+      // Con RemoteAuth sí conviene reiniciar.
+      restartOnAuthFail: useRemoteAuth,
+      puppeteer: {
+        headless: headless,
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-canvas',
+          '--no-first-run',
+          '--no-zygote',
+          '--disable-gpu',
+          '--disable-features=IsolateOrigins,site-per-process',
+          '--disable-site-isolation-trials'
+        ],
+      },
+      authStrategy: useRemoteAuth
+        ? new RemoteAuth({
+            clientId,
+            store,
+            backupSyncIntervalMs: Math.max(60_000, Number(backup_every_ms) || 300_000)
+          })
+        : new LocalAuth({
+            clientId,
+            dataPath: getAuthBasePath()
+          })
+    });
+    try { client.__transport = 'wwebjs'; } catch {}
+    try { EscribirLog(`[WWEB_ENGINE] usando whatsapp-web.js clientId=${clientId} auth_mode=${useRemoteAuth ? 'remote' : 'local'}`, 'event'); } catch {}
+  }
 
   attachClientHandlers();
   return client;
@@ -3690,7 +4426,10 @@ async function safeSend(to, content, opts) {
       const msg = String(e && e.message ? e.message : e);
       const transient = msg.includes('Evaluation failed') ||
                         msg.includes('Execution context was destroyed') ||
-                        msg.includes('Protocol error');
+                        msg.includes('Protocol error') ||
+                        msg.includes('baileys_not_connected') ||
+                        msg.includes('Connection Closed') ||
+                        msg.includes('Timed Out');
       if (!transient || attempt === 3) {
         throw e;
       }
@@ -3718,6 +4457,8 @@ async function updateLockStateSafe(state) {
         host: os.hostname(),
         pid: process.pid,
         state: localWsPanelState,
+        wwebEngine: getWwebEngine(),
+        activeWwebEngine: client?.__transport || '',
         startedAt: lockAcquiredAt || now,
         lastSeenAt: now,
         runtimeVersion: runtimeInfo.currentVersion || '',
@@ -3763,6 +4504,8 @@ async function updateLockQrDataSafe(qrDataUrl, qrAtIso) {
           host: os.hostname(),
           pid: process.pid,
           state: 'qr',
+          wwebEngine: getWwebEngine(),
+          activeWwebEngine: client?.__transport || '',
           startedAt: lockAcquiredAt || now,
           lastSeenAt: now,
           lastQrAt: String(qrAtIso || ""),
@@ -4202,12 +4945,21 @@ async function clearAuthenticationAndRequestQr(reason = 'clear_auth') {
     resetClientRuntimeFlags('clear_auth');
     localWsPanelState = 'starting';
 
-    // 3) Borrar autenticación real según modo.
-    const clearResult = isRemoteAuthMode()
-      ? await clearRemoteAuthStoreSafe(clientId)
-      : await clearLocalAuthFilesSafe(clientId);
+    // 3) Borrar autenticación real según motor/modo.
+    let clearResult;
+    let authModeLabel;
+    if (isBaileysEngine()) {
+      clearResult = await clearBaileysAuthFilesSafe(clientId);
+      authModeLabel = 'baileys-local';
+    } else if (isRemoteAuthMode()) {
+      clearResult = await clearRemoteAuthStoreSafe(clientId);
+      authModeLabel = 'remote';
+    } else {
+      clearResult = await clearLocalAuthFilesSafe(clientId);
+      authModeLabel = 'local';
+    }
 
-    try { await pushHistory('clear_auth', { reason, clientId, authMode: isRemoteAuthMode() ? 'remote' : 'local', result: clearResult }); } catch {}
+    try { await pushHistory('clear_auth', { reason, clientId, engine: getWwebEngine(), authMode: authModeLabel, result: clearResult }); } catch {}
 
     // 4) Mantener el lock/owner y reiniciar WhatsApp para que vuelva a emitir QR.
     isOwner = true;
@@ -6589,9 +7341,15 @@ async function enviar_mensajes_entrega() {
 async function enviar_mensajes_info() {
   if (!compraEntregaConnection) return;
 
-  console.log('MENSAJES_INFO: consultando es_mensajes origen=' + telefono_qr);
-  const data = await compraEntregaConnection.query("select first * from es_mensajes where estado <> 'S' and tipo = 'WS' and origen =" + telefono_qr + ' order by prioridad asc');
-  const tam = data.length;
+  const origenLocal = onlyDigits(telefono_qr).slice(-10);
+  console.log('MENSAJES_INFO: consultando es_mensajes origen=' + telefono_qr + ' origen_local=' + origenLocal);
+  const data = await compraEntregaConnection.query(
+    "select first * from es_mensajes " +
+    "where estado <> 'S' and tipo = 'WS' " +
+    "and right(cast(origen as varchar(30)), 10) = '" + origenLocal + "' " +
+    "order by prioridad asc"
+  );
+ const tam = data.length;
   console.log('MENSAJES_INFO: pendientes=' + tam);
 
   for (let i = 0; i < tam; i++) {
@@ -7861,7 +8619,7 @@ client.on('ready', async () => {
   try { await refreshTenantConfigFromDbPerMessage(); } catch {}
   try { RecuperarJsonConfMensajes(); } catch {}
   try {
-     console.log('[CONFIG] habilitar_bot=' + habilitar_bot + ' habilitar_consulta_mensajes=' + consulta_api_mensajes_habilitado + ' wweb_bot_logic_mode=' + wweb_bot_logic_mode + ' time_cad_ms=' + time_cad);
+     console.log('[CONFIG] wweb_engine=' + getWwebEngine() + ' habilitar_bot=' + habilitar_bot + ' habilitar_consulta_mensajes=' + consulta_api_mensajes_habilitado + ' wweb_bot_logic_mode=' + wweb_bot_logic_mode + ' time_cad_ms=' + time_cad);
   } catch {}
   startConsultaApiMensajesIfEnabled('ready');
   startCompraEntregaLoopIfEnabled('ready');
@@ -8307,23 +9065,29 @@ function isExecutionContextError(err) {
 
 async function destroyClientHard(c) {
   if (!c) return;
-  // whatsapp-web.js expone (segun version) pupBrowser/pupPage en el client.
+  if (c.__transport === 'baileys') {
+    try { await c.destroy(); } catch {}
+    await sleep(250);
+    return;
+  }
+  // whatsapp-web.js expone (según versión) pupBrowser/pupPage en el client.
   try { await c.destroy(); } catch {}
   try { await c.pupPage?.close?.(); } catch {}
   try { await c.pupBrowser?.close?.(); } catch {}
- await sleep(2500);
+  await sleep(2500);
 }
 
 async function recreateClientForRetry(reason) {
   try { console.log(`Recreando client por: ${reason}`); } catch {}
   try { EscribirLog(`Recreando client por: ${reason}`, "event"); } catch {}
 
+  const wasBaileys = client?.__transport === 'baileys';
   try { await destroyClientHard(client); } catch {}
   try { clientStarted = false; } catch {}
   try { client = null; } catch {}
 
-  // mini backoff para que Chrome termine de cerrar (Windows)
-  await sleep(2500);
+  // whatsapp-web.js necesita dar tiempo a Chromium para cerrar; Baileys no.
+  await sleep(wasBaileys ? 300 : 2500);
 
   // Re-crea el client:
   // Si venimos por execution_context / detached_frame, NO tocar el storage local ni forzar restore,
@@ -8340,7 +9104,12 @@ async function initializeWithRetry(clientInstance, maxRetries = 5) {
   for (let i = 1; i <= maxRetries; i++) {
     try {
       try {
-        console.log(`[INIT] attempt=${i} dataPath=${getAuthBasePath()} sessionDir=${getLocalAuthSessionDir(`asisto_${tenantId}_${numero}`)}`);
+        const initClientId = `asisto_${tenantId}_${numero}`;
+        if (c?.__transport === 'baileys' || isBaileysEngine()) {
+          console.log(`[INIT] attempt=${i} engine=baileys authDir=${getBaileysAuthSessionDir(initClientId)}`);
+        } else {
+          console.log(`[INIT] attempt=${i} engine=wwebjs dataPath=${getAuthBasePath()} sessionDir=${getLocalAuthSessionDir(initClientId)}`);
+        }
       } catch {}
       await c.initialize();
       return true;
