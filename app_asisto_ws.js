@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.03.04  07/08/2026   */
+/*version: 4.04.00  07/08/2026   */
 
 
 
@@ -46,6 +46,7 @@ const { eventNames } = require('process');
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
+const { Worker, isMainThread, threadId } = require('worker_threads');
 let mongoConnectingPromise = null;
 
 
@@ -60,6 +61,7 @@ let baileysModulePromise = null;
 let baileysInstallPromise = null;
 const BAILEYS_NPM_PACKAGE = 'baileys';
 const BAILEYS_NPM_VERSION = '7.0.0-rc14';
+const BAILEYS_INSTALL_LOCK_PATH = path.join(__dirname, 'node_modules', '.asisto-baileys-install.lock');
 
 function resolveInstalledBaileysEntry(packageName) {
   try {
@@ -108,12 +110,34 @@ async function ensureBaileysInstalledAutomatically() {
 
   baileysInstallPromise = (async () => {
     const spec = `${BAILEYS_NPM_PACKAGE}@${BAILEYS_NPM_VERSION}`;
-    const logPrefix = `[BAILEYS] dependencia faltante; instalando automáticamente ${spec}`;
-
-    try { console.log(logPrefix); } catch {}
-    try { EscribirLog(logPrefix, 'event'); } catch {}
+    let installLockFd = null;
 
     try {
+      try { fs.mkdirSync(path.dirname(BAILEYS_INSTALL_LOCK_PATH), { recursive: true }); } catch {}
+
+      const deadline = Date.now() + 10 * 60_000;
+      while (!installLockFd && Date.now() < deadline) {
+        // Si otro worker ya terminó, no ejecutar npm otra vez.
+        if (resolveInstalledBaileysEntry(BAILEYS_NPM_PACKAGE)) {
+          return true;
+        }
+        try {
+          installLockFd = fs.openSync(BAILEYS_INSTALL_LOCK_PATH, 'wx');
+        } catch (e) {
+          if (e?.code !== 'EEXIST') throw e;
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+      }
+
+      if (!installLockFd) throw new Error('baileys_install_lock_timeout');
+
+      // Revalidar después de obtener el lock: otro worker pudo haber instalado justo antes.
+      if (resolveInstalledBaileysEntry(BAILEYS_NPM_PACKAGE)) return true;
+
+      const logPrefix = `[BAILEYS] dependencia faltante; instalando automáticamente ${spec}`;
+      try { console.log(logPrefix); } catch {}
+      try { EscribirLog(logPrefix, 'event'); } catch {}
+
       const result = await runCommand(
         'npm',
         [
@@ -146,6 +170,9 @@ async function ensureBaileysInstalledAutomatically() {
       try { console.error(failMsg); } catch {}
       try { EscribirLog(failMsg, 'error'); } catch {}
       throw new Error(`baileys_auto_install_failed:${detail || 'npm_install_failed'}`);
+    } finally {
+      try { if (installLockFd !== null) fs.closeSync(installLockFd); } catch {}
+      try { if (installLockFd !== null) fs.unlinkSync(BAILEYS_INSTALL_LOCK_PATH); } catch {}
     }
   })();
 
@@ -810,9 +837,37 @@ let lockAcquiredAt = null;
 // --- LocalAuth backup/restore removido ---
 let authFailureHandling = false;
 const AR_TZ = 'America/Argentina/Cordoba';
-// Evita dos procesos app_asisto_ws.js simultáneos en la misma instalación.
-// Una tarea programada duplicada o un reinicio superpuesto multiplicaría el pool Mongo.
-const SINGLE_INSTANCE_LOCK_PATH = path.join(__dirname, 'logs', 'app_asisto_ws.pid');
+
+// ============================================================================
+// Multi-sesión real en un único proceso Node usando Worker Threads.
+// - El hilo principal actúa como supervisor cuando configuracion.json contiene
+//   multi_sessions / multiSessions.
+// - Cada worker ejecuta ESTE MISMO archivo, pero con globals aislados por sesión.
+// - Esto permite varios tenantId y/o varios números sin duplicar carpetas ni Chrome
+//   cuando las sesiones usan Baileys.
+// ============================================================================
+const ASISTO_MULTI_WORKER = String(process.env.ASISTO_MULTI_WORKER || '').trim() === '1';
+const ASISTO_MULTI_SESSION_KEY = String(process.env.ASISTO_MULTI_SESSION_KEY || '').trim();
+const ASISTO_MULTI_PRIMARY_WORKER = String(process.env.ASISTO_MULTI_PRIMARY_WORKER || '').trim() === '1';
+let multiSessionSupervisorState = null;
+
+function sanitizeMultiSessionFilePart(value) {
+  return String(value || 'session')
+    .trim()
+    .replace(/[^a-zA-Z0-9_.-]+/g, '_')
+    .replace(/^_+|_+$/g, '') || 'session';
+}
+
+// Evita dos instancias de la MISMA sesión. En modo multi cada worker tiene
+// su propio lock para poder convivir en la misma carpeta y dentro del mismo PID.
+const SINGLE_INSTANCE_LOCK_PATH = path.join(
+  __dirname,
+  'logs',
+  ASISTO_MULTI_WORKER && ASISTO_MULTI_SESSION_KEY
+    ? `app_asisto_ws.${sanitizeMultiSessionFilePart(ASISTO_MULTI_SESSION_KEY)}.pid`
+    : 'app_asisto_ws.pid'
+);
+
 let singleInstanceLockOwned = false;
 
 
@@ -1351,6 +1406,21 @@ async function ensureControlApiBootstrapInTenantConfig(collection, doc) {
 // =========================
 let tenantConfig = null; // config cargada desde Mongo
 
+function decodeMultiWorkerBootstrapOverride() {
+  if (!ASISTO_MULTI_WORKER) return {};
+  try {
+    const raw = String(process.env.ASISTO_WORKER_BOOTSTRAP_B64 || '').trim();
+    if (!raw) return {};
+    const json = Buffer.from(raw, 'base64').toString('utf8');
+    const obj = JSON.parse(json);
+    return obj && typeof obj === 'object' ? obj : {};
+  } catch (e) {
+    try { console.log('[MULTI] bootstrap worker inválido:', e?.message || e); } catch {}
+    return {};
+  }
+}
+
+
 function readBootstrapFromFile() {
   try {
     const candidates = [
@@ -1364,25 +1434,146 @@ function readBootstrapFromFile() {
         break;
       }
     }
-    if (!p) return {};
+    if (!p) return decodeMultiWorkerBootstrapOverride();
     const raw = JSON.parse(fs.readFileSync(p, "utf8"));
-    const obj = (raw && raw.configuracion && typeof raw.configuracion === "object") ? raw.configuracion : raw;
-    return obj && typeof obj === "object" ? obj : {};
+    const nested = (raw && raw.configuracion && typeof raw.configuracion === "object") ? raw.configuracion : null;
+    const obj = nested ? { ...nested } : ((raw && typeof raw === 'object') ? { ...raw } : {});
+
+    // Si multi_sessions está en la raíz y configuracion está anidado, no perderlo.
+    if (raw && typeof raw === 'object') {
+      if (raw.multi_sessions !== undefined) obj.multi_sessions = raw.multi_sessions;
+      if (raw.multiSessions !== undefined) obj.multiSessions = raw.multiSessions;
+      if (raw.multi_base_port !== undefined) obj.multi_base_port = raw.multi_base_port;
+      if (raw.multiBasePort !== undefined) obj.multiBasePort = raw.multiBasePort;
+      if (raw.multi_refresh_ms !== undefined) obj.multi_refresh_ms = raw.multi_refresh_ms;
+      if (raw.multiRefreshMs !== undefined) obj.multiRefreshMs = raw.multiRefreshMs;
+    }
+
+    if (!ASISTO_MULTI_WORKER) return obj;
+
+    const workerOverride = decodeMultiWorkerBootstrapOverride();
+    const merged = { ...obj, ...workerOverride };
+
+    // Un configuracion.json que antes era mono-tenant puede conservar un token raíz.
+    // No heredarlo accidentalmente cuando este worker pertenece a otro dominio.
+    const baseTenant = String(obj.tenantId || obj.tenantid || '').trim().toUpperCase();
+    const workerTenant = String(workerOverride.tenantId || workerOverride.tenantid || process.env.TENANT_ID || '').trim().toUpperCase();
+    if (baseTenant && workerTenant && baseTenant !== workerTenant) {
+      const tenantScopedKeys = [
+        'control_api_token', 'controlApiToken', 'wweb_control_api_token', 'wwebControlApiToken',
+        'status_token', 'statusToken'
+      ];
+      for (const key of tenantScopedKeys) {
+        if (!Object.prototype.hasOwnProperty.call(workerOverride, key)) delete merged[key];
+      }
+    }
+
+    if (process.env.TENANT_ID) merged.tenantId = String(process.env.TENANT_ID).trim();
+    if (process.env.NUMERO) merged.numero = String(process.env.NUMERO).replace(/\D/g, '');
+    if (process.env.ASISTO_WORKER_PORT) merged.puerto = Number(process.env.ASISTO_WORKER_PORT);
+    return merged;
   } catch {
-    return {};
+    return decodeMultiWorkerBootstrapOverride();
   }
 }
 
-function persistControlApiBootstrap() {
+
+async function acquireBootstrapFileLock(lockPath, timeoutMs = 10000) {
+  const started = Date.now();
+  while ((Date.now() - started) < timeoutMs) {
+    try {
+      const fd = fs.openSync(lockPath, 'wx');
+      return fd;
+    } catch (e) {
+      if (e?.code !== 'EEXIST') throw e;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+  throw new Error('bootstrap_file_lock_timeout');
+}
+
+async function persistControlApiBootstrap() {
+  if (!control_api_url || !control_api_token) return false;
+
+  const candidates = [
+    path.join(__dirname, "configuracion.json"),
+    path.join(process.cwd(), "configuracion.json"),
+  ];
+  const configPath = candidates.find((candidate) => fs.existsSync(candidate)) || candidates[0];
+  const lockPath = configPath + '.multi.lock';
+  let lockFd = null;
+
   try {
-    if (!control_api_url || !control_api_token) return false;
-    const candidates = [
-      path.join(__dirname, "configuracion.json"),
-      path.join(process.cwd(), "configuracion.json"),
-    ];
-    const configPath = candidates.find((candidate) => fs.existsSync(candidate)) || candidates[0];
+    try { fs.mkdirSync(path.dirname(configPath), { recursive: true }); } catch {}
+    lockFd = await acquireBootstrapFileLock(lockPath, 10000);
+
     let raw = {};
     try { raw = JSON.parse(fs.readFileSync(configPath, 'utf8')); } catch {}
+
+    if (ASISTO_MULTI_WORKER) {
+      // En multi-sesión cada tenant conserva SU token. Nunca pisar el token raíz
+      // con el de otro dominio.
+      const root = raw && typeof raw === 'object' ? raw : {};
+      let holder = root;
+      let listKey = null;
+      let list = null;
+
+      if (Array.isArray(root.multi_sessions)) { listKey = 'multi_sessions'; list = root.multi_sessions; }
+      else if (Array.isArray(root.multiSessions)) { listKey = 'multiSessions'; list = root.multiSessions; }
+      else if (root.configuracion && typeof root.configuracion === 'object' && Array.isArray(root.configuracion.multi_sessions)) {
+        holder = root.configuracion; listKey = 'multi_sessions'; list = holder.multi_sessions;
+      } else if (root.configuracion && typeof root.configuracion === 'object' && Array.isArray(root.configuracion.multiSessions)) {
+        holder = root.configuracion; listKey = 'multiSessions'; list = holder.multiSessions;
+      }
+
+      if (list && listKey) {
+        const wantedTenant = String(tenantId || '').trim().toUpperCase();
+        const wantedNumero = String(numero || '').replace(/\D/g, '');
+        let found = false;
+        holder[listKey] = list.map((item) => {
+          if (!item || typeof item !== 'object') return item;
+          const nested = item.configuracion && typeof item.configuracion === 'object' ? item.configuracion : null;
+          const v = nested ? { ...item, ...nested } : item;
+          const t = String(v.tenantId || v.tenantid || '').trim().toUpperCase();
+          const n = String(v.numero || v.number || v.phone || '').replace(/\D/g, '');
+          if (!found && t === wantedTenant && (!n || !wantedNumero || n === wantedNumero)) {
+            found = true;
+            if (nested) {
+              return {
+                ...item,
+                configuracion: {
+                  ...nested,
+                  control_api_url,
+                  control_api_token,
+                  control_api_enabled: true,
+                }
+              };
+            }
+            return {
+              ...item,
+              control_api_url,
+              control_api_token,
+              control_api_enabled: true,
+            };
+          }
+          return item;
+        });
+
+        if (found) {
+         const tempPath = configPath + `.tmp.${process.pid}.${threadId || 0}`;
+          fs.writeFileSync(tempPath, JSON.stringify(root, null, 2), 'utf8');
+          fs.renameSync(tempPath, configPath);
+          try { EscribirLog('[CONTROL_API] token multi-sesión guardado localmente tenant=' + tenantId + ' numero=' + numero, 'event'); } catch {}
+          return true;
+        }
+      }
+
+      // Si no encontramos la sesión, no escribir un token de tenant en la raíz.
+      try { EscribirLog('[CONTROL_API] no se encontró entrada multi_sessions para persistir token tenant=' + tenantId + ' numero=' + numero, 'error'); } catch {}
+      return false;
+    }
+
+    // Modo histórico de una sola sesión.
     const nested = raw && raw.configuracion && typeof raw.configuracion === 'object';
     const target = nested ? raw.configuracion : raw;
     target.tenantId = target.tenantId || tenantId;
@@ -1400,6 +1591,9 @@ function persistControlApiBootstrap() {
   } catch (e) {
     try { EscribirLog('[CONTROL_API] no se pudo guardar configuracion.json: ' + String(e?.message || e), 'error'); } catch {}
     return false;
+  } finally {
+    try { if (lockFd !== null) fs.closeSync(lockFd); } catch {}
+    try { fs.unlinkSync(lockPath); } catch {}
   }
 }
 
@@ -1446,18 +1640,23 @@ function applyTenantConfig(conf) {
     return String(v).trim();
   };
 
-  // Core
-  if (hasValue(conf.puerto)) port = asNumber(conf.puerto, port);
+  // Core. En worker multi-sesión el puerto lo asigna el supervisor para evitar
+  // colisiones aunque distintos tenant_config tengan el mismo puerto histórico.
+  const forcedWorkerPort = ASISTO_MULTI_WORKER ? Number(process.env.ASISTO_WORKER_PORT || 0) : 0;
+  if (Number.isFinite(forcedWorkerPort) && forcedWorkerPort > 0) port = forcedWorkerPort;
+  else if (hasValue(conf.puerto)) port = asNumber(conf.puerto, port);
   if (conf.headless !== undefined) {
     headless = parseBoolLike(conf.headless, !!headless);
   }
 
   // Motor usado para la conexión de WhatsApp Web. No confundir con whatsapp_transport,
   // que en otras partes del script significa API vs WWEB para determinados envíos.
-  const engineRaw =
+  const forcedWorkerEngine = ASISTO_MULTI_WORKER ? String(process.env.ASISTO_WORKER_WWEB_ENGINE || '').trim() : '';
+  const engineRaw = forcedWorkerEngine || (
     conf.wweb_engine ?? conf.wwebEngine ??
     conf.whatsapp_web_engine ?? conf.whatsappWebEngine ??
-    conf.whatsapp_client_engine ?? conf.whatsappClientEngine;
+    conf.whatsapp_client_engine ?? conf.whatsappClientEngine
+  );
   if (engineRaw !== undefined && engineRaw !== null && String(engineRaw).trim() !== '') {
     wweb_engine = normalizeWwebEngine(engineRaw);
   }
@@ -1882,8 +2081,8 @@ async function loadTenantConfigFromDb() {
 
   let doc = await coll.findOne({ _id: tenantId });
   if (!doc) doc = await coll.findOne({ tenantId: tenantId });
-  if (!doc) throw new Error(`No existe configuración en BD para tenantId=${tenantId} (${collName})`);
-
+  if (!doc) throw new Error(`No existeconfiguración en BD para tenantId=${tenantId} (${collName})`);
+ 
   // No requiere token ni edición manual previa. Si falta, esta primera conexión
   // Mongo lo crea en tenant_config y continúa la migración a HTTPS.
   if (!startedWithControlApi) {
@@ -1897,7 +2096,7 @@ async function loadTenantConfigFromDb() {
   // Migración automática: la versión nueva lee una última vez tenant_config
   // desde Mongo, guarda URL/token y libera inmediatamente el MongoClient local.
   if (!startedWithControlApi && isControlApiConfigured()) {
-    persistControlApiBootstrap();
+    await persistControlApiBootstrap();
     await disconnectMongoSafe('migrated_to_control_api');
     try { console.log('[CONTROL_API] migración completada; MongoDB directo deshabilitado'); } catch {}
     try { EscribirLog('[CONTROL_API] migración completada; MongoDB directo deshabilitado', 'event'); } catch {}
@@ -2863,6 +3062,12 @@ function applyAutoUpdateConfig(conf) {
   auto_update_repo_path = auto_update_repo_path || __dirname;
   auto_update_remote = auto_update_remote || 'origin';
   if (!['tag', 'branch', 'tag_or_branch'].includes(auto_update_source)) auto_update_source = 'tag_or_branch';
+
+  // Un solo worker puede tocar git/package.json. Los secundarios comparten el mismo
+  // código y node_modules, por lo que ejecutar auto-update en paralelo sería riesgoso.
+  if (ASISTO_MULTI_WORKER && !ASISTO_MULTI_PRIMARY_WORKER) {
+    auto_update_enabled = false;
+  }
 }
 
 function getConfiguredTargetTag(conf) {
@@ -3916,7 +4121,7 @@ async function loadTenantConfigFromDbMinimal() {
     controlApi.configure({ tenantId, numero });
 
     if (!startedWithControlApi && isControlApiConfigured()) {
-      persistControlApiBootstrap();
+      await persistControlApiBootstrap();
       await disconnectMongoSafe('migrated_to_control_api');
       try { console.log('[CONTROL_API] migración completada; MongoDB directo deshabilitado'); } catch {}
       try { EscribirLog('[CONTROL_API] migración completada; MongoDB directo deshabilitado', 'event'); } catch {}
@@ -3924,7 +4129,10 @@ async function loadTenantConfigFromDbMinimal() {
     // Aplicar SOLO si vienen valores definidos (no pisar con vacíos)
     if (!numero && conf.numero) numero = String(conf.numero).trim();
 
-    if (conf.puerto !== undefined && conf.puerto !== null && conf.puerto !== "") {
+    const forcedWorkerPort = ASISTO_MULTI_WORKER ? Number(process.env.ASISTO_WORKER_PORT || 0) : 0;
+    if (Number.isFinite(forcedWorkerPort) && forcedWorkerPort > 0) {
+      port = forcedWorkerPort;
+    } else if (conf.puerto !== undefined && conf.puerto !== null && conf.puerto !== "") {
       const p = Number(conf.puerto);
       if (!Number.isNaN(p) && p > 0) port = p;
     }
@@ -3959,10 +4167,12 @@ async function loadTenantConfigFromDbMinimal() {
       auth_mode = String(conf.auth_mode).trim().toLowerCase();
     }
 
-    const engineRaw =
+    const forcedWorkerEngine = ASISTO_MULTI_WORKER ? String(process.env.ASISTO_WORKER_WWEB_ENGINE || '').trim() : '';
+    const engineRaw = forcedWorkerEngine || (
       conf.wweb_engine ?? conf.wwebEngine ??
       conf.whatsapp_web_engine ?? conf.whatsappWebEngine ??
-      conf.whatsapp_client_engine ?? conf.whatsappClientEngine;
+      conf.whatsapp_client_engine ?? conf.whatsappClientEngine
+    );
     if (engineRaw !== undefined && engineRaw !== null && String(engineRaw).trim()) {
       wweb_engine = normalizeWwebEngine(engineRaw);
     }
@@ -4313,10 +4523,332 @@ app.post("/control/release", requireStatusToken, async (req, res) => {
   }
 });
 
+ 
+
+function multiSessionBool(value, fallback = true) {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (typeof value === 'boolean') return value;
+  return ['1', 'true', 'yes', 'si', 'sí', 'on'].includes(String(value).trim().toLowerCase());
+}
+
+function normalizeMultiSessionEntry(item, index, basePort) {
+  if (!item || typeof item !== 'object') return null;
+  const nested = item.configuracion && typeof item.configuracion === 'object' ? item.configuracion : null;
+  const raw = nested ? { ...item, ...nested } : { ...item };
+  if (!multiSessionBool(raw.enabled ?? raw.activo ?? raw.active, true)) return null;
+
+  const tenant = String(raw.tenantId ?? raw.tenantid ?? raw.tenant ?? raw.dominio ?? '').trim().toUpperCase();
+  const numeroRaw = raw.numero ?? raw.number ?? raw.phone ?? raw.telefono ?? '';
+  const phone = String(numeroRaw || '').replace(/\D/g, '');
+  if (!tenant || !phone) return null;
+
+  const key = String(raw.session_key ?? raw.sessionKey ?? raw.id ?? `${tenant}:${phone}`).trim() || `${tenant}:${phone}`;
+  const explicitPort = Number(raw.puerto ?? raw.port ?? 0);
+  const portValue = Number.isFinite(explicitPort) && explicitPort > 0 ? explicitPort : (basePort + index);
+  const engineRaw = String(raw.wweb_engine ?? raw.wwebEngine ?? raw.whatsapp_web_engine ?? '').trim();
+
+  const bootstrap = {
+    ...raw,
+    tenantId: tenant,
+    numero: phone,
+    puerto: portValue,
+  };
+  delete bootstrap.configuracion;
+  delete bootstrap.multi_sessions;
+  delete bootstrap.multiSessions;
+
+  return {
+    key,
+    tenantId: tenant,
+    numero: phone,
+    port: portValue,
+    engine: engineRaw ? normalizeWwebEngine(engineRaw) : '',
+    bootstrap,
+  };
+}
+
+function getConfiguredMultiSessions(boot = readBootstrapFromFile()) {
+  if (!boot || typeof boot !== 'object') return [];
+  let rawList = boot.multi_sessions ?? boot.multiSessions ?? boot.sessions ?? null;
+  if (typeof rawList === 'string') {
+    try { rawList = JSON.parse(rawList); } catch { rawList = null; }
+  }
+  if (!Array.isArray(rawList) || !rawList.length) return [];
+
+  const basePortRaw = Number(boot.multi_base_port ?? boot.multiBasePort ?? process.env.ASISTO_MULTI_BASE_PORT ?? 8100);
+  const basePort = Number.isFinite(basePortRaw) && basePortRaw > 0 ? Math.trunc(basePortRaw) : 8100;
+
+  // Orden estable para que los puertos automáticos no cambien entre reinicios.
+  const prelim = rawList
+    .map((item) => {
+      const nested = item && item.configuracion && typeof item.configuracion === 'object' ? item.configuracion : null;
+      const v = nested ? { ...item, ...nested } : (item || {});
+      const tenant = String(v.tenantId ?? v.tenantid ?? v.tenant ?? v.dominio ?? '').trim().toUpperCase();
+      const phone = String(v.numero ?? v.number ?? v.phone ?? v.telefono ?? '').replace(/\D/g, '');
+      return { item, sortKey: `${tenant}:${phone}` };
+    })
+    .sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+
+  const out = [];
+  const seen = new Set();
+  const usedPorts = new Set();
+  for (let i = 0; i < prelim.length; i++) {
+    const session = normalizeMultiSessionEntry(prelim[i].item, i, basePort);
+    if (!session) continue;
+    if (seen.has(session.key)) {
+      try { console.log(`[MULTI] sesión duplicada ignorada key=${session.key}`); } catch {}
+      continue;
+    }
+    seen.add(session.key);
+
+    if (usedPorts.has(session.port)) {
+      let candidate = basePort;
+      while (usedPorts.has(candidate)) candidate++;
+      session.port = candidate;
+      session.bootstrap.puerto = candidate;
+    }
+    usedPorts.add(session.port);
+    out.push(session);
+  }
+  return out;
+}
+
+function hashMultiSessionDefinition(session) {
+  try { return crypto.createHash('sha1').update(JSON.stringify(session.bootstrap || session)).digest('hex'); }
+  catch { return `${session.tenantId}:${session.numero}:${session.port}:${session.engine}`; }
+}
+
+function pipeWorkerLines(stream, sessionKey, target) {
+  if (!stream || typeof stream.on !== 'function') return;
+  let pending = '';
+  stream.on('data', (chunk) => {
+    pending += String(chunk || '');
+    const parts = pending.split(/\r?\n/);
+    pending = parts.pop() || '';
+    for (const line of parts) {
+      if (!line) continue;
+      try { target(`[${sessionKey}] ${line}\n`); } catch {}
+    }
+  });
+  stream.on('end', () => {
+    if (!pending) return;
+    try { target(`[${sessionKey}] ${pending}\n`); } catch {}
+    pending = '';
+  });
+}
+
+function createMultiWorkerEnv(session, isPrimary) {
+  const env = { ...process.env };
+
+  // Nunca propagar por error un token de otro tenant desde el entorno del supervisor.
+  // Si la entrada de la sesión trae token propio, se vuelve a cargar debajo.
+  delete env.WWEB_CONTROL_API_TOKEN;
+  delete env.CONTROL_API_TOKEN;
+  delete env.STATUS_TOKEN;
+
+  env.ASISTO_MULTI_WORKER = '1';
+  env.ASISTO_MULTI_SESSION_KEY = session.key;
+  env.ASISTO_MULTI_PRIMARY_WORKER = isPrimary ? '1' : '0';
+  env.ASISTO_WORKER_PORT = String(session.port);
+  env.TENANT_ID = session.tenantId;
+  env.NUMERO = session.numero;
+  env.PORT = String(session.port);
+  env.INSTANCE_ID = `${os.hostname()}-${sanitizeMultiSessionFilePart(session.key)}-t${Date.now()}`;
+  env.ASISTO_WORKER_BOOTSTRAP_B64 = Buffer.from(JSON.stringify(session.bootstrap || {}), 'utf8').toString('base64');
+
+  const sessionToken = String(
+    session.bootstrap?.control_api_token ?? session.bootstrap?.controlApiToken ??
+    session.bootstrap?.wweb_control_api_token ?? session.bootstrap?.wwebControlApiToken ?? ''
+  ).trim();
+  if (sessionToken) {
+    env.WWEB_CONTROL_API_TOKEN = sessionToken;
+    env.CONTROL_API_TOKEN = sessionToken;
+  }
+  const sessionStatusToken = String(session.bootstrap?.status_token ?? session.bootstrap?.statusToken ?? '').trim();
+  if (sessionStatusToken) env.STATUS_TOKEN = sessionStatusToken;
+
+  if (session.engine) {
+    env.ASISTO_WORKER_WWEB_ENGINE = session.engine;
+    env.ASISTO_WWEB_ENGINE = session.engine;
+  } else {
+    delete env.ASISTO_WORKER_WWEB_ENGINE;
+  }
+  return env;
+}
+
+function stopMultiWorkerRecord(record, reason = 'stop') {
+  if (!record || !record.worker) return Promise.resolve();
+  record.intentionalStop = true;
+  try { console.log(`[MULTI] deteniendo ${record.session.key} reason=${reason}`); } catch {}
+  return Promise.race([
+    record.worker.terminate().catch(() => {}),
+    new Promise((resolve) => setTimeout(resolve, 4000))
+  ]).catch(() => {});
+}
+
+function startMultiWorkerRecord(state, session, isPrimary) {
+  const hash = hashMultiSessionDefinition(session);
+  const old = state.workers.get(session.key);
+  if (old?.worker) return old;
+
+  const record = old || {
+    session,
+    hash,
+    worker: null,
+    restartTimer: null,
+    intentionalStop: false,
+    startedAt: 0,
+    restartCount: 0,
+    isPrimary: !!isPrimary,
+  };
+  record.session = session;
+  record.hash = hash;
+  record.intentionalStop = false;
+  record.isPrimary = !!isPrimary;
+  record.startedAt = Date.now();
+
+  const worker = new Worker(__filename, {
+    env: createMultiWorkerEnv(session, isPrimary),
+    stdout: true,
+    stderr: true,
+  });
+  record.worker = worker;
+  state.workers.set(session.key, record);
+
+  pipeWorkerLines(worker.stdout, session.key, (line) => process.stdout.write(line));
+  pipeWorkerLines(worker.stderr, session.key, (line) => process.stderr.write(line));
+
+  try { console.log(`[MULTI] worker iniciado key=${session.key} threadId=${worker.threadId} port=${session.port} engine=${session.engine || 'tenant_config'}`); } catch {}
+
+  worker.on('error', (err) => {
+    try { console.error(`[MULTI] worker error key=${session.key}:`, err?.stack || err?.message || err); } catch {}
+  });
+
+  worker.on('exit', (code) => {
+    const runtime = Date.now() - (record.startedAt || Date.now());
+    record.worker = null;
+    try { console.log(`[MULTI] worker finalizó key=${session.key} code=${code} runtimeMs=${runtime}`); } catch {}
+    if (state.stopping || record.intentionalStop || !state.desired.has(session.key)) return;
+
+    // El worker primario es el único autorizado a tocar git. Si sale con el código
+    // de supervisor (normalmente 77), reiniciamos TODO el proceso para que supervisor
+    // y workers carguen exactamente la misma versión del archivo.
+    if (record.isPrimary && Number(code) === getSupervisorRestartExitCode()) {
+      try { console.log('[MULTI] worker primario solicitó reinicio global; saliendo para que el runner reinicie Asisto'); } catch {}
+      setTimeout(() => { try { process.exit(getSupervisorRestartExitCode()); } catch {} }, 250);
+      return;
+    }
+
+    record.restartCount = runtime > 30000 ? 0 : Math.min(8, (record.restartCount || 0) + 1);
+    const delay = Math.min(30000, 1500 * Math.max(1, record.restartCount));
+    record.restartTimer = setTimeout(() => {
+      record.restartTimer = null;
+      if (state.stopping || !state.desired.has(session.key)) return;
+      startMultiWorkerRecord(state, state.desired.get(session.key), record.isPrimary);
+    }, delay);
+  });
+  return record;
+}
+
+async function reconcileMultiSessionWorkers(state) {
+  if (!state || state.stopping || state.reconcileBusy) return;
+  state.reconcileBusy = true;
+  try {
+    const boot = readBootstrapFromFile();
+    const sessions = getConfiguredMultiSessions(boot);
+    const desired = new Map(sessions.map((s) => [s.key, s]));
+    state.desired = desired;
+
+    // Primario estable: primera sesión ordenada. Es la única que puede auto-actualizar git.
+    const primaryKey = sessions.length ? sessions[0].key : '';
+    state.primaryKey = primaryKey;
+
+    for (const [key, record] of Array.from(state.workers.entries())) {
+      const next = desired.get(key);
+      if (!next) {
+        if (record.restartTimer) { clearTimeout(record.restartTimer); record.restartTimer = null; }
+        await stopMultiWorkerRecord(record, 'removed_from_config');
+        state.workers.delete(key);
+        continue;
+      }
+      const nextHash = hashMultiSessionDefinition(next);
+      const shouldBePrimary = key === primaryKey;
+      if (record.hash !== nextHash || record.isPrimary !== shouldBePrimary) {
+        if (record.restartTimer) { clearTimeout(record.restartTimer); record.restartTimer = null; }
+        await stopMultiWorkerRecord(record, 'config_changed');
+        state.workers.delete(key);
+      }
+    }
+
+    for (const session of sessions) {
+      if (!state.workers.get(session.key)?.worker) {
+        startMultiWorkerRecord(state, session, session.key === primaryKey);
+      }
+    }
+  } catch (e) {
+    try { console.error('[MULTI] reconcile error:', e?.stack || e?.message || e); } catch {}
+ } finally {
+    state.reconcileBusy = false;
+  }
+}
+
+async function stopMultiSessionSupervisor(reason = 'shutdown') {
+  const state = multiSessionSupervisorState;
+  if (!state || state.stopping) return;
+  state.stopping = true;
+  try { if (state.timer) clearInterval(state.timer); } catch {}
+  state.timer = null;
+  const stops = [];
+  for (const record of state.workers.values()) {
+    if (record.restartTimer) { clearTimeout(record.restartTimer); record.restartTimer = null; }
+    stops.push(stopMultiWorkerRecord(record, reason));
+  }
+  await Promise.allSettled(stops);
+  state.workers.clear();
+}
+
+async function runMultiSessionSupervisor(boot) {
+  if (!isMainThread || ASISTO_MULTI_WORKER) return false;
+  const sessions = getConfiguredMultiSessions(boot);
+  if (!sessions.length) return false;
+
+  const refreshRaw = Number(boot?.multi_refresh_ms ?? boot?.multiRefreshMs ?? process.env.ASISTO_MULTI_REFRESH_MS ?? 15000);
+  const refreshMs = Number.isFinite(refreshRaw) ? Math.max(5000, refreshRaw) : 15000;
+
+  const state = {
+    workers: new Map(),
+    desired: new Map(),
+    stopping: false,
+    reconcileBusy: false,
+    timer: null,
+    primaryKey: '',
+  };
+  multiSessionSupervisorState = state;
+
+  console.log(`[MULTI] supervisor activo pid=${process.pid} sesiones=${sessions.length} refreshMs=${refreshMs}`);
+  await reconcileMultiSessionWorkers(state);
+  state.timer = setInterval(() => { reconcileMultiSessionWorkers(state).catch(() => {}); }, refreshMs);
+  return true;
+}
 
 
     
 (async function startAsistoWs() {
+
+ // Si configuracion.json declara multi_sessions, el hilo principal NO abre una
+  // sesión WhatsApp propia: supervisa workers aislados que ejecutan este mismo archivo.
+  try {
+    if (isMainThread && !ASISTO_MULTI_WORKER) {
+      const multiBoot = readBootstrapFromFile();
+      if (getConfiguredMultiSessions(multiBoot).length > 0) {
+        await runMultiSessionSupervisor(multiBoot);
+        return;
+      }
+    }
+  } catch (e) {
+    try { console.error('[MULTI] no se pudo iniciar supervisor:', e?.stack || e?.message || e); } catch {}
+  }
+
   // Bootstrap: configuracion.json (tenantId/mongo_uri/mongo_db) + tenant_config (resto)
   try {
     RecuperarJsonConf();
@@ -4333,15 +4865,20 @@ app.post("/control/release", requireStatusToken, async (req, res) => {
     // Cargar resto de configuración desde Mongo (numero/puerto/headless/etc.)
     await loadTenantConfigFromDbMinimal();
     try {
-      const engineBootMsg = `[WWEB_ENGINE] configuración al arranque=${getWwebEngine()} tenant=${tenantId} numero=${numero || '(pendiente)'}`;
+      const engineBootMsg = `[WWEB_ENGINE] configuración al arranque=${getWwebEngine()} tenant=${tenantId} numero=${numero || '(pendiente)'}${ASISTO_MULTI_WORKER ? ` multiWorker=${ASISTO_MULTI_SESSION_KEY} threadId=${threadId}` : ''}`;
       console.log(engineBootMsg);
       EscribirLog(engineBootMsg, 'event');
     } catch {}
 
     // Si el tenant pide una TAG concreta, validar al iniciar antes de levantar WhatsApp.
+    // En multi-sesión SOLO el worker primario puede tocar git/package.json.
     try {
-      await autoUpdateForceTargetTagOnBoot('boot_target_tag_force');
-      if (autoUpdateRestarting) return;
+      if (!ASISTO_MULTI_WORKER || ASISTO_MULTI_PRIMARY_WORKER) {
+        await autoUpdateForceTargetTagOnBoot('boot_target_tag_force');
+        if (autoUpdateRestarting) return;
+      } else {
+        try { console.log('[AUTO_UPDATE] skip boot_target_tag_force: worker secundario multi-sesión'); } catch {}
+      }
     } catch (e) {
        try { console.log('boot_target_tag_force auto-update error:', e?.message || e); } catch {}
       try { EscribirLog('boot_target_tag_force auto-update error: ' + String(e?.message || e), 'error'); } catch {}
@@ -5354,6 +5891,15 @@ function startActionPoller() {
 async function gracefulShutdown(signal) {
   if (gracefulShutdown.inFlight) return;
   gracefulShutdown.inFlight = true;
+
+  if (multiSessionSupervisorState && !ASISTO_MULTI_WORKER) {
+    try { console.log(`[MULTI] shutdown supervisor signal=${signal}`); } catch {}
+    try { await stopMultiSessionSupervisor(String(signal || 'shutdown')); } catch {}
+    try { releaseSingleInstanceLock(); } catch {}
+    process.exit(0);
+    return;
+  }
+
 
   if (String(signal || '').startsWith('AUTO_UPDATE')) {
     return fastExitForSupervisorRestart(signal);
