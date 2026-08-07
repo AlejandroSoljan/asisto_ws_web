@@ -1,7 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.04.00  07/08/2026   */
-
-
+/*version: 4.04.02  07/08/2026   */
+ 
 
 const dns = require("dns");
 
@@ -15,9 +14,26 @@ try {
 
 //const chatbot = require("./funciones_asisto.js")
 const { EventEmitter } = require('events');
-const { Client: WwebClient, MessageMedia, LocalAuth, RemoteAuth } = require('whatsapp-web.js');
+
+// whatsapp-web.js / Puppeteer se cargan de forma diferida.
+// Si todas las sesiones usan Baileys, una dependencia rota de Puppeteer NO debe
+// impedir que el proceso arranque antes de leer wweb_engine.
+let WwebClient = null;
+let LocalAuth = null;
+let RemoteAuth = null;
+let MongoStore = null;
+
+class AsistoCompatMessageMedia {
+  constructor(mimetype, data, filename) {
+    this.mimetype = String(mimetype || 'application/octet-stream');
+    this.data = String(data || '');
+    this.filename = filename == null ? null : String(filename);
+  }
+}
+let MessageMedia = AsistoCompatMessageMedia;
+
 const mongoose = require('mongoose');
-const { MongoStore } = require('wwebjs-mongo');
+
 const os = require('os');
 const crypto = require('crypto');
 const express = require('express');
@@ -38,7 +54,7 @@ const fileUpload = require('express-fileupload');
 const axios = require('axios');
 
 const mime = require('mime-types');
-const { ClientInfo } = require('whatsapp-web.js/src/structures');
+
 const utf8 = require('utf8');
 //const { OdbcError } = require('odbc');
 const nodemailer = require('nodemailer');
@@ -49,6 +65,137 @@ const { spawn } = require('child_process');
 const { Worker, isMainThread, threadId } = require('worker_threads');
 let mongoConnectingPromise = null;
 
+
+// Un único lock para CUALQUIER npm install sobre este C:\Asisto compartido.
+// Evita que Baileys, reparación de wwebjs o auto-update modifiquen node_modules
+// al mismo tiempo desde workers diferentes.
+const ASISTO_NPM_INSTALL_LOCK_PATH = path.join(__dirname, 'node_modules', '.asisto-npm-install.lock');
+let wwebJsRuntimeLoadPromise = null;
+let wwebJsRepairPromise = null;
+
+function tryLoadWwebJsRuntimeSync() {
+  const wweb = require('whatsapp-web.js');
+  if (!wweb || typeof wweb.Client !== 'function') throw new Error('whatsapp_web_js_client_missing');
+
+  WwebClient = wweb.Client;
+  MessageMedia = wweb.MessageMedia || AsistoCompatMessageMedia;
+  LocalAuth = wweb.LocalAuth;
+  RemoteAuth = wweb.RemoteAuth;
+
+  if (typeof LocalAuth !== 'function' || typeof RemoteAuth !== 'function') {
+    throw new Error('whatsapp_web_js_auth_classes_missing');
+  }
+
+  return true;
+}
+
+async function acquireSharedNpmInstallLock(timeoutMs = 10 * 60_000) {
+  try { fs.mkdirSync(path.dirname(ASISTO_NPM_INSTALL_LOCK_PATH), { recursive: true }); } catch {}
+  const deadline = Date.now() + Math.max(5000, Number(timeoutMs) || 10 * 60_000);
+
+  while (Date.now() < deadline) {
+    try {
+      return fs.openSync(ASISTO_NPM_INSTALL_LOCK_PATH, 'wx');
+    } catch (e) {
+      if (e?.code !== 'EEXIST') throw e;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+
+  throw new Error('npm_install_lock_timeout');
+}
+
+async function repairWwebJsDependenciesAutomatically() {
+  if (wwebJsRepairPromise) return wwebJsRepairPromise;
+
+  wwebJsRepairPromise = (async () => {
+    let lockFd = null;
+    try {
+      lockFd = await acquireSharedNpmInstallLock(10 * 60_000);
+
+      // Otro worker pudo haber reparado mientras esperábamos el lock.
+      try {
+        tryLoadWwebJsRuntimeSync();
+        return true;
+      } catch {}
+
+      const msg = '[WWEBJS] dependencias incompletas; ejecutando npm install --omit=dev para reparar node_modules';
+      try { console.log(msg); } catch {}
+      try { if (typeof EscribirLog === 'function') EscribirLog(msg, 'event'); } catch {}
+
+      const result = await runCommand(
+        'npm',
+        ['install', '--omit=dev', '--no-audit', '--no-fund'],
+        { cwd: __dirname, timeout: 10 * 60_000 }
+      );
+
+      if (result?.stderr && String(result.stderr).trim()) {
+        try { console.log('[WWEBJS] npm stderr:', String(result.stderr).trim()); } catch {}
+      }
+
+      return true;
+    } finally {
+      try { if (lockFd !== null) fs.closeSync(lockFd); } catch {}
+      try { if (lockFd !== null) fs.unlinkSync(ASISTO_NPM_INSTALL_LOCK_PATH); } catch {}
+    }
+  })();
+
+  try {
+    return await wwebJsRepairPromise;
+  } finally {
+    wwebJsRepairPromise = null;
+  }
+}
+
+async function ensureWwebJsRuntimeLoaded(options = {}) {
+  if (WwebClient && LocalAuth && RemoteAuth) return true;
+  if (wwebJsRuntimeLoadPromise) return wwebJsRuntimeLoadPromise;
+
+  const allowRepair = options.repair !== false;
+
+  wwebJsRuntimeLoadPromise = (async () => {
+    try {
+      tryLoadWwebJsRuntimeSync();
+      return true;
+    } catch (firstError) {
+      if (!allowRepair) throw firstError;
+
+      const detail = String(firstError?.message || firstError || '').trim();
+      try { console.log('[WWEBJS] carga inicial falló:', detail); } catch {}
+      try { if (typeof EscribirLog === 'function') EscribirLog('[WWEBJS] carga inicial falló: ' + detail, 'error'); } catch {}
+
+      await repairWwebJsDependenciesAutomatically();
+
+      // CommonJS elimina del cache los módulos que fallaron al cargar; reintentamos
+      // una vez después de que npm haya reparado las dependencias transitivas.
+      tryLoadWwebJsRuntimeSync();
+      return true;
+    }
+  })().catch((e) => {
+    wwebJsRuntimeLoadPromise = null;
+    throw e;
+  });
+
+  return wwebJsRuntimeLoadPromise;
+}
+
+async function ensureWwebMongoStoreLoaded() {
+  if (MongoStore) return MongoStore;
+  await ensureWwebJsRuntimeLoaded();
+
+  try {
+    const mod = require('wwebjs-mongo');
+    MongoStore = mod?.MongoStore || mod?.default?.MongoStore || null;
+  } catch (firstError) {
+    await repairWwebJsDependenciesAutomatically();
+    const mod = require('wwebjs-mongo');
+    MongoStore = mod?.MongoStore || mod?.default?.MongoStore || null;
+  }
+
+  if (typeof MongoStore !== 'function') throw new Error('wwebjs_mongo_store_missing');
+  return MongoStore;
+}
+ 
 
 // ============================================================================
 // Baileys compatibility layer
@@ -61,7 +208,7 @@ let baileysModulePromise = null;
 let baileysInstallPromise = null;
 const BAILEYS_NPM_PACKAGE = 'baileys';
 const BAILEYS_NPM_VERSION = '7.0.0-rc14';
-const BAILEYS_INSTALL_LOCK_PATH = path.join(__dirname, 'node_modules', '.asisto-baileys-install.lock');
+
 
 function resolveInstalledBaileysEntry(packageName) {
   try {
@@ -113,7 +260,7 @@ async function ensureBaileysInstalledAutomatically() {
     let installLockFd = null;
 
     try {
-      try { fs.mkdirSync(path.dirname(BAILEYS_INSTALL_LOCK_PATH), { recursive: true }); } catch {}
+        try { fs.mkdirSync(path.dirname(ASISTO_NPM_INSTALL_LOCK_PATH), { recursive: true }); } catch {}
 
       const deadline = Date.now() + 10 * 60_000;
       while (!installLockFd && Date.now() < deadline) {
@@ -122,7 +269,7 @@ async function ensureBaileysInstalledAutomatically() {
           return true;
         }
         try {
-          installLockFd = fs.openSync(BAILEYS_INSTALL_LOCK_PATH, 'wx');
+          installLockFd = fs.openSync(ASISTO_NPM_INSTALL_LOCK_PATH, 'wx');
         } catch (e) {
           if (e?.code !== 'EEXIST') throw e;
           await new Promise((resolve) => setTimeout(resolve, 500));
@@ -172,7 +319,7 @@ async function ensureBaileysInstalledAutomatically() {
       throw new Error(`baileys_auto_install_failed:${detail || 'npm_install_failed'}`);
     } finally {
       try { if (installLockFd !== null) fs.closeSync(installLockFd); } catch {}
-      try { if (installLockFd !== null) fs.unlinkSync(BAILEYS_INSTALL_LOCK_PATH); } catch {}
+      try { if (installLockFd !== null) fs.unlinkSync(ASISTO_NPM_INSTALL_LOCK_PATH); } catch {}
     }
   })();
 
@@ -3320,6 +3467,14 @@ async function autoUpdateResolveTarget(repoPath) {
 }
 
 async function autoUpdateForceTargetTagOnBoot(reason = 'boot_target_tag_force') {
+  // Todos los workers comparten el MISMO C:\Asisto, repo y node_modules.
+  // Sólo el primario puede modificar Git/package.json, incluso cuando esta función
+  // es invocada indirectamente desde before_whatsapp_start.
+  if (ASISTO_MULTI_WORKER && !ASISTO_MULTI_PRIMARY_WORKER) {
+    autoUpdateLog(`[AUTO_UPDATE] skip (${reason}): worker secundario multi-sesión no puede modificar repo compartido`, 'event');
+    return false;
+  }
+
   const desiredTag = String(auto_update_target_tag || '').trim();
   if (!desiredTag) {
     autoUpdateLog(`[AUTO_UPDATE] skip (${reason}): tenant sin targetTag configurado`, 'event');
@@ -4612,6 +4767,24 @@ function getConfiguredMultiSessions(boot = readBootstrapFromFile()) {
   }
   return out;
 }
+function getMultiPrimarySessionKey(sessions, boot = readBootstrapFromFile()) {
+  const list = Array.isArray(sessions) ? sessions : [];
+  if (!list.length) return '';
+
+  const rootTenant = String(boot?.tenantId ?? boot?.tenantid ?? '').trim().toUpperCase();
+  const rootNumero = String(boot?.numero ?? boot?.number ?? '').replace(/\D/g, '');
+
+  if (rootTenant) {
+    const found = list.find((s) =>
+      String(s.tenantId || '').trim().toUpperCase() === rootTenant &&
+      (!rootNumero || String(s.numero || '').replace(/\D/g, '') === rootNumero)
+    );
+    if (found) return found.key;
+  }
+
+  return list[0].key;
+}
+
 
 function hashMultiSessionDefinition(session) {
   try { return crypto.createHash('sha1').update(JSON.stringify(session.bootstrap || session)).digest('hex'); }
@@ -4759,8 +4932,12 @@ async function reconcileMultiSessionWorkers(state) {
     const desired = new Map(sessions.map((s) => [s.key, s]));
     state.desired = desired;
 
-    // Primario estable: primera sesión ordenada. Es la única que puede auto-actualizar git.
-    const primaryKey = sessions.length ? sessions[0].key : '';
+    // El único worker autorizado a tocar Git/package.json es el tenant/numero raíz
+    // de configuracion.json (SDG en esta instalación). Fallback: primera sesión.
+    const primaryKey = getMultiPrimarySessionKey(sessions, boot);
+    if (state.primaryKey !== primaryKey) {
+      try { console.log(`[MULTI] worker primario=${primaryKey || '(ninguno)'}`); } catch {}
+    }
     state.primaryKey = primaryKey;
 
     for (const [key, record] of Array.from(state.workers.entries())) {
@@ -4991,7 +5168,10 @@ async function clearRemoteAuthStoreSafe(clientId) {
   try {
     if (!isRemoteAuthMode()) return result;
     result.attempted = true;
-    if (!store) store = new MongoStore({ mongoose });
+    if (!store) {
+        const MongoStoreCtor = await ensureWwebMongoStoreLoaded();
+        store = new MongoStoreCtor({ mongoose });
+      }
 
     const candidates = [
       async () => (typeof store.delete === 'function') ? store.delete({ session: clientId }) : undefined,
@@ -5073,9 +5253,16 @@ async function createClientIfNeeded(opts = {}) {
     });
     try { EscribirLog(`[WWEB_ENGINE] usando baileys clientId=${clientId} authDir=${getBaileysAuthSessionDir(clientId)}`, 'event'); } catch {}
   } else {
+    // Recién acá cargamos whatsapp-web.js/Puppeteer. Las sesiones Baileys nunca
+    // pasan por este require ni dependen de Chromium.
+    await ensureWwebJsRuntimeLoaded();
+
     const useRemoteAuth = isRemoteAuthMode();
     if (useRemoteAuth) {
-      if (!store) store = new MongoStore({ mongoose });
+      if (!store) {
+        const MongoStoreCtor = await ensureWwebMongoStoreLoaded();
+        store = new MongoStoreCtor({ mongoose });
+      }
     }
 
     client = new WwebClient({
