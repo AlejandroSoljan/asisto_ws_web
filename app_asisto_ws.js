@@ -1,10 +1,13 @@
 /*script:app_asisto*/
-/*version: 4.04.05  07/08/2026   */
+/*version: 4.04.06  08/08/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.05 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.06 file=${__filename} pid=${process.pid}`);
 } catch {}
 
-
+// Multi-sesión usa Worker Threads. Forzamos ws a no cargar sus aceleradores
+// nativos opcionales para evitar crashes N-API/V8 entre isolates.
+process.env.WS_NO_BUFFER_UTIL = '1';
+process.env.WS_NO_UTF_8_VALIDATE = '1';
 
 const dns = require("dns");
 
@@ -45,13 +48,23 @@ const { body, validationResult } = require('express-validator');
 const socketIO = require('socket.io');
 const qrcode = require('qrcode');
 const http = require('http');
-//var odbc = require("odbc");
+// ODBC es opcional y nativo. En multi-sesión NO se carga al iniciar cada Worker;
+// se carga únicamente cuando una función realmente necesita acceder al DSN.
 let odbc = null;
-try {
-  odbc = require("odbc");
-} catch (e) {
-  // ODBC es opcional: solo se usa para comandos administrativos como /e l.
-  odbc = null;
+let odbcLoadAttempted = false;
+
+function getOdbcModule() {
+  if (odbc) return odbc;
+  if (odbcLoadAttempted) return null;
+  odbcLoadAttempted = true;
+  try {
+    odbc = require("odbc");
+    return odbc;
+  } catch (e) {
+    odbc = null;
+    try { console.log('[ODBC] módulo no disponible:', e?.message || e); } catch {}
+    return null;
+  }
 }
 const fetch = require('node-fetch');
 const fileUpload = require('express-fileupload');
@@ -8029,7 +8042,8 @@ async function queryAccessComprasEntregas(source = '') {
   compraEntregaQueryStopRequested = false;
 
   try {
-    if (!odbc) {
+   const odbcRuntime = getOdbcModule();
+    if (!odbcRuntime) {
       try { EscribirLog('queryAccessComprasEntregas: odbc no disponible', 'error'); } catch {}
       return;
     }
@@ -8053,7 +8067,7 @@ async function queryAccessComprasEntregas(source = '') {
 
     try { if (compraEntregaConnection && typeof compraEntregaConnection.close === 'function') await compraEntregaConnection.close(); } catch {}
     try {
-      compraEntregaConnection = await odbc.connect('DSN=' + dsn + '; charset=UTF8');
+      compraEntregaConnection = await odbcRuntime.connect('DSN=' + dsn + '; charset=UTF8');
     } catch (e) {
       const msg = 'queryAccessComprasEntregas: no conecta ODBC DSN=' + dsn + ' -> ' + String(e?.message || e);
       console.log(msg);
@@ -8887,7 +8901,8 @@ async function handleAdminDeliveryCommand(message, source = '') {
     const replyTo = adminReplyTarget(message);
     if (!replyTo) return true;
 
-    if (!odbc) {
+    const odbcRuntime = getOdbcModule();
+    if (!odbcRuntime) {
       await safeSendMessage(replyTo, 'ODBC no está disponible en este script. No puedo consultar pedidos.');
       return true;
     }
@@ -8895,7 +8910,7 @@ async function handleAdminDeliveryCommand(message, source = '') {
     console.log('[admin-command] OK source=' + source + ' from=' + message.from + ' to=' + message.to + ' fromMe=' + message.fromMe + ' body=' + body);
     EscribirLog('[admin-command] OK source=' + source + ' body=' + body, 'event');
 
-    const cmdConnection = await odbc.connect('DSN=' + dsn + '; charset=UTF8');
+    const cmdConnection = await odbcRuntime.connect('DSN=' + dsn + '; charset=UTF8');
     try {
       if (param === 'l' || !param) {
         const data2 = await cmdConnection.query("SELECT ven_remitos_cabecera.fecha,forma_de_pago.descripcion, ven_remitos_cabecera.total, es_datos_entregas.forma_pago, es_horarios.hora_desde, clientes.razon_social, ven_remitos_cabecera.nrotransaccion , es_datos_entregas.direccion_entrega  FROM ven_remitos_cabecera, es_datos_entregas,  es_horarios, forma_de_pago ,clientes WHERE (ven_remitos_cabecera.transaccion = es_datos_entregas.transaccion ) and  (ven_remitos_cabecera.transaccion = es_datos_entregas.transaccion )and  ( ven_remitos_cabecera.letra = es_datos_entregas.letra ) and( ven_remitos_cabecera.nrotransaccion = es_datos_entregas.nrotransaccion ) and  ( ven_remitos_cabecera.ptodeventa = es_datos_entregas.ptodeventa ) and  ( es_horarios.cod_horario = es_datos_entregas.cod_horario) and( forma_de_pago.codigo = es_datos_entregas.forma_pago )   and( ven_remitos_cabecera.cliente = clientes.codigo )  and (  es_horarios.fecha > DateAdd(day,-1,GetDate() )) order by es_horarios.hora_desde ;  ");
