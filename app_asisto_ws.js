@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.06  08/08/2026   */
+/*version: 4.04.07  08/08/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.06 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.07 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Multi-sesión usa Worker Threads. Forzamos ws a no cargar sus aceleradores
@@ -4722,6 +4722,61 @@ function stopMultiWorkerRecord(record, reason = 'stop') {
   ]).catch(() => {});
 }
 
+async function restartWholeMultiSessionProcess(state, request = {}) {
+  if (!state || state.globalRestartInFlight) return;
+  state.globalRestartInFlight = true;
+  state.stopping = true;
+  try { if (state.timer) clearInterval(state.timer); } catch {}
+  state.timer = null;
+
+  const reason = String(request?.reason || 'panel_restart').trim() || 'panel_restart';
+  const requestedByKey = String(request?.key || '').trim();
+
+  try {
+    console.log(`[MULTI] reinicio GLOBAL solicitado por ${requestedByKey || '(worker)'} reason=${reason}; cerrando todas las sesiones...`);
+  } catch {}
+
+  const waits = [];
+  for (const record of state.workers.values()) {
+   if (!record?.worker) continue;
+
+    waits.push(new Promise((resolve) => {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+
+      record.globalRestartReady = done;
+
+      try {
+        record.worker.postMessage({
+          type: 'multi_prepare_global_restart',
+          reason,
+          requestedByKey
+        });
+      } catch {
+        done();
+      }
+
+      setTimeout(done, 4500);
+    }));
+  }
+
+  try { await Promise.allSettled(waits); } catch {}
+
+  try {
+    console.log('[MULTI] sesiones cerradas para reinicio global; saliendo para que el runner reinicie app_asisto_ws');
+  } catch {}
+
+  try { releaseSingleInstanceLock(); } catch {}
+  setTimeout(() => {
+    try { process.exit(getSupervisorRestartExitCode()); } catch {}
+  }, 150);
+}
+
+
 function startMultiWorkerRecord(state, session, isPrimary) {
   const hash = hashMultiSessionDefinition(session);
   const old = state.workers.get(session.key);
@@ -4736,7 +4791,8 @@ function startMultiWorkerRecord(state, session, isPrimary) {
     startedAt: 0,
     restartCount: 0,
     isPrimary: !!isPrimary,
-     exitScope: '',
+    exitScope: '',
+    globalRestartReady: null,
   };
   record.session = session;
   record.hash = hash;
@@ -4773,6 +4829,29 @@ function startMultiWorkerRecord(state, session, isPrimary) {
 
       if (type === 'multi_worker_exit_scope') {
         record.exitScope = String(message?.scope || '').trim().toLowerCase();
+        return;
+      }
+
+      if (type === 'multi_global_restart_request') {
+        // Reiniciar app_asisto_ws completo: supervisor + TODAS las sesiones.
+        // Se difiere unos ms para que el worker que consumió la acción alcance
+        // a guardar result en wa_wweb_actions antes de comenzar el cierre.
+        setTimeout(() => {
+          restartWholeMultiSessionProcess(state, {
+            reason: message?.reason || 'panel_restart',
+            key: message?.key || session.key
+          }).catch((e) => {
+            try { console.error('[MULTI] error reinicio global:', e?.stack || e?.message || e); } catch {}
+            try { process.exit(getSupervisorRestartExitCode()); } catch {}
+          });
+        }, 300);
+        return;
+      }
+
+      if (type === 'multi_worker_global_restart_ready') {
+        const done = record.globalRestartReady;
+        record.globalRestartReady = null;
+        if (typeof done === 'function') done();
         return;
       }
     } catch {}
@@ -4904,6 +4983,7 @@ async function runMultiSessionSupervisor(boot) {
     timer: null,
     primaryKey: '',
     primaryBootstrapReady: false,
+    globalRestartInFlight: false,
   };
   multiSessionSupervisorState = state;
 
@@ -5007,7 +5087,48 @@ async function runMultiSessionSupervisor(boot) {
 let store = null;
 let client = null;
 let clearAuthInFlight = false;
+let multiGlobalRestartCloseInFlight = false;
 
+if (ASISTO_MULTI_WORKER && parentPort) {
+  parentPort.on('message', (message) => {
+    if (String(message?.type || '') !== 'multi_prepare_global_restart') return;
+    if (multiGlobalRestartCloseInFlight) return;
+    multiGlobalRestartCloseInFlight = true;
+
+    (async () => {
+      const reason = String(message?.reason || 'panel_restart');
+      try { localWsPanelState = 'restarting'; } catch {}
+      try { await updateLockStateSafe('restarting'); } catch {}
+
+      // Cierre compartido para ambos motores:
+      // - Baileys: cierra socket WebSocket.
+      // - whatsapp-web.js: cierra Client/Puppeteer/Chromium con timeout y fallback.
+      clearRuntimeTimersForExit('multi_global_restart');
+      try { await closeWhatsappClientForProcessExit(client, 'multi_global_restart:' + reason, 2500); } catch {}
+      try { client = null; } catch {}
+      try { resetClientRuntimeFlags('multi_global_restart'); } catch {}
+
+      try { await Promise.race([forceReleaseLock('restarting'), timeoutPromise(1500, 'release_lock_timeout')]); } catch {}
+      try { isOwner = false; } catch {}
+      try { await Promise.race([disconnectMongoSafe('multi_global_restart'), timeoutPromise(2500, 'mongo_disconnect_timeout')]); } catch {}
+      try { releaseSingleInstanceLock(); } catch {}
+
+      try {
+        parentPort.postMessage({
+          type: 'multi_worker_global_restart_ready',
+          key: ASISTO_MULTI_SESSION_KEY
+        });
+      } catch {}
+    })().catch(() => {
+      try {
+        parentPort.postMessage({
+          type: 'multi_worker_global_restart_ready',
+          key: ASISTO_MULTI_SESSION_KEY
+        });
+      } catch {}
+    });
+  });
+}
 // =========================
 // LocalAuth helpers
 // =========================
@@ -5809,6 +5930,26 @@ async function restartScriptFromPanel(reason = 'panel_restart_script') {
 
     try { EscribirLog('[PROCESS_RESTART] inicio -> ' + restartReason, 'event'); } catch {}
     try { await pushHistory('process_restart', { reason: restartReason, pid: process.pid, exitCode, mode: restartMode, at: new Date().toISOString() }); } catch {}
+    // En modo multi-sesión un "Reiniciar" del panel reinicia app_asisto_ws COMPLETO,
+    // porque supervisor y sesiones viven en el mismo proceso Node.
+    // El supervisor coordina el cierre limpio de todos los transports antes de salir.
+    if (ASISTO_MULTI_WORKER && parentPort) {
+      try { localWsPanelState = 'restarting'; } catch {}
+      try { await updateLockStateSafe('restarting'); } catch {}
+      try {
+        parentPort.postMessage({
+          type: 'multi_global_restart_request',
+          reason: restartReason,
+          key: ASISTO_MULTI_SESSION_KEY
+        });
+        try { EscribirLog('[PROCESS_RESTART] reinicio global solicitado al supervisor multi-sesión', 'event'); } catch {}
+        return true;
+      } catch (e) {
+        restartInFlight = false;
+        try { EscribirLog('[PROCESS_RESTART] no se pudo solicitar reinicio global: ' + String(e?.message || e), 'error'); } catch {}
+        return false;
+      }
+    }
 
         // IMPORTANTE:
     // - task_runner: no lanzamos otro node.exe desde este proceso; salimos con exitCode=77
@@ -5830,19 +5971,7 @@ async function restartScriptFromPanel(reason = 'panel_restart_script') {
     try { await Promise.race([disconnectMongoSafe('panel_restart'), timeoutPromise(3000, 'mongo_disconnect_timeout')]); } catch {}
     try { releaseSingleInstanceLock(); } catch {}
 
-    // En multi-sesión, el botón Reiniciar pertenece a ESTA sesión/worker.
-    // Avisamos al supervisor para que un exitCode=77 del primario SDG no provoque
-    // el reinicio global de CARICO/MSM/PRUEBAS.
-    if (ASISTO_MULTI_WORKER) {
-      try {
-        parentPort?.postMessage({
-          type: 'multi_worker_exit_scope',
-          scope: 'worker',
-          reason: restartReason,
-          key: ASISTO_MULTI_SESSION_KEY
-        });
-      } catch {}
-    }
+
 
     try { EscribirLog('[PROCESS_RESTART] modo=' + restartMode + ' saliendo con exitCode=' + exitCode + ' pid=' + process.pid, 'event'); } catch {}
     setTimeout(() => {
@@ -8988,6 +9117,31 @@ async function processIncomingAsistoMessage(message, source) {
       try { console.log('[admin-command] /e ignorado: remitente no autorizado. No se llama al API principal. from=' + String(message?.from || '')); } catch {}
       try { EscribirLog('[admin-command] /e ignorado: remitente no autorizado. No se llama al API principal. from=' + String(message?.from || ''), 'event'); } catch {}
     }
+    return;
+  }
+
+  // PAUSA DE SESIÓN: antes sólo detenía ConsultaApiMensajes (salientes).
+  // También debe cortar los mensajes entrantes para que no lleguen a API/ChatGPT
+  // ni generen respuestas mientras el panel muestra la sesión pausada.
+  try { await pollActionsOnce(); } catch {}
+  let incomingPaused = false;
+  try {
+    incomingPaused =
+      lastPolicyBlocked === true ||
+      String(localWsPanelState || '').toLowerCase() === 'paused' ||
+      await isWwebMessagesBlockedSafe();
+  } catch {
+    incomingPaused =
+      lastPolicyBlocked === true ||
+      String(localWsPanelState || '').toLowerCase() === 'paused';
+  }
+
+  if (incomingPaused) {
+    const pauseLog = '[PAUSE] mensaje entrante ignorado tenant=' + String(tenantId || '') +
+      ' from=' + String(message?.from || '') +
+      ' source=' + String(source || 'message');
+    try { console.log(pauseLog); } catch {}
+    try { EscribirLog(pauseLog, 'event'); } catch {}
     return;
   }
 
