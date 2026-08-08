@@ -1,11 +1,11 @@
 /*script:app_asisto*/
-/*version: 4.04.08  08/08/2026   */
+/*version: 4.04.09  08/08/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.08 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.09 file=${__filename} pid=${process.pid}`);
 } catch {}
 
-// Multi-sesión usa Worker Threads. Forzamos ws a no cargar sus aceleradores
-// nativos opcionales para evitar crashes N-API/V8 entre isolates.
+// Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
+// para evitar dependencias N-API innecesarias en las sesiones.
 process.env.WS_NO_BUFFER_UTIL = '1';
 process.env.WS_NO_UTF_8_VALIDATE = '1';
 
@@ -39,16 +39,21 @@ class AsistoCompatMessageMedia {
 }
 let MessageMedia = AsistoCompatMessageMedia;
 
-const mongoose = require('mongoose');
+let mongoose = null;
+
+function getMongooseModule() {
+  if (mongoose) return mongoose;
+  mongoose = require('mongoose');
+  return mongoose;
+}
 
 const os = require('os');
 const crypto = require('crypto');
 const express = require('express');
-const { body, validationResult } = require('express-validator');
 const socketIO = require('socket.io');
 const qrcode = require('qrcode');
 const http = require('http');
-// ODBC es opcional y nativo. En multi-sesión NO se carga al iniciar cada Worker;
+// ODBC es opcional y nativo. No se carga al iniciar cada proceso;
 // se carga únicamente cuando una función realmente necesita acceder al DSN.
 let odbc = null;
 let odbcLoadAttempted = false;
@@ -72,10 +77,9 @@ const axios = require('axios');
 
 const mime = require('mime-types');
 
-const utf8 = require('utf8');
+
 //const { OdbcError } = require('odbc');
-const nodemailer = require('nodemailer');
-const { eventNames } = require('process');
+
 const fs = require('fs');
 const path = require('path');
 const { spawn, fork } = require('child_process');
@@ -279,7 +283,41 @@ class BaileysCompatClient extends EventEmitter {
     this._contacts = new Map();
     this._lidToPn = new Map();
     this._pnToLid = new Map();
-    this._maxMessagesPerChat = 100;
+
+    // Cache sólo para compatibilidad reciente (confirmaciones, ACK y fetchMessages).
+    // Antes estos Maps podían crecer durante toda la vida del proceso.
+    this._maxMessageCacheKeys = 2000; // ~1000 mensajes si cada uno usa 2 claves
+    this._maxMessagesPerChat = 30;    // el código actual consulta como máximo 15
+    this._maxChatsCached = 300;
+  }
+
+  _cacheMessageKey(key, value) {
+    const cacheKey = String(key || '').trim();
+    if (!cacheKey) return;
+
+    // Map conserva orden de inserción: delete+set refresca la entrada.
+    if (this._messageById.has(cacheKey)) this._messageById.delete(cacheKey);
+    this._messageById.set(cacheKey, value);
+
+    while (this._messageById.size > this._maxMessageCacheKeys) {
+      const oldest = this._messageById.keys().next().value;
+      if (oldest === undefined) break;
+      this._messageById.delete(oldest);
+    }
+  }
+
+  _cacheChatMessages(chatKey, list) {
+    const key = String(chatKey || '').trim();
+    if (!key) return;
+
+    if (this._messagesByChat.has(key)) this._messagesByChat.delete(key);
+    this._messagesByChat.set(key, list);
+
+    while (this._messagesByChat.size > this._maxChatsCached) {
+      const oldest = this._messagesByChat.keys().next().value;
+      if (oldest === undefined) break;
+      this._messagesByChat.delete(oldest);
+    }
   }
 
   async initialize() {
@@ -510,8 +548,9 @@ class BaileysCompatClient extends EventEmitter {
     const wrapped = this._wrapMessage(raw);
     const id = String(raw?.key?.id || '').trim();
     if (id) {
-      this._messageById.set(id, { raw, wrapped });
-      if (wrapped?.id?._serialized) this._messageById.set(wrapped.id._serialized, { raw, wrapped });
+      const cacheValue = { raw, wrapped };
+      this._cacheMessageKey(id, cacheValue);
+      if (wrapped?.id?._serialized) this._cacheMessageKey(wrapped.id._serialized, cacheValue);
     }
 
     const chatKey = baileysToJid(this._messageRemoteJid(raw));
@@ -521,7 +560,7 @@ class BaileysCompatClient extends EventEmitter {
       filtered.push(raw);
       filtered.sort((a, b) => Number(a?.messageTimestamp || 0) - Number(b?.messageTimestamp || 0));
       while (filtered.length > this._maxMessagesPerChat) filtered.shift();
-      this._messagesByChat.set(chatKey, filtered);
+      this._cacheChatMessages(chatKey, filtered);
     }
     return wrapped;
   }
@@ -3691,7 +3730,7 @@ var cant_lim = 0;
 var msg_lim = 'Continuar? S / N';
 var time_cad = 0;
 var mensajeCaducidadWatcherStarted = false;
-var email_err = "";
+
 var msg_cad = "";
 var msg_can = "";
 var bandera_msg = 1;
@@ -3699,11 +3738,7 @@ var jsonGlobal = [];   //1-json, 2 -i , 3-tel, 4-hora
 var json;
 var i_global = 0;
 var msg_body;
-var smtp;
-var email_usuario;
-var email_pas;
-var email_puerto;
-var email_saliente;
+
 var msg_errores;
 var nom_chatbot;
 
@@ -3897,6 +3932,10 @@ async function ensureMongo() {
       }
       return ok;
     }
+    // Desde acá sólo llegamos si esta sesión necesita Mongo directo.
+    // Las sesiones que usan Control API HTTPS no cargan mongoose en memoria.
+    getMongooseModule();
+
     if (mongoIdleDisconnectPromise) {
       try { await mongoIdleDisconnectPromise; } catch {}
     }
@@ -5264,7 +5303,7 @@ async function clearRemoteAuthStoreSafe(clientId) {
     result.attempted = true;
     if (!store) {
         const MongoStoreCtor = await ensureWwebMongoStoreLoaded();
-        store = new MongoStoreCtor({ mongoose });
+        store = new MongoStoreCtor({ mongoose: getMongooseModule() });
       }
 
     const candidates = [
@@ -5355,7 +5394,7 @@ async function createClientIfNeeded(opts = {}) {
     if (useRemoteAuth) {
       if (!store) {
         const MongoStoreCtor = await ensureWwebMongoStoreLoaded();
-        store = new MongoStoreCtor({ mongoose });
+        store = new MongoStoreCtor({ mongoose: getMongooseModule() });
       }
     }
 
@@ -9449,7 +9488,7 @@ telefonoFrom = telefonoFromApi;
          if (resp.status < 200 || resp.status >= 300) {
            const detalle = typeof json === 'string' ? json : JSON.stringify(json);
            EscribirLog("Error 02 ApiWhatsapp - Response ERROR HTTP " + resp.status + " " + detalle, "error");
-           EnviarEmail("ApiWhatsapp - Response ERROR ", detalle);
+           
            if (msg_errores) await safeSend(message.from, msg_errores);
            return "error";
          }
@@ -9484,7 +9523,7 @@ telefonoFrom = telefonoFromApi;
      const detalle = "Error 03 Chatbot Error " + detalleTecnico + " " + JSON.stringify(jsonTexto);
      console.log(detalle);
      EscribirLog(detalle, "error");
-     EnviarEmail("Chatbot Error ", detalle);
+    
      if (msg_errores) await safeSend(message.from, msg_errores);
      return "error";
    }
@@ -9754,7 +9793,7 @@ client.on('authenticated', async () => {
 client.on('auth_failure', async function(session) {
   telefono_qr = "";
   io.emit('message', 'Auth failure');
-  EnviarEmail('Chatbot error Auth failure','Auth failure: '+ String(session || '') + ' ' + client);
+ 
   EscribirLog('Error 04 - Chatbot error Auth failure', String(session || ''), "error");
   updateLockStateSafe('auth_failure').catch(()=>{});
   clearAuthReadyWatchdog('auth_failure');
@@ -9781,7 +9820,7 @@ client.on('disconnected', async (reason) => {
   try { if (compraEntregaConnection && typeof compraEntregaConnection.close === 'function') await compraEntregaConnection.close(); } catch {}
   try { compraEntregaConnection = null; } catch {}
   io.emit('message', 'Whatsapp Desconectado!');
-  EnviarEmail('Chatbot Desconectado ','Desconectando...'+client);
+
   EscribirLog('Chatbot Desconectado ','Desconectando...',"event");
   updateLockStateSafe('disconnected').catch(()=>{});
 
@@ -9906,7 +9945,7 @@ async function procesar_mensaje(json, message){
     if(l_json[i].cod_error){ 
       var mensaje = l_json[i].msj_error;
       EscribirLog('Error 05 - procesar_mensaje() devuelve cod_error API ',"error");
-      EnviarEmail('ChatBot Api error ',mensaje);
+     
     }else{
       var mensaje =  l_json[i].Respuesta;
     }
@@ -10036,12 +10075,7 @@ function RecuperarJsonConfMensajes(){
   try { jsonError = JSON.parse(fs.readFileSync('configuracion_errores.json')); } catch {}
   try {
     if (jsonError && jsonError.configuracion) {
-      email_err = jsonError.configuracion.email_err;
-      smtp = jsonError.configuracion.smtp;
-      email_usuario = jsonError.configuracion.user;
-      email_pas = jsonError.configuracion.pass;
-      email_puerto = jsonError.configuracion.puerto;
-      email_saliente = jsonError.configuracion.email_sal;
+ 
       msg_errores = jsonError.configuracion.msg_error;
     }
   } catch {}
@@ -10061,40 +10095,6 @@ function RecuperarJsonConfMensajes(){
 }
 
 
-async function EnviarEmail(subjet,texto){
-/*
-  texto = JSON.stringify(texto);
-  console.log("email "+email_err);
-  console.log("email2 "+subjet);
-  console.log("email3 "+texto);
-
-  subjet= nom_chatbot +" - "+subjet;
-
-  let testAccount = await nodemailer.createTestAccount();
-
-  let transporter = nodemailer.createTransport({
-    host: smtp,
-    port: email_puerto,
-    secure: false, // true for 465, false for other ports
-    auth: {
-      user: email_usuario, // generated ethereal user
-      pass: email_pas, // generated ethereal password
-    },
-  });
-  
-  let info = await transporter.sendMail({
-    from: email_saliente, // sender address
-    to: email_err, // list of receivers
-    subject: subjet, // Subject line
-    text: texto, // plain text body
-    html: texto, // html body
-  });
-
-  console.log("Message sent: %s", info.messageId);
-  
-  console.log("Preview URL: %s", nodemailer.getTestMessageUrl(info));
- */
-}
 
 ////////////////////////////////////////////////////////////////////////////////////////////
 //  FUNCION PARA MANTENER EL JSON GLOBAL CON LOS TELEFONOS Y MENSAJES QUE VAN INGRESANDO - FUNCION
