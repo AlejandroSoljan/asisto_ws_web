@@ -1,189 +1,10 @@
 /*script:app_asisto*/
-/*version: 4.04.04  07/08/2026   */
-/*
- * Bootstrap mínimo de reparación.
- * Usa SOLO módulos built-in para poder reparar node_modules antes de cargar
- * Express/Mongoose/whatsapp-web.js/Puppeteer/Baileys.
- */
-const __bootFs = require('fs');
-const __bootPath = require('path');
-const { spawnSync: __bootSpawnSync } = require('child_process');
-
-const ASISTO_SCRIPT_VERSION = '4.04.04';
+/*version: 4.04.05  07/08/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.05 file=${__filename} pid=${process.pid}`);
 } catch {}
 
-function __bootResolveLocal(packageName) {
-  try {
-    return require.resolve(String(packageName || ''), { paths: [__dirname] });
-  } catch {
-    return '';
-  }
-}
 
-function __bootSleepSync(ms) {
-  try {
-    const sab = new SharedArrayBuffer(4);
-    const ia = new Int32Array(sab);
-    Atomics.wait(ia, 0, 0, Math.max(1, Number(ms) || 1));
-  } catch {}
-}
-
-function __bootFindNpmCli() {
-  const exeDir = __bootPath.dirname(process.execPath);
-  const candidates = [
-    __bootPath.join(exeDir, 'node_modules', 'npm', 'bin', 'npm-cli.js'),
-    __bootPath.join(exeDir, '..', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
-    __bootPath.join(process.env.APPDATA || '', 'npm', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
-  ].filter(Boolean);
-
-  for (const candidate of candidates) {
-    try {
-      if (__bootFs.existsSync(candidate)) return candidate;
-    } catch {}
-  }
-  return '';
-}
-
-function __bootRunNpmInstall() {
-  const args = ['install', '--omit=dev', '--no-audit', '--no-fund'];
-  const npmCli = __bootFindNpmCli();
-
-  if (npmCli) {
-    return __bootSpawnSync(
-      process.execPath,
-      [npmCli, ...args],
-      {
-        cwd: __dirname,
-        encoding: 'utf8',
-        windowsHide: true,
-        timeout: 10 * 60_000,
-      }
-    );
-  }
-
-  const comspec = String(process.env.ComSpec || process.env.COMSPEC || 'cmd.exe');
-  return __bootSpawnSync(
-    comspec,
-    ['/d', '/s', '/c', 'npm', ...args],
-    {
-      cwd: __dirname,
-      encoding: 'utf8',
-      windowsHide: true,
-      timeout: 10 * 60_000,
-    }
-  );
-}
-const __ASISTO_BOOT_CRITICAL_PACKAGES = [
-  'mongoose',
-  'express',
-  'express-validator',
-  'socket.io',
-  'qrcode',
-  'node-fetch',
-  'express-fileupload',
-  'axios',
-  'mime-types',
-  'utf8',
-  'nodemailer',
-  'baileys'
-];
-
-function __bootFindMissingCriticalDependencies() {
-  const missing = [];
-  for (const packageName of __ASISTO_BOOT_CRITICAL_PACKAGES) {
-    if (!__bootResolveLocal(packageName)) missing.push(packageName);
-  }
-  return missing;
-}
-
-
-function __bootRepairNodeModulesIfNeeded() {
-  let missing = __bootFindMissingCriticalDependencies();
-  if (!missing.length) return;
-
-  // Sólo intentamos reparar si existe package.json en la instalación.
-  const packageJson = __bootPath.join(__dirname, 'package.json');
-  if (!__bootFs.existsSync(packageJson)) {
-    console.error('[BOOT_REPAIR] faltan dependencias pero no existe package.json: ' + missing.join(', '));
-    return;
-  }
-
-  const lockPath = __bootPath.join(__dirname, 'node_modules', '.asisto-bootstrap-repair.lock');
-  let fd = null;
-
-  try {
-    try { __bootFs.mkdirSync(__bootPath.dirname(lockPath), { recursive: true }); } catch {}
-
-    const deadline = Date.now() + 10 * 60_000;
-    while (Date.now() < deadline) {
-      missing = __bootFindMissingCriticalDependencies();
-      if (!missing.length) return;
-
-      try {
-        fd = __bootFs.openSync(lockPath, 'wx');
-        break;
-      } catch (e) {
-        if (e?.code !== 'EEXIST') throw e;
-
-        // Lock viejo: si tiene más de 15 minutos lo eliminamos.
-        try {
-          const st = __bootFs.statSync(lockPath);
-          if ((Date.now() - st.mtimeMs) > 15 * 60_000) {
-            __bootFs.unlinkSync(lockPath);
-            continue;
-          }
-        } catch {}
-
-        __bootSleepSync(500);
-      }
-    }
-
-    if (fd === null) {
-      console.error('[BOOT_REPAIR] timeout esperando lock de reparación de node_modules');
-      return;
-    }
-
-    missing = __bootFindMissingCriticalDependencies();
-    if (!missing.length) return;
-
-    console.log('[BOOT_REPAIR] faltan dependencias críticas: ' + missing.join(', ') + '; ejecutando npm install --omit=dev ...');
-
-
-    const result = __bootRunNpmInstall();
-    const status = Number(result?.status);
-
-    if (result?.stdout && String(result.stdout).trim()) {
-      console.log('[BOOT_REPAIR] npm stdout:', String(result.stdout).trim());
-    }
-    if (result?.stderr && String(result.stderr).trim()) {
-      console.log('[BOOT_REPAIR] npm stderr:', String(result.stderr).trim());
-    }
-
-    if (result?.error) {
-      console.error('[BOOT_REPAIR] npm error:', result.error?.message || result.error);
-    }
-
-    missing = __bootFindMissingCriticalDependencies();
-    if (status !== 0 || missing.length) {
-      console.error(
-        `[BOOT_REPAIR] reparación incompleta status=${Number.isFinite(status) ? status : 'null'} faltantes=${missing.join(', ') || '(ninguno)'}`
-      );    return;
-    }
-
-    console.log('[BOOT_REPAIR] node_modules reparado correctamente');
-  } catch (e) {
-    try { console.error('[BOOT_REPAIR] error:', e?.stack || e?.message || e); } catch {}
-  } finally {
-    try { if (fd !== null) __bootFs.closeSync(fd); } catch {}
-    try { if (fd !== null) __bootFs.unlinkSync(lockPath); } catch {}
-  }
-}
-
-__bootRepairNodeModulesIfNeeded();
-
- 
 
 const dns = require("dns");
 
@@ -249,12 +70,8 @@ const { Worker, isMainThread, threadId, parentPort } = require('worker_threads')
 let mongoConnectingPromise = null;
 
 
-// Un único lock para CUALQUIER npm install sobre este C:\Asisto compartido.
-// Evita que Baileys, reparación de wwebjs o auto-update modifiquen node_modules
-// al mismo tiempo desde workers diferentes.
-const ASISTO_NPM_INSTALL_LOCK_PATH = path.join(__dirname, 'node_modules', '.asisto-npm-install.lock');
 let wwebJsRuntimeLoadPromise = null;
-let wwebJsRepairPromise = null;
+
 
 function tryLoadWwebJsRuntimeSync() {
   const wweb = require('whatsapp-web.js');
@@ -272,111 +89,17 @@ function tryLoadWwebJsRuntimeSync() {
   return true;
 }
 
-async function acquireSharedNpmInstallLock(timeoutMs = 10 * 60_000) {
-  try { fs.mkdirSync(path.dirname(ASISTO_NPM_INSTALL_LOCK_PATH), { recursive: true }); } catch {}
-  const deadline = Date.now() + Math.max(5000, Number(timeoutMs) || 10 * 60_000);
 
-  while (Date.now() < deadline) {
-    try {
-      return fs.openSync(ASISTO_NPM_INSTALL_LOCK_PATH, 'wx');
-    } catch (e) {
-      if (e?.code !== 'EEXIST') throw e;
-      await new Promise((resolve) => setTimeout(resolve, 500));
-    }
-  }
 
-  throw new Error('npm_install_lock_timeout');
-}
 
-async function runSharedNpmInstall(args = [], opts = {}, label = 'npm_install') {
-  let lockFd = null;
-  try {
-    lockFd = await acquireSharedNpmInstallLock(Number(opts.timeout || 10 * 60_000));
-    try {
-      const msg = `[NPM_LOCK] inicio label=${label}`;
-      console.log(msg);
-      if (typeof EscribirLog === 'function') EscribirLog(msg, 'event');
-    } catch {}
-
-    return await runCommand('npm', args, opts);
-  } finally {
-    try {
-      const msg = `[NPM_LOCK] fin label=${label}`;
-      console.log(msg);
-      if (typeof EscribirLog === 'function') EscribirLog(msg, 'event');
-    } catch {}
-    try { if (lockFd !== null) fs.closeSync(lockFd); } catch {}
-    try { if (lockFd !== null) fs.unlinkSync(ASISTO_NPM_INSTALL_LOCK_PATH); } catch {}
-  }
-}
-
-async function repairWwebJsDependenciesAutomatically() {
-  if (wwebJsRepairPromise) return wwebJsRepairPromise;
-
-  wwebJsRepairPromise = (async () => {
-    let lockFd = null;
-    try {
-      lockFd = await acquireSharedNpmInstallLock(10 * 60_000);
-
-      // Otro worker pudo haber reparado mientras esperábamos el lock.
-      try {
-        tryLoadWwebJsRuntimeSync();
-        return true;
-      } catch {}
-
-      const msg = '[WWEBJS] dependencias incompletas; ejecutando npm install --omit=dev para reparar node_modules';
-      try { console.log(msg); } catch {}
-      try { if (typeof EscribirLog === 'function') EscribirLog(msg, 'event'); } catch {}
-
-      const result = await runCommand(
-        'npm',
-        ['install', '--omit=dev', '--no-audit', '--no-fund'],
-        { cwd: __dirname, timeout: 10 * 60_000 }
-      );
-
-      if (result?.stderr && String(result.stderr).trim()) {
-        try { console.log('[WWEBJS] npm stderr:', String(result.stderr).trim()); } catch {}
-      }
-
-      return true;
-    } finally {
-      try { if (lockFd !== null) fs.closeSync(lockFd); } catch {}
-      try { if (lockFd !== null) fs.unlinkSync(ASISTO_NPM_INSTALL_LOCK_PATH); } catch {}
-    }
-  })();
-
-  try {
-    return await wwebJsRepairPromise;
-  } finally {
-    wwebJsRepairPromise = null;
-  }
-}
-
-async function ensureWwebJsRuntimeLoaded(options = {}) {
+async function ensureWwebJsRuntimeLoaded() {
   if (WwebClient && LocalAuth && RemoteAuth) return true;
   if (wwebJsRuntimeLoadPromise) return wwebJsRuntimeLoadPromise;
 
-  const allowRepair = options.repair !== false;
-
-  wwebJsRuntimeLoadPromise = (async () => {
-    try {
-      tryLoadWwebJsRuntimeSync();
-      return true;
-    } catch (firstError) {
-      if (!allowRepair) throw firstError;
-
-      const detail = String(firstError?.message || firstError || '').trim();
-      try { console.log('[WWEBJS] carga inicial falló:', detail); } catch {}
-      try { if (typeof EscribirLog === 'function') EscribirLog('[WWEBJS] carga inicial falló: ' + detail, 'error'); } catch {}
-
-      await repairWwebJsDependenciesAutomatically();
-
-      // CommonJS elimina del cache los módulos que fallaron al cargar; reintentamos
-      // una vez después de que npm haya reparado las dependencias transitivas.
-      tryLoadWwebJsRuntimeSync();
-      return true;
-    }
-  })().catch((e) => {
+  wwebJsRuntimeLoadPromise = Promise.resolve().then(() => {
+    tryLoadWwebJsRuntimeSync();
+    return true;
+  }).catch((e) => {
     wwebJsRuntimeLoadPromise = null;
     throw e;
   });
@@ -387,16 +110,8 @@ async function ensureWwebJsRuntimeLoaded(options = {}) {
 async function ensureWwebMongoStoreLoaded() {
   if (MongoStore) return MongoStore;
   await ensureWwebJsRuntimeLoaded();
-
-  try {
-    const mod = require('wwebjs-mongo');
-    MongoStore = mod?.MongoStore || mod?.default?.MongoStore || null;
-  } catch (firstError) {
-    await repairWwebJsDependenciesAutomatically();
-    const mod = require('wwebjs-mongo');
-    MongoStore = mod?.MongoStore || mod?.default?.MongoStore || null;
-  }
-
+  const mod = require('wwebjs-mongo');
+  MongoStore = mod?.MongoStore || mod?.default?.MongoStore || null;
   if (typeof MongoStore !== 'function') throw new Error('wwebjs_mongo_store_missing');
   return MongoStore;
 }
@@ -410,7 +125,7 @@ async function ensureWwebMongoStoreLoaded() {
 //   reescribir la lógica de negocio.
 // ============================================================================
 let baileysModulePromise = null;
-let baileysInstallPromise = null;
+
 const BAILEYS_NPM_PACKAGE = 'baileys';
 const BAILEYS_NPM_VERSION = '7.0.0-rc14';
 
@@ -457,116 +172,19 @@ async function importInstalledBaileysModule() {
   throw err;
 }
 
-async function ensureBaileysInstalledAutomatically() {
-  if (baileysInstallPromise) return baileysInstallPromise;
 
-  baileysInstallPromise = (async () => {
-    const spec = `${BAILEYS_NPM_PACKAGE}@${BAILEYS_NPM_VERSION}`;
-    let installLockFd = null;
-
-    try {
-        try { fs.mkdirSync(path.dirname(ASISTO_NPM_INSTALL_LOCK_PATH), { recursive: true }); } catch {}
-
-      const deadline = Date.now() + 10 * 60_000;
-      while (!installLockFd && Date.now() < deadline) {
-        // Si otro worker ya terminó, no ejecutar npm otra vez.
-        if (resolveInstalledBaileysEntry(BAILEYS_NPM_PACKAGE)) {
-          return true;
-        }
-        try {
-          installLockFd = fs.openSync(ASISTO_NPM_INSTALL_LOCK_PATH, 'wx');
-        } catch (e) {
-          if (e?.code !== 'EEXIST') throw e;
-          await new Promise((resolve) => setTimeout(resolve, 500));
-        }
-      }
-
-      if (!installLockFd) throw new Error('baileys_install_lock_timeout');
-
-      // Revalidar después de obtener el lock: otro worker pudo haber instalado justo antes.
-      if (resolveInstalledBaileysEntry(BAILEYS_NPM_PACKAGE)) return true;
-
-      const logPrefix = `[BAILEYS] dependencia faltante; instalando automáticamente ${spec}`;
-      try { console.log(logPrefix); } catch {}
-      try { EscribirLog(logPrefix, 'event'); } catch {}
-
-      const result = await runCommand(
-        'npm',
-        [
-          'install',
-          spec,
-          '--omit=dev',
-          '--no-save',
-          '--package-lock=false',
-          '--no-audit',
-          '--no-fund'
-        ],
-        {
-          cwd: __dirname,
-          timeout: 10 * 60_000
-        }
-      );
-
-      const okMsg = `[BAILEYS] instalación automática finalizada ${spec}`;
-      try { console.log(okMsg); } catch {}
-      try { EscribirLog(okMsg, 'event'); } catch {}
-
-      if (result?.stderr && String(result.stderr).trim()) {
-        try { console.log('[BAILEYS] npm stderr:', String(result.stderr).trim()); } catch {}
-      }
-
-      return true;
-    } catch (e) {
-      const detail = String(e?.stderr || e?.message || e || '').trim();
-      const failMsg = `[BAILEYS] error instalando automáticamente ${spec}: ${detail || 'npm_install_failed'}`;
-      try { console.error(failMsg); } catch {}
-      try { EscribirLog(failMsg, 'error'); } catch {}
-      throw new Error(`baileys_auto_install_failed:${detail || 'npm_install_failed'}`);
-    } finally {
-      try { if (installLockFd !== null) fs.closeSync(installLockFd); } catch {}
-      try { if (installLockFd !== null) fs.unlinkSync(ASISTO_NPM_INSTALL_LOCK_PATH); } catch {}
-    }
-  })();
-
-  try {
-    return await baileysInstallPromise;
-  } finally {
-    baileysInstallPromise = null;
-  }
-}
 
 async function loadBaileysModule() {
   if (!baileysModulePromise) {
-    baileysModulePromise = (async () => {
-      try {
-        return await importInstalledBaileysModule();
-      } catch (loadError) {
-        // Si el paquete YA existe pero falló su import, mostrar el error real y no
-        // entrar en un ciclo de npm install + restart.
-        if (loadError?.code !== 'BAILEYS_MODULE_NOT_INSTALLED') {
-          throw loadError;
-        }
-
-        // Primera ejecución de una PC que todavía no tiene Baileys: instalarlo.
-        await ensureBaileysInstalledAutomatically();
-
-        // Baileys 7 es ESM. Si el import bare-specifier falló antes de instalarlo,
-        // Node puede conservar resolución/caché del loader durante este proceso.
-        // Reiniciamos el proceso para que el próximo arranque descubra node_modules
-        // desde cero. El runner de Asisto interpreta exitCode 77 y lo vuelve a iniciar.
-        const restartMsg = `[BAILEYS] instalado ${BAILEYS_NPM_PACKAGE}@${BAILEYS_NPM_VERSION}; reiniciando proceso para cargar el módulo ESM`;
-        try { console.log(restartMsg); } catch {}
-        try { if (typeof EscribirLog === 'function') EscribirLog(restartMsg, 'event'); } catch {}
-
-        await fastExitForSupervisorRestart('baileys_installed_restart', getSupervisorRestartExitCode());
-
-        // fastExit programa process.exit(). Dejamos esta promesa pendiente para que
-        // initialize() no siga y no registre un falso error mientras sale el proceso.
-        return await new Promise(() => {});
-      }
-    })().catch((e) => {
-      // Si npm o el import fallan realmente, permitimos reintentar en el próximo ciclo/reinicio.
+    baileysModulePromise = importInstalledBaileysModule().catch((e) => {
       baileysModulePromise = null;
+      if (e?.code === 'BAILEYS_MODULE_NOT_INSTALLED') {
+        const err = new Error(
+          `Baileys no está instalado en node_modules. Debe estar declarado en package.json como ${BAILEYS_NPM_PACKAGE}@${BAILEYS_NPM_VERSION}.`
+        );
+        err.code = 'BAILEYS_MODULE_NOT_INSTALLED';
+        throw err;
+      }
       throw e;
     });
   }
@@ -3728,7 +3346,8 @@ async function autoUpdateForceTargetTagOnBoot(reason = 'boot_target_tag_force') 
     const needsNpm = changedFiles.some((name) => /(^|\/)(package\.json|package-lock\.json)$/i.test(name));
     if (needsNpm) {
       autoUpdateLog('[AUTO_UPDATE] package*.json cambió, ejecutando npm install --omit=dev', 'event');
-      await runSharedNpmInstall(['install', '--omit=dev'], { cwd: repoPath, timeout: 10 * 60_000 }, 'auto_update');
+      +      await runCommand('npm', ['install', '--omit=dev'], { cwd: repoPath, timeout: 10 * 60_000 });
+
     }
   }
 
@@ -3803,7 +3422,7 @@ async function autoUpdateCheckAndApply(reason = 'interval') {
       const needsNpm = changedFiles.some((name) => /(^|\/)(package\.json|package-lock\.json)$/i.test(name));
       if (needsNpm) {
         autoUpdateLog('[AUTO_UPDATE] package*.json cambió, ejecutando npm install --omit=dev', 'event');
-        await runSharedNpmInstall(['install', '--omit=dev'], { cwd: repoPath, timeout: 10 * 60_000 }, 'auto_update');
+        await runCommand('npm', ['install', '--omit=dev'], { cwd: repoPath, timeout: 10 * 60_000 });
       }
     }
 
@@ -5333,20 +4952,9 @@ async function runMultiSessionSupervisor(boot) {
        try { console.log('boot_target_tag_force auto-update error:', e?.message || e); } catch {}
       try { EscribirLog('boot_target_tag_force auto-update error: ' + String(e?.message || e), 'error'); } catch {}
     }
-    // Si un npm/update de arranque dejó dependencias directas faltantes, no soltamos
-    // todavía los otros workers: reiniciamos para que el BOOT_REPAIR las restaure.
+ 
     if (ASISTO_MULTI_WORKER && ASISTO_MULTI_PRIMARY_WORKER) {
-      try {
-        const missingAfterBootstrap = __bootFindMissingCriticalDependencies();
-        if (missingAfterBootstrap.length) {
-          const depMsg = `[MULTI] primario detectó dependencias faltantes después del bootstrap: ${missingAfterBootstrap.join(', ')}; reiniciando para reparación`;
-          console.error(depMsg);
-          try { EscribirLog(depMsg, 'error'); } catch {}
-          await fastExitForSupervisorRestart('MULTI_BOOTSTRAP_DEPENDENCY_REPAIR', getSupervisorRestartExitCode());
-          return;
-        }
-      } catch {}
-
+      
       try {
         parentPort?.postMessage({
           type: 'multi_primary_bootstrap_ready',
