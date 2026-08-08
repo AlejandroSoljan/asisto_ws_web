@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.07  08/08/2026   */
+/*version: 4.04.08  08/08/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.07 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.08 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Multi-sesión usa Worker Threads. Forzamos ws a no cargar sus aceleradores
@@ -78,8 +78,11 @@ const nodemailer = require('nodemailer');
 const { eventNames } = require('process');
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('child_process');
-const { Worker, isMainThread, threadId, parentPort } = require('worker_threads');
+const { spawn, fork } = require('child_process');
+// Multi-sesión se ejecuta con procesos Node hijos, no Worker Threads.
+// Mantener estos valores evita tocar el resto de la lógica que distingue supervisor/hijo.
+const isMainThread = true;
+const threadId = 0;
 let mongoConnectingPromise = null;
 
 
@@ -822,17 +825,35 @@ let authFailureHandling = false;
 const AR_TZ = 'America/Argentina/Cordoba';
 
 // ============================================================================
-// Multi-sesión real en un único proceso Node usando Worker Threads.
-// - El hilo principal actúa como supervisor cuando configuracion.json contiene
+// Multi-sesión real supervisada por un único proceso padre usando procesos Node hijos.
+// - El proceso principal actúa como supervisor cuando configuracion.json contiene
 //   multi_sessions / multiSessions.
-// - Cada worker ejecuta ESTE MISMO archivo, pero con globals aislados por sesión.
-// - Esto permite varios tenantId y/o varios números sin duplicar carpetas ni Chrome
-//   cuando las sesiones usan Baileys.
+// - Cada sesión ejecuta ESTE MISMO archivo en un proceso aislado.
+// - El aislamiento por proceso es necesario porque ODBC es un addon N-API nativo;
+//   cargarlo en varios Worker Threads del mismo PID puede provocar crashes fatales de V8.
+// - Baileys y whatsapp-web.js mantienen exactamente la misma lógica por sesión.
 // ============================================================================
 const ASISTO_MULTI_WORKER = String(process.env.ASISTO_MULTI_WORKER || '').trim() === '1';
 const ASISTO_MULTI_SESSION_KEY = String(process.env.ASISTO_MULTI_SESSION_KEY || '').trim();
 const ASISTO_MULTI_PRIMARY_WORKER = String(process.env.ASISTO_MULTI_PRIMARY_WORKER || '').trim() === '1';
 let multiSessionSupervisorState = null;
+
+
+function sendMultiSupervisorMessage(message) {
+  if (!ASISTO_MULTI_WORKER || typeof process.send !== 'function') return false;
+  try {
+    process.send(message);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function onMultiSupervisorMessage(handler) {
+  if (!ASISTO_MULTI_WORKER || typeof process.on !== 'function' || typeof process.send !== 'function') return false;
+  process.on('message', handler);
+  return true;
+}
 
 function sanitizeMultiSessionFilePart(value) {
   return String(value || 'session')
@@ -4715,11 +4736,38 @@ function createMultiWorkerEnv(session, isPrimary) {
 function stopMultiWorkerRecord(record, reason = 'stop') {
   if (!record || !record.worker) return Promise.resolve();
   record.intentionalStop = true;
-  try { console.log(`[MULTI] deteniendo ${record.session.key} reason=${reason}`); } catch {}
-  return Promise.race([
-    record.worker.terminate().catch(() => {}),
-    new Promise((resolve) => setTimeout(resolve, 4000))
-  ]).catch(() => {});
+  const child = record.worker;
+  try { console.log(`[MULTI] deteniendo ${record.session.key} pid=${child.pid || 0} reason=${reason}`); } catch {}
+
+  return new Promise((resolve) => {
+    let done = false;
+    let timer = null;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      if (timer) clearTimeout(timer);
+      resolve();
+    };
+
+    try { child.once('exit', finish); } catch {}
+
+    try {
+      if (child.connected && typeof child.send === 'function') {
+        child.send({ type: 'multi_stop_session', reason: String(reason || 'stop') });
+      } else {
+        child.kill();
+      }
+    } catch {
+      try { child.kill(); } catch {}
+    }
+
+    timer = setTimeout(() => {
+      try {
+        if (child.exitCode === null && child.signalCode === null) child.kill();
+      } catch {}
+      finish();
+    }, 5000);
+  });
 }
 
 async function restartWholeMultiSessionProcess(state, request = {}) {
@@ -4751,11 +4799,15 @@ async function restartWholeMultiSessionProcess(state, request = {}) {
       record.globalRestartReady = done;
 
       try {
-        record.worker.postMessage({
-          type: 'multi_prepare_global_restart',
-          reason,
-          requestedByKey
-        });
+        if (record.worker.connected && typeof record.worker.send === 'function') {
+          record.worker.send({
+            type: 'multi_prepare_global_restart',
+            reason,
+            requestedByKey
+          });
+        } else {
+          done();
+        }
       } catch {
         done();
       }
@@ -4801,10 +4853,9 @@ function startMultiWorkerRecord(state, session, isPrimary) {
   record.exitScope = '';
   record.startedAt = Date.now();
 
-  const worker = new Worker(__filename, {
+  const worker = fork(__filename, [], {
     env: createMultiWorkerEnv(session, isPrimary),
-    stdout: true,
-    stderr: true,
+    silent: true
   });
   record.worker = worker;
   state.workers.set(session.key, record);
@@ -4812,7 +4863,7 @@ function startMultiWorkerRecord(state, session, isPrimary) {
   pipeWorkerLines(worker.stdout, session.key, (line) => process.stdout.write(line));
   pipeWorkerLines(worker.stderr, session.key, (line) => process.stderr.write(line));
 
-  try { console.log(`[MULTI] worker iniciado key=${session.key} threadId=${worker.threadId} port=${session.port} engine=${session.engine || 'tenant_config'}`); } catch {}
+  try { console.log(`[MULTI] proceso iniciado key=${session.key} pid=${worker.pid || 0} port=${session.port} engine=${session.engine || 'tenant_config'}`); } catch {}
 
   worker.on('message', (message) => {
     try {
@@ -4859,7 +4910,7 @@ function startMultiWorkerRecord(state, session, isPrimary) {
 
 
   worker.on('error', (err) => {
-    try { console.error(`[MULTI] worker error key=${session.key}:`, err?.stack || err?.message || err); } catch {}
+    try { console.error(`[MULTI] proceso error key=${session.key}:`, err?.stack || err?.message || err); } catch {}
   });
 
   worker.on('exit', (code) => {
@@ -4869,7 +4920,7 @@ function startMultiWorkerRecord(state, session, isPrimary) {
     record.exitScope = '';
     if (record.isPrimary) state.primaryBootstrapReady = false;
 
-    try { console.log(`[MULTI] worker finalizó key=${session.key} code=${code} runtimeMs=${runtime} scope=${exitScope || 'default'}`); } catch {}
+    try { console.log(`[MULTI] proceso finalizó key=${session.key} code=${code} runtimeMs=${runtime} scope=${exitScope || 'default'}`); } catch {}
     if (state.stopping || record.intentionalStop || !state.desired.has(session.key)) return;
 
     // El worker primario es el único autorizado a tocar git. Si sale con el código
@@ -4998,7 +5049,7 @@ async function runMultiSessionSupervisor(boot) {
 (async function startAsistoWs() {
 
  // Si configuracion.json declara multi_sessions, el hilo principal NO abre una
-  // sesión WhatsApp propia: supervisa workers aislados que ejecutan este mismo archivo.
+  // sesión WhatsApp propia: supervisa procesos aislados que ejecutan este mismo archivo.
   try {
     if (isMainThread && !ASISTO_MULTI_WORKER) {
       const multiBoot = readBootstrapFromFile();
@@ -5049,11 +5100,10 @@ async function runMultiSessionSupervisor(boot) {
     if (ASISTO_MULTI_WORKER && ASISTO_MULTI_PRIMARY_WORKER) {
       
       try {
-        parentPort?.postMessage({
+        sendMultiSupervisorMessage({
           type: 'multi_primary_bootstrap_ready',
           key: ASISTO_MULTI_SESSION_KEY,
-          pid: process.pid,
-          threadId
+          pid: process.pid
         });
       } catch {}
     }
@@ -5089,9 +5139,19 @@ let client = null;
 let clearAuthInFlight = false;
 let multiGlobalRestartCloseInFlight = false;
 
-if (ASISTO_MULTI_WORKER && parentPort) {
-  parentPort.on('message', (message) => {
-    if (String(message?.type || '') !== 'multi_prepare_global_restart') return;
+if (ASISTO_MULTI_WORKER) {
+  onMultiSupervisorMessage((message) => {
+    const type = String(message?.type || '');
+
+    if (type === 'multi_stop_session') {
+      const reason = String(message?.reason || 'multi_stop_session');
+      gracefulShutdown('MULTI_STOP:' + reason).catch(() => {
+        try { process.exit(0); } catch {}
+      });
+      return;
+    }
+
+    if (type !== 'multi_prepare_global_restart') return;
     if (multiGlobalRestartCloseInFlight) return;
     multiGlobalRestartCloseInFlight = true;
 
@@ -5113,19 +5173,15 @@ if (ASISTO_MULTI_WORKER && parentPort) {
       try { await Promise.race([disconnectMongoSafe('multi_global_restart'), timeoutPromise(2500, 'mongo_disconnect_timeout')]); } catch {}
       try { releaseSingleInstanceLock(); } catch {}
 
-      try {
-        parentPort.postMessage({
-          type: 'multi_worker_global_restart_ready',
-          key: ASISTO_MULTI_SESSION_KEY
-        });
-      } catch {}
+      sendMultiSupervisorMessage({
+        type: 'multi_worker_global_restart_ready',
+        key: ASISTO_MULTI_SESSION_KEY
+      });
     })().catch(() => {
-      try {
-        parentPort.postMessage({
-          type: 'multi_worker_global_restart_ready',
-          key: ASISTO_MULTI_SESSION_KEY
-        });
-      } catch {}
+      sendMultiSupervisorMessage({
+        type: 'multi_worker_global_restart_ready',
+        key: ASISTO_MULTI_SESSION_KEY
+      });
     });
   });
 }
@@ -5933,15 +5989,16 @@ async function restartScriptFromPanel(reason = 'panel_restart_script') {
     // En modo multi-sesión un "Reiniciar" del panel reinicia app_asisto_ws COMPLETO,
     // porque supervisor y sesiones viven en el mismo proceso Node.
     // El supervisor coordina el cierre limpio de todos los transports antes de salir.
-    if (ASISTO_MULTI_WORKER && parentPort) {
+    if (ASISTO_MULTI_WORKER) {
       try { localWsPanelState = 'restarting'; } catch {}
       try { await updateLockStateSafe('restarting'); } catch {}
       try {
-        parentPort.postMessage({
+        const sent = sendMultiSupervisorMessage({
           type: 'multi_global_restart_request',
           reason: restartReason,
           key: ASISTO_MULTI_SESSION_KEY
         });
+        if (!sent) throw new Error('multi_supervisor_ipc_not_available');
         try { EscribirLog('[PROCESS_RESTART] reinicio global solicitado al supervisor multi-sesión', 'event'); } catch {}
         return true;
       } catch (e) {
