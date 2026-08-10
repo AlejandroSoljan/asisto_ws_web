@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.10  10/08/2026   */
+/*version: 4.04.11  10/08/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.10 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.11 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -9238,34 +9238,6 @@ async function handleAdminDeliveryCommand(message, source = '') {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-let localMultiSessionPhonesCacheAt = 0;
-let localMultiSessionPhonesCache = [];
-
-function getLocalMultiSessionPhonesCached() {
-  if (!ASISTO_MULTI_WORKER) return [];
-  const now = Date.now();
-  if (localMultiSessionPhonesCacheAt && (now - localMultiSessionPhonesCacheAt) < 30000) return localMultiSessionPhonesCache;
-  try {
-    const sessions = getConfiguredMultiSessions(readBootstrapFromFile());
-    localMultiSessionPhonesCache = Array.from(new Set(
-      (sessions || []).map((s) => normalizarNroTelFromApiMensajes(s?.numero)).filter(Boolean)
-    ));
-  } catch {
-    localMultiSessionPhonesCache = [];
-  }
-  localMultiSessionPhonesCacheAt = now;
-  return localMultiSessionPhonesCache;
-}
-
-function isOtherLocalMultiSessionPhone(value) {
-  if (!ASISTO_MULTI_WORKER) return false;
-  const incoming = normalizarNroTelFromApiMensajes(value);
-  if (!incoming) return false;
-  const own = normalizarNroTelFromApiMensajes(numero || telefono_qr || telefono_local);
-  if (own && samePhoneDigits(incoming, own)) return false;
-  return getLocalMultiSessionPhonesCached().some((phone) => samePhoneDigits(incoming, phone));
-}
-
 
 function attachClientHandlers() {
 
@@ -9330,18 +9302,6 @@ async function processIncomingAsistoMessage(message, source) {
   if (rawAccessFrom === 'status@broadcast') return;
 
   let resolvedAccessFrom = '';
-  try { resolvedAccessFrom = await resolvePhoneFromIncomingMessage(message); } catch {}
-
-  const peerCandidate = resolvedAccessFrom || rawAccessFrom;
-  if (isOtherLocalMultiSessionPhone(peerCandidate)) {
-    const peerLog = '[MULTI_PEER] mensaje entre sesiones locales ignorado por bot tenant=' +
-      String(tenantId || '') + ' numero=' + String(numero || '') +
-      ' from=' + String(rawAccessFrom || '') +
-      ' resolved=' + String(resolvedAccessFrom || '');
-    try { console.log(peerLog); } catch {}
-    try { EscribirLog(peerLog, 'event'); } catch {}
-    return;
-  }
 
 
   const clientAccess = await isIncomingClientAllowedLocal(resolvedAccessFrom || rawAccessFrom);
