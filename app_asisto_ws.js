@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.09  08/08/2026   */
+/*version: 4.04.10  10/08/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.09 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.10 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -8238,11 +8238,45 @@ let compraEntregaQueryRunning = false;
 let compraEntregaQueryStopRequested = false;
 let compraEntregaConnection = null;
 
+function getCompraEntregaExplicitConfig() {
+  const conf = tenantConfig && typeof tenantConfig === 'object' ? tenantConfig : {};
+  const keys = [
+    'habilitar_compras_entregas','habilitarComprasEntregas',
+    'compras_entregas_habilitado','comprasEntregasHabilitado'
+  ];
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(conf, key)) {
+      return parseBoolLike(conf[key], false);
+    }
+  }
+  return null;
+}
+
+function isCompraEntregaSessionEnabled() {
+  if (habilitar_odbc_manager !== true) return false;
+  if (!ASISTO_MULTI_WORKER) return true;
+
+  // En multi-sesión ODBC puede estar disponible para varias funciones, pero el
+  // loop de compras/entregas debe tener UN solo dueño. Si no se indica uno
+  // explícitamente, queda en la sesión de API Mensajes (SDG hoy).
+  const explicit = getCompraEntregaExplicitConfig();
+  if (explicit !== null) return explicit === true;
+  return consulta_api_mensajes_habilitado === true;
+}
+
+
 async function startCompraEntregaLoopIfEnabled(source = '') {
   try {
     
-    if (habilitar_odbc_manager !== true) {
-      try { EscribirLog('queryAccessComprasEntregas no inicia: habilitar_odbc_manager=false' + (source ? ' source=' + source : ''), 'event'); } catch {}
+    if (!isCompraEntregaSessionEnabled()) {
+      const motivo = habilitar_odbc_manager !== true ? 'habilitar_odbc_manager=false' : 'multi_session_no_designada';
+      try {
+        const msg = 'queryAccessComprasEntregas no inicia: ' + motivo +
+          ' tenant=' + String(tenantId || '') + ' numero=' + String(numero || '') +
+          (source ? ' source=' + source : '');
+        console.log(msg);
+        EscribirLog(msg, 'event');
+      } catch {} 
       return;
     }
     if (compraEntregaQueryRunning) return;
@@ -8258,6 +8292,11 @@ async function startCompraEntregaLoopIfEnabled(source = '') {
 }
 
 async function queryAccessComprasEntregas(source = '') {
+  if (!isCompraEntregaSessionEnabled()) {
+    try { EscribirLog('queryAccessComprasEntregas: sesión no habilitada tenant=' + String(tenantId || '') + ' numero=' + String(numero || ''), 'event'); } catch {}
+    return;
+  }
+
   if (compraEntregaQueryRunning) {
     try { EscribirLog('queryAccessComprasEntregas: ya estaba corriendo, no se inicia otro loop', 'event'); } catch {}
     return;
@@ -8305,6 +8344,10 @@ async function queryAccessComprasEntregas(source = '') {
     await sleep(1000);
 
     while (!compraEntregaQueryStopRequested && isOwner && clientStarted && client) {
+      if (!isCompraEntregaSessionEnabled()) {
+        try { EscribirLog('queryAccessComprasEntregas: detenido; sesión no habilitada tenant=' + String(tenantId || '') + ' numero=' + String(numero || ''), 'event'); } catch {}
+        break;
+      }
       RecuperarJsonConfMensajes();
       await enviar_mensajes_compra();
       await enviar_mensajes_entrega();
@@ -9118,6 +9161,17 @@ async function handleAdminDeliveryCommand(message, source = '') {
     const isAdmin = await isAdminCommandSender(message);
     if (!isAdmin) return false;
 
+    if (!isCompraEntregaSessionEnabled()) {
+      try {
+        const msg = '[admin-command] /e ignorado: sesión no habilitada para compras/entregas tenant=' +
+          String(tenantId || '') + ' numero=' + String(numero || '') +
+          ' from=' + String(message?.from || '');
+        console.log(msg);
+        EscribirLog(msg, 'event');
+      } catch {}
+      return true;
+    }
+
     const parts = body.split(/\s+/).filter(Boolean);
     const cmd = String(parts[0] || '').trim().toLowerCase();
     const param = String(parts[1] || '').trim().toLowerCase();
@@ -9184,6 +9238,35 @@ async function handleAdminDeliveryCommand(message, source = '') {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+let localMultiSessionPhonesCacheAt = 0;
+let localMultiSessionPhonesCache = [];
+
+function getLocalMultiSessionPhonesCached() {
+  if (!ASISTO_MULTI_WORKER) return [];
+  const now = Date.now();
+  if (localMultiSessionPhonesCacheAt && (now - localMultiSessionPhonesCacheAt) < 30000) return localMultiSessionPhonesCache;
+  try {
+    const sessions = getConfiguredMultiSessions(readBootstrapFromFile());
+    localMultiSessionPhonesCache = Array.from(new Set(
+      (sessions || []).map((s) => normalizarNroTelFromApiMensajes(s?.numero)).filter(Boolean)
+    ));
+  } catch {
+    localMultiSessionPhonesCache = [];
+  }
+  localMultiSessionPhonesCacheAt = now;
+  return localMultiSessionPhonesCache;
+}
+
+function isOtherLocalMultiSessionPhone(value) {
+  if (!ASISTO_MULTI_WORKER) return false;
+  const incoming = normalizarNroTelFromApiMensajes(value);
+  if (!incoming) return false;
+  const own = normalizarNroTelFromApiMensajes(numero || telefono_qr || telefono_local);
+  if (own && samePhoneDigits(incoming, own)) return false;
+  return getLocalMultiSessionPhonesCached().some((phone) => samePhoneDigits(incoming, phone));
+}
+
+
 function attachClientHandlers() {
 
 async function processIncomingAsistoMessage(message, source) {
@@ -9248,6 +9331,19 @@ async function processIncomingAsistoMessage(message, source) {
 
   let resolvedAccessFrom = '';
   try { resolvedAccessFrom = await resolvePhoneFromIncomingMessage(message); } catch {}
+
+  const peerCandidate = resolvedAccessFrom || rawAccessFrom;
+  if (isOtherLocalMultiSessionPhone(peerCandidate)) {
+    const peerLog = '[MULTI_PEER] mensaje entre sesiones locales ignorado por bot tenant=' +
+      String(tenantId || '') + ' numero=' + String(numero || '') +
+      ' from=' + String(rawAccessFrom || '') +
+      ' resolved=' + String(resolvedAccessFrom || '');
+    try { console.log(peerLog); } catch {}
+    try { EscribirLog(peerLog, 'event'); } catch {}
+    return;
+  }
+
+
   const clientAccess = await isIncomingClientAllowedLocal(resolvedAccessFrom || rawAccessFrom);
   if (!clientAccess.allowed) {
     const accessLog = '[CLIENT_ACCESS] ignorado tenant=' + String(tenantId || '') +
@@ -9596,7 +9692,13 @@ client.on('message_create', async message => {
     if (message && message.fromMe === true) {
       await logOutgoingFromMessageFallback(message);
       if (isAdminDeliveryCommandMessage(message)) {
-        await handleAdminDeliveryCommand(message, 'message_create');
+        try {
+          const msg = '[admin-command] /e saliente ignorado en sesión emisora tenant=' +
+            String(tenantId || '') + ' numero=' + String(numero || '') +
+            ' to=' + String(message?.to || '');
+          console.log(msg);
+          EscribirLog(msg, 'event');
+        } catch {}
         return;
       }
       // IMPORTANTE: si el operador prueba/autoriza desde el mismo WhatsApp Web,
