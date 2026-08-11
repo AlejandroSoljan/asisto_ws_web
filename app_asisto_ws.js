@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.11  10/08/2026   */
+/*version: 4.04.12  10/08/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.11 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.12 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -145,6 +145,7 @@ async function ensureWwebMongoStoreLoaded() {
 //   reescribir la lógica de negocio.
 // ============================================================================
 let baileysModulePromise = null;
+let baileysInstallPromise = null;
 
 const BAILEYS_NPM_PACKAGE = 'baileys';
 const BAILEYS_NPM_VERSION = '7.0.0-rc14';
@@ -157,6 +158,66 @@ function resolveInstalledBaileysEntry(packageName) {
     return '';
   }
 }
+
+
+function baileysAutoInstallEnabled() {
+  const raw = process.env.ASISTO_BAILEYS_AUTO_INSTALL ?? process.env.BAILEYS_AUTO_INSTALL;
+  if (raw === undefined || raw === null || String(raw).trim() === '') return true;
+  return !['0', 'false', 'no', 'off'].includes(String(raw).trim().toLowerCase());
+}
+
+
+async function installBaileysDependencyIfMissing() {
+  const existing = resolveInstalledBaileysEntry(BAILEYS_NPM_PACKAGE);
+  if (existing) return existing;
+
+  if (!baileysAutoInstallEnabled()) {
+    const err = new Error(`Baileys no está instalado y la instalación automática está deshabilitada (${BAILEYS_NPM_PACKAGE}@${BAILEYS_NPM_VERSION}).`);
+    err.code = 'BAILEYS_AUTO_INSTALL_DISABLED';
+    throw err;
+  }
+
+  if (!baileysInstallPromise) {
+    baileysInstallPromise = (async () => {
+      const packageSpec = `${BAILEYS_NPM_PACKAGE}@${BAILEYS_NPM_VERSION}`;
+      const startMsg = `[BAILEYS] módulo faltante; instalando automáticamente ${packageSpec} en ${__dirname}`;
+      try { console.log(startMsg); } catch {}
+      try { if (typeof EscribirLog === 'function') EscribirLog(startMsg, 'event'); } catch {}
+
+      try {
+        await runCommand(
+          'npm',
+          ['install', packageSpec, '--no-save', '--no-package-lock', '--omit=dev', '--no-audit', '--no-fund'],
+          { cwd: __dirname, timeout: 10 * 60_000 }
+        );
+      } catch (e) {
+        const detail = String(e?.stderr || e?.stdout || e?.message || e || '').trim().slice(0, 2000);
+        const err = new Error(`No se pudo instalar automáticamente ${packageSpec}: ${detail || 'npm_install_failed'}`);
+        err.code = 'BAILEYS_AUTO_INSTALL_FAILED';
+        err.cause = e;
+        throw err;
+      }
+
+      const entry = resolveInstalledBaileysEntry(BAILEYS_NPM_PACKAGE);
+      if (!entry) {
+        const err = new Error(`npm finalizó pero ${packageSpec} sigue sin aparecer en node_modules.`);
+        err.code = 'BAILEYS_AUTO_INSTALL_NOT_FOUND';
+        throw err;
+      }
+
+      const okMsg = `[BAILEYS] instalación automática completada package=${packageSpec} entry=${entry}`;
+      try { console.log(okMsg); } catch {}
+      try { if (typeof EscribirLog === 'function') EscribirLog(okMsg, 'event'); } catch {}
+      return entry;
+    })().finally(() => {
+      baileysInstallPromise = null;
+    });
+  }
+
+  return baileysInstallPromise;
+}
+
+
 
 
 async function importInstalledBaileysModule() {
@@ -196,7 +257,19 @@ async function importInstalledBaileysModule() {
 
 async function loadBaileysModule() {
   if (!baileysModulePromise) {
-    baileysModulePromise = importInstalledBaileysModule().catch((e) => {
+    baileysModulePromise = (async () => {
+      try {
+        return await importInstalledBaileysModule();
+      } catch (e) {
+        if (e?.code !== 'BAILEYS_MODULE_NOT_INSTALLED') throw e;
+
+        // Caso típico de actualización manual: se copió app_asisto_ws.js/package.json
+        // pero node_modules todavía no contiene Baileys. Lo reparamos sin modificar
+        // package.json ni package-lock.json y luego reintentamos el import.
+        await installBaileysDependencyIfMissing();
+        return await importInstalledBaileysModule();
+      }
+    })().catch((e) => {
       baileysModulePromise = null;
       if (e?.code === 'BAILEYS_MODULE_NOT_INSTALLED') {
         const err = new Error(
