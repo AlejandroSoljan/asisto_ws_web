@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.12  10/08/2026   */
+/*version: 4.04.13  12/08/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.12 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.13 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -6604,6 +6604,67 @@ function getOutgoingConfirmacionTargetRaw(message) {
   return '';
 }
 
+// Sincroniza con Render los mensajes que un operador envía directamente desde
+// el mismo WhatsApp/telefono vinculado. Así, para el bot de pedidos, un importe
+// informado desde el teléfono tiene el mismo efecto que escribirlo desde el panel.
+// Los mensajes enviados por el propio bot/panel también pueden disparar
+// message_create; el servidor los deduplica contra la conversación persistida.
+async function notifyWwebOperatorOutgoingMessage(message) {
+  try {
+    if (!message || message.fromMe !== true) return false;
+
+    const body = getMessageBodyText(message);
+    if (!body) return false;
+
+    const ownPhone = onlyDigits(telefono_qr || numero || client?.info?.me?.user || '');
+    if (!ownPhone || !tenantId) return false;
+
+    const logicMode = await getWwebBotLogicModeForPhone(ownPhone);
+    if (logicMode !== 'chatgpt') return false;
+
+    if (!controlApi?.isConfigured?.()) {
+      try { EscribirLog('[WWEB_OPERATOR] Control API no configurada; no se sincroniza mensaje saliente', 'error'); } catch {}
+      return false;
+    }
+
+    const targetRaw = getOutgoingConfirmacionTargetRaw(message);
+    if (!targetRaw) return false;
+
+    const customerPhone = onlyDigits(await normalizeContactForStats(targetRaw));
+    if (!customerPhone) {
+      try { EscribirLog('[WWEB_OPERATOR] no se pudo resolver teléfono destino raw=' + String(targetRaw || ''), 'error'); } catch {}
+      return false;
+    }
+
+    const messageId = getMessageStableId(message);
+    const result = await controlApi.request('/operator-message', {
+      Tel_Origen: customerPhone,
+      Tel_Destino: ownPhone,
+      Mensaje: body,
+      MessageId: messageId,
+      source: 'message_create_fromMe'
+    });
+
+    try {
+      const msg = '[WWEB_OPERATOR] sincronizado to=' + customerPhone +
+        ' advanced=' + String(!!result?.transferAdvanced) +
+        ' ignored=' + String(!!result?.ignored) +
+        ' reason=' + String(result?.reason || '');
+      console.log(msg);
+      EscribirLog(msg, 'event');
+    } catch {}
+    return true;
+  } catch (e) {
+    try {
+      const msg = '[WWEB_OPERATOR] error sincronizando mensaje saliente: ' + String(e?.message || e);
+      console.log(msg);
+      EscribirLog(msg, 'error');
+    } catch {}
+    return false;
+  }
+}
+
+
 function logConfirmacionDebug(msg) {
   try { console.log(msg); } catch {}
   try { EscribirLog(msg, 'event'); } catch {}
@@ -9734,6 +9795,12 @@ client.on('message_create', async message => {
         } catch {}
         return;
       }
+
+      // En modo ChatGPT/Pedidos, avisar a Render sobre mensajes enviados por el
+      // operador desde el propio teléfono/WhatsApp. Render deduplica los que
+      // salieron del bot o del panel y procesa únicamente los manuales reales.
+      await notifyWwebOperatorOutgoingMessage(message);
+
       // IMPORTANTE: si el operador prueba/autoriza desde el mismo WhatsApp Web,
       // el mensaje sale como fromMe=true. En algunas versiones message.to viene vacío;
       // por eso se toma el destino desde to/from/id.remote/_data.* y, si no aparece,
