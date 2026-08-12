@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.04.13  12/08/2026   */
+/*version: 4.04.14  12/08/2026   */
 try {
   console.log(`[BOOT] app_asisto version=4.04.13 file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -5205,8 +5205,9 @@ async function runMultiSessionSupervisor(boot) {
         try { console.log('[AUTO_UPDATE] skip boot_target_tag_force: worker secundario multi-sesión'); } catch {}
       }
     } catch (e) {
-       try { console.log('boot_target_tag_force auto-update error:', e?.message || e); } catch {}
-      try { EscribirLog('boot_target_tag_force auto-update error: ' + String(e?.message || e), 'error'); } catch {}
+      const detail = String(e?.stderr || e?.stdout || e?.message || e || '').trim();
+      try { console.log('boot_target_tag_force auto-update error:', detail || (e?.message || e)); } catch {}
+      try { EscribirLog('boot_target_tag_force auto-update error: ' + (detail || String(e?.message || e)), 'error'); } catch {}
     }
  
     if (ASISTO_MULTI_WORKER && ASISTO_MULTI_PRIMARY_WORKER) {
@@ -5853,7 +5854,8 @@ async function ensureTenantVersionBeforeWhatsAppStart(reason = 'before_whatsapp_
      restartScheduled: !!autoUpdateRestarting
     };
   } catch (e) {
-    try { EscribirLog('ensureTenantVersionBeforeWhatsAppStart update error: ' + String(e?.message || e), 'error'); } catch {}
+    const detail = String(e?.stderr || e?.stdout || e?.message || e || '').trim();
+    try { EscribirLog('ensureTenantVersionBeforeWhatsAppStart update error: ' + (detail || String(e?.message || e)), 'error'); } catch {}
     throw e;
   }
 }
@@ -5894,8 +5896,14 @@ async function startClientInitialize(options = {}) {
           return;
         }
       } catch (e) {
-        console.log("Chequeo de versión antes de iniciar WhatsApp falló:", e?.message || e);
-        EscribirLog("Chequeo de versión antes de iniciar WhatsApp falló: " + String(e?.message || e), "error");
+        const detail = String(e?.stderr || e?.stdout || e?.message || e || '').trim();
+        console.log("Chequeo de versión antes de iniciar WhatsApp falló:", detail || (e?.message || e));
+        EscribirLog("Chequeo de versión antes de iniciar WhatsApp falló: " + (detail || String(e?.message || e)), "error");
+        try {
+          EscribirLog('[AUTO_UPDATE] el chequeo de versión falló; se continúa iniciando WhatsApp con la versión instalada.', 'event');
+        } catch {}
+        // Un fallo de Git/auto-update NO debe dejar la sesión clavada en "starting".
+        // Continuamos con createClientIfNeeded()/initializeWithRetry usando el código instalado.
         return;
       }
     
