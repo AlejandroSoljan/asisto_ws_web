@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.04.14  12/08/2026   */
+/*version: 4.04.15 13/08/2026   */
 try {
   console.log(`[BOOT] app_asisto version=4.04.13 file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -336,6 +336,52 @@ function baileysStatusToWwebAck(status) {
   return n <= 0 ? -1 : Math.min(4, n - 1);
 }
 
+function baileysDisconnectReasonName(reasons, statusCode) {
+  try {
+    const code = Number(statusCode || 0);
+    if (!code || !reasons || typeof reasons !== 'object') return '';
+    for (const [name, value] of Object.entries(reasons)) {
+      if (Number(value) === code) return String(name || '');
+    }
+  } catch {}
+  return '';
+}
+
+function baileysDisconnectErrorDetail(err) {
+  try {
+    if (!err) return '';
+    const parts = [];
+    const message = String(err?.message || '').trim();
+   const data = err?.data;
+    const outputPayload = err?.output?.payload;
+    const outputMessage = String(err?.output?.payload?.message || err?.output?.message || '').trim();
+    const causeMessage = String(err?.cause?.message || '').trim();
+
+    if (message) parts.push(`message=${message}`);
+    if (outputMessage && outputMessage !== message) parts.push(`output=${outputMessage}`);
+    if (causeMessage && causeMessage !== message) parts.push(`cause=${causeMessage}`);
+
+    if (data !== undefined) {
+      try { parts.push(`data=${JSON.stringify(data)}`); } catch { parts.push(`data=${String(data)}`); }
+    }
+    if (outputPayload !== undefined) {
+      try { parts.push(`payload=${JSON.stringify(outputPayload)}`); } catch { parts.push(`payload=${String(outputPayload)}`); }
+    }
+
+    if (!parts.length) {
+      try {
+        const raw = JSON.stringify(err, Object.getOwnPropertyNames(err));
+        if (raw && raw !== '{}') parts.push(`raw=${raw}`);
+      } catch {}
+    }
+
+    return parts.join(' | ').slice(0, 3000);
+  } catch {
+    try { return String(err || '').slice(0, 3000); } catch { return ''; }
+  }
+}
+
+
 class BaileysCompatClient extends EventEmitter {
   constructor(options = {}) {
     super();
@@ -474,11 +520,23 @@ class BaileysCompatClient extends EventEmitter {
           const reasons = this._baileys?.DisconnectReason || {};
           const loggedOut = statusCode && statusCode === Number(reasons.loggedOut);
           const restartRequired = statusCode && statusCode === Number(reasons.restartRequired);
+          const reasonName = baileysDisconnectReasonName(reasons, statusCode);
+          const errorDetail = baileysDisconnectErrorDetail(err);
+          const closeLog = `[BAILEYS] connection.close statusCode=${statusCode || 0}` +
+            ` reason=${reasonName || 'unknown'}` +
+            ` loggedOut=${!!loggedOut}` +
+            ` restartRequired=${!!restartRequired}` +
+            (errorDetail ? ` error=${errorDetail}` : '');
+          try { console.log(closeLog); } catch {}
+          try { if (typeof EscribirLog === 'function') EscribirLog(closeLog, 'error'); } catch {}
 
           // Baileys fuerza este cierre inmediatamente después de vincular el QR.
           // Es un paso normal: recreamos solamente el socket interno, sin avisar al
           // supervisor de Asisto ni generar un falso "WhatsApp desconectado".
           if (restartRequired) {
+            const restartLog = `[BAILEYS] restartRequired statusCode=${statusCode || 0}; recreando socket interno sin reiniciar la sesión Asisto`;
+            try { console.log(restartLog); } catch {}
+            try { if (typeof EscribirLog === 'function') EscribirLog(restartLog, 'event'); } catch {}
             this._socket = null;
             setTimeout(() => {
               this.initialize().catch((e) => {
@@ -10031,7 +10089,9 @@ client.on('disconnected', async (reason) => {
   try { compraEntregaConnection = null; } catch {}
   io.emit('message', 'Whatsapp Desconectado!');
 
-  EscribirLog('Chatbot Desconectado ','Desconectando...',"event");
+  const disconnectedLog = '[DISCONNECTED] reason=' + String(reason || 'sin_detalle');
+  try { console.log(disconnectedLog); } catch {}
+  EscribirLog(disconnectedLog, 'event');
   updateLockStateSafe('disconnected').catch(()=>{});
 
   clearAuthReadyWatchdog('disconnected');
