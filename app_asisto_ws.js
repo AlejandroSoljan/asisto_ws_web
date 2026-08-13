@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.16 13/08/2026   */
+/*version: 4.04.17 13/08/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.13 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.17 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -9763,7 +9763,7 @@ telefonoFrom = telefonoFromApi;
          // Se usa el dominio canónico sin redirecciones para que el POST llegue a Render
          // con el body intacto. No se reintenta automáticamente para evitar duplicar pedidos.
          const resp = await axios.post(url, jsonTexto, {
-           timeout: 55000,
+           timeout: 180000,
            maxRedirects: 0,
            maxContentLength: 20 * 1024 * 1024,
            maxBodyLength: 20 * 1024 * 1024,
