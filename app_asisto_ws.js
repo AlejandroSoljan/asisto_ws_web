@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.04.15 13/08/2026   */
+/*version: 4.04.16 13/08/2026   */
 try {
   console.log(`[BOOT] app_asisto version=4.04.13 file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -5656,9 +5656,9 @@ async function updateLockQrDataSafe(qrDataUrl, qrAtIso) {
     if (qrAtIso) lastQrAt = String(qrAtIso);
     localWsPanelState = 'qr';
 
-    if (!lockId) return;
-    if (!await ensureMongo()) return;
-    if (!LockModel) return;
+    if (!lockId) return false;
+    if (!await ensureMongo()) return false;
+    if (!LockModel) return false;
 
     const now = new Date();
     const runtimeInfo = getCurrentRuntimeInfo();
@@ -5687,7 +5687,38 @@ async function updateLockQrDataSafe(qrDataUrl, qrAtIso) {
       },
       { upsert: true }
     );
+    return true;
+  } catch (e) {
+    try { EscribirLog('[QR] error persistiendo QR en panel: ' + String(e?.message || e), 'error'); } catch {}
+    return false;
+  }
+}
+
+async function waitForQrPersistedAfterClearAuth(timeoutMs = 30000) {
+  const started = Date.now();
+  const timeout = Math.max(5000, Number(timeoutMs) || 30000);
+
+  while ((Date.now() - started) < timeout) {
+    const state = String(localWsPanelState || '').trim().toLowerCase();
+
+    // Si durante la espera la sesión llegó a quedar online, ya no corresponde mostrar QR.
+    if (state === 'online' || state === 'authenticated') return false;
+
+    if (state === 'qr' && lastQrDataUrl) {
+      const ok = await updateLockQrDataSafe(lastQrDataUrl, lastQrAt || nowArgentinaISO());
+      if (ok) {
+        try { EscribirLog('[CLEAR_AUTH] QR generado y persistido para el panel', 'event'); } catch {}
+        return true;
+      }
+    }
+
+    await sleep(300);
+  }
+
+  try {
+    EscribirLog('[CLEAR_AUTH] timeout esperando QR persistido en panel state=' + String(localWsPanelState || '') + ' hasQr=' + String(!!lastQrDataUrl), 'error');
   } catch {}
+  return false;
 }
 
 // Lock/lease multi-PC removido en modo simplificado.
@@ -6139,6 +6170,13 @@ async function clearAuthenticationAndRequestQr(reason = 'clear_auth') {
     await updateLockStateSafe('starting');
     await sleep(1500);
     await startClientInitialize();
+
+    // Baileys initialize() retorna apenas crea el socket; el QR llega después.
+    // Esperamos a que el QR tenga dataURL y quede persistido en wa_locks para que
+    // el botón QR del panel se habilite sin necesitar un segundo "Reiniciar".
+    if (isBaileysEngine()) {
+      await waitForQrPersistedAfterClearAuth(30000);
+    }
     return true;
   } catch (e) {
     try { EscribirLog('[CLEAR_AUTH] error: ' + String(e?.message || e), 'error'); } catch {}
@@ -10062,12 +10100,27 @@ client.on('auth_failure', async function(session) {
   telefono_qr = "";
   io.emit('message', 'Auth failure');
  
-  EscribirLog('Error 04 - Chatbot error Auth failure', String(session || ''), "error");
+  const authFailureReason = String(session || '');
+  EscribirLog('Error 04 - Chatbot error Auth failure', authFailureReason, "error");
   updateLockStateSafe('auth_failure').catch(()=>{});
   clearAuthReadyWatchdog('auth_failure');
+
+  // Baileys 401/loggedOut significa que WhatsApp invalidó la credencial local.
+  // Reiniciar con la misma carpeta auth solo repite 401 indefinidamente. Dejamos
+  // la sesión en auth_failure para que "Borrar autenticación" limpie ESA sesión
+  // y genere un QR nuevo desde el panel.
+  const baileysLoggedOut = isBaileysEngine() && /^baileys_logged_out:/i.test(authFailureReason);
+  if (baileysLoggedOut) {
+    clientStarted = false;
+    authFailureHandling = false;
+    const msg = '[AUTH_FAILURE] Baileys loggedOut; se detiene auto-restart y se espera Borrar autenticación desde el panel';
+    try { console.log(msg); } catch {}
+    try { EscribirLog(msg, 'error'); } catch {}
+    return;
+  }
  
 
-  // Sin backup/restore remoto: reiniciamos el cliente y dejamos que LocalAuth use solo la sesión local.
+    // Para otros auth_failure mantenemos el comportamiento histórico.
   if (isLocalAuthMode() && isOwner && !authFailureHandling) {
     authFailureHandling = true;
     setTimeout(async () => {
