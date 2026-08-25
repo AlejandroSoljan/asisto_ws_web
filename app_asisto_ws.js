@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.04.17 13/08/2026   */
+/*version: 4.04.18 13/08/2026   */
 try {
   console.log(`[BOOT] app_asisto version=4.04.17 file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -2756,6 +2756,135 @@ async function logMessageStat(direction, contact, payload) {
   }
 }
 
+function apiMensajesWindowConfig() {
+  const rawMinutes =
+    tenantConfig?.api_mensajes_window_minutes ??
+    tenantConfig?.apiMensajesWindowMinutes ??
+    tenantConfig?.api_mensajes_billing_window_minutes ??
+    tenantConfig?.apiMensajesBillingWindowMinutes ??
+    20;
+  const rawValue =
+    tenantConfig?.api_mensajes_window_value ??
+    tenantConfig?.apiMensajesWindowValue ??
+    tenantConfig?.api_mensajes_billing_window_value ??
+    tenantConfig?.apiMensajesBillingWindowValue ??
+    0;
+  const rawCurrency =
+    tenantConfig?.api_mensajes_window_currency ??
+    tenantConfig?.apiMensajesWindowCurrency ??
+    tenantConfig?.api_mensajes_billing_currency ??
+    tenantConfig?.apiMensajesBillingCurrency ??
+    'ARS';
+
+  let minutes = Number(rawMinutes);
+  if (!Number.isFinite(minutes) || minutes <= 0) minutes = 20;
+  minutes = Math.max(1, Math.min(1440, Math.round(minutes)));
+
+  let value = Number(typeof rawValue === 'string' ? rawValue.replace(',', '.') : rawValue);
+  if (!Number.isFinite(value) || value < 0) value = 0;
+
+  let currency = String(rawCurrency || 'ARS').trim().toUpperCase();
+  if (!/^[A-Z]{3}$/.test(currency)) currency = 'ARS';
+
+  return { minutes, value, currency };
+}
+
+function apiMensajesWindowMessageEntry({ at, messageType, text, idDest, idRenglon, messageId }) {
+  return {
+    at: at || new Date(),
+    type: String(messageType || 'text').slice(0, 30),
+    text: String(text || '').slice(0, 1000),
+    id_msj_dest: idDest == null ? null : String(idDest).slice(0, 120),
+    id_msj_renglon: idRenglon == null ? null : String(idRenglon).slice(0, 120),
+    waMessageId: String(messageId || '').slice(0, 250)
+  };
+}
+
+async function recordApiMensajesBillingWindow(contact, details = {}) {
+  try {
+    if (!tenantId || !numero) return null;
+    if (!await ensureMongo()) return null;
+    if (!ApiMessageWindowModel) return null;
+
+    const cleanContact = await normalizeContactForStats(contact);
+    if (!cleanContact) return null;
+
+    const now = new Date();
+    const cfg = apiMensajesWindowConfig();
+    const numeroFrom = normalizarNroTelFromApiMensajes(getApiMensajesNroTelFrom()) || onlyDigits(numero) || String(numero || '');
+    const messageId = getOutgoingStatMessageId(details.sentMessage);
+    const entry = apiMensajesWindowMessageEntry({
+      at: now,
+     messageType: details.messageType,
+      text: details.text,
+      idDest: details.idDest,
+      idRenglon: details.idRenglon,
+      messageId
+    });
+
+    // Ventana fija: comienza con el primer mensaje. Los mensajes enviados antes
+    // de windowEndsAt pertenecen a la misma ventana; el siguiente abre una nueva.
+    const active = await ApiMessageWindowModel.findOne(
+      {
+        tenantId: String(tenantId),
+        numeroFrom: String(numeroFrom),
+        contact: cleanContact,
+        channelType: 'api_messages',
+        windowEndsAt: { $gt: now }
+      },
+      { sort: { windowStartedAt: -1 } }
+    ).lean();
+
+    if (active && active._id) {
+      await ApiMessageWindowModel.updateOne(
+       { _id: active._id },
+        {
+          $set: {
+            lastMessageAt: now,
+            updatedAt: now
+          },
+          $inc: { messageCount: 1 },
+          $push: { messages: { $each: [entry], $slice: -100 } }
+        }
+      );
+      return { _id: active._id, isNew: false, amount: Number(active.amount || 0), currency: active.currency || cfg.currency };
+    }
+
+    const windowEndsAt = new Date(now.getTime() + cfg.minutes * 60 * 1000);
+    const doc = {
+      tenantId: String(tenantId),
+      numeroFrom: String(numeroFrom),
+      contact: cleanContact,
+     contactName: String(details.contactName || '').slice(0, 200),
+      channelType: 'api_messages',
+      source: 'consulta_api_mensajes',
+      windowMinutes: cfg.minutes,
+      windowStartedAt: now,
+      windowEndsAt,
+      lastMessageAt: now,
+      messageCount: 1,
+      unitValue: cfg.value,
+      amount: cfg.value,
+      currency: cfg.currency,
+      messages: [entry],
+      createdAt: now,
+     updatedAt: now
+    };
+    const created = await ApiMessageWindowModel.create(doc);
+    try {
+      const log = '[API_MENSAJES_WINDOW] nueva ventana tenant=' + String(tenantId) +
+        ' nro=' + cleanContact + ' minutos=' + cfg.minutes +
+        ' valor=' + cfg.value + ' ' + cfg.currency;
+      console.log(log);
+      EscribirLog(log, 'event');
+    } catch {}
+    return { _id: created?._id || null, isNew: true, amount: cfg.value, currency: cfg.currency };
+  } catch (e) {
+    try { EscribirLog('[API_MENSAJES_WINDOW] error: ' + String(e?.message || e), 'error'); } catch {}
+    return null;
+  }
+}
+
 
 function getOutgoingStatMessageId(messageLike) {
   try {
@@ -3704,6 +3833,7 @@ let ActionModel = null;
 let PolicyModel = null;      // wa_wweb_policies
 let HistoryModel = null;     // wa_wweb_history
 let MessageLogModel = null;  // wa_wweb_message_log
+let ApiMessageWindowModel = null; // wa_api_message_windows
 let heartbeatTimer = null;
 let actionTimer = null;
 let pollTimer = null;
@@ -4162,6 +4292,7 @@ function initMongoModelsIfNeeded() {
       LockModel = controlApi.model('wa_locks');
       ActionModel = controlApi.model('wa_wweb_actions');
       MessageLogModel = controlApi.model('wa_wweb_message_log');
+      ApiMessageWindowModel = controlApi.model('wa_api_message_windows');
       return;
     }
 
@@ -4266,6 +4397,32 @@ function initMongoModelsIfNeeded() {
         { collection: "wa_wweb_message_log" }
       );
       MessageLogModel = mongoose.models.WaWwebMessageLog || mongoose.model("WaWwebMessageLog", MessageLogSchema);
+    }
+
+    if (!ApiMessageWindowModel) {
+      const ApiMessageWindowSchema = new mongoose.Schema(
+        {
+          tenantId: { type: String, index: true },
+          numeroFrom: { type: String, index: true },
+          contact: { type: String, index: true },
+          contactName: { type: String },
+          channelType: { type: String, default: 'api_messages', index: true },
+          source: { type: String, default: 'consulta_api_mensajes', index: true },
+          windowMinutes: { type: Number },
+          windowStartedAt: { type: Date, index: true },
+          windowEndsAt: { type: Date, index: true },
+          lastMessageAt: { type: Date, index: true },
+          messageCount: { type: Number, default: 1 },
+          unitValue: { type: Number, default: 0 },
+          amount: { type: Number, default: 0 },
+          currency: { type: String, default: 'ARS' },
+          messages: { type: [mongoose.Schema.Types.Mixed], default: [] },
+          createdAt: { type: Date, default: Date.now },
+          updatedAt: { type: Date, default: Date.now }
+        },
+        { collection: "wa_api_message_windows", strict: false }
+      );
+      ApiMessageWindowModel = mongoose.models.WaApiMessageWindow || mongoose.model("WaApiMessageWindow", ApiMessageWindowSchema);
     }
   } catch {}
 }
@@ -6948,7 +7105,14 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
           const mimeType = detectMimeType(String(contenido)) || mime.lookup(contentNombre) || 'application/octet-stream';
           const media = new MessageMedia(mimeType, String(contenido), contentNombre);
           await io.emit('message', 'Mensaje: ' + nroTelFormat + ': ' + msj);
-          await safeSend(nroTelFormat, media, { caption: msj });
+          const sentApiMensaje = await safeSend(nroTelFormat, media, { caption: msj });
+          await recordApiMensajesBillingWindow(to, {
+            sentMessage: sentApiMensaje,
+            messageType: 'media',
+            text: msj,
+            idDest,
+            idRenglon
+          });
           const logEnvioApi = '[API_MENSAJES] enviado adjunto pendiente a ' + to +
             ' id_msj_dest=' + String(idDest || '') +
             ' id_msj_renglon=' + String(idRenglon || '') +
@@ -6959,7 +7123,14 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
           EscribirLog(logEnvioApi, 'event');
         } else {
           await io.emit('message', 'Mensaje: ' + nroTelFormat + ': ' + msj);
-          await safeSend(nroTelFormat, msj);
+          const sentApiMensaje = await safeSend(nroTelFormat, msj);
+          await recordApiMensajesBillingWindow(to, {
+            sentMessage: sentApiMensaje,
+            messageType: 'text',
+            text: msj,
+            idDest,
+            idRenglon
+          });
           const logEnvioApi = '[API_MENSAJES] enviado texto pendiente a ' + to +
             ' id_msj_dest=' + String(idDest || '') +
             ' id_msj_renglon=' + String(idRenglon || '') +
@@ -7878,7 +8049,14 @@ async function ConsultaApiMensajes(){
                 return;
               }
               await io.emit('message', 'Mensaje: ' + Nro_tel_format + ': ' + Msj);
-              await safeSend(Nro_tel_format, media, { caption: Msj });
+              const sentApiMensaje = await safeSend(Nro_tel_format, media, { caption: Msj });
+              await recordApiMensajesBillingWindow(Nro_tel, {
+                sentMessage: sentApiMensaje,
+                messageType: 'media',
+                text: Msj,
+                idDest: Id_msj_dest_local,
+                idRenglon: Id_msj_renglon_local
+              });
               const logEnvioApi = '[API_MENSAJES] enviado adjunto a ' + Nro_tel +
                 ' id_msj_dest=' + String(Id_msj_dest_local || '') +
                 ' id_msj_renglon=' + String(Id_msj_renglon_local || '') +
@@ -7896,7 +8074,14 @@ async function ConsultaApiMensajes(){
                 return;
               }
               await io.emit('message', 'Mensaje: ' + Nro_tel_format + ': ' + Msj);
-              await safeSend(Nro_tel_format, Msj);
+              const sentApiMensaje = await safeSend(Nro_tel_format, Msj);
+              await recordApiMensajesBillingWindow(Nro_tel, {
+                sentMessage: sentApiMensaje,
+                messageType: 'text',
+                text: Msj,
+                idDest: Id_msj_dest_local,
+               idRenglon: Id_msj_renglon_local
+              });
               const logEnvioApi = '[API_MENSAJES] enviado texto a ' + Nro_tel +
                 ' id_msj_dest=' + String(Id_msj_dest_local || '') +
                 ' id_msj_renglon=' + String(Id_msj_renglon_local || '') +
