@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.04.18 13/08/2026   */
+/*version: 4.04.19 29/08/2026   */
 try {
   console.log(`[BOOT] app_asisto version=4.04.17 file=${__filename} pid=${process.pid}`);
 } catch {}
