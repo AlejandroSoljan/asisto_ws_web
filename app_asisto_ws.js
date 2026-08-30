@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.04.20 29/08/2026   */
+/*version: 4.04.21 29/08/2026   */
 try {
   console.log(`[BOOT] app_asisto version=4.04.20 file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -8906,7 +8906,6 @@ async function enviar_mensajes_info() {
   if (!compraEntregaConnection) return;
 
   const origenLocal = onlyDigits(telefono_qr).slice(-10);
-  console.log('MENSAJES_INFO: consultando es_mensajes origen=' + telefono_qr + ' origen_local=' + origenLocal);
   const data = await compraEntregaConnection.query(
     "select first * from es_mensajes " +
     "where estado <> 'S' and tipo = 'WS' " +
@@ -8914,7 +8913,6 @@ async function enviar_mensajes_info() {
     "order by prioridad asc"
   );
  const tam = data.length;
-  console.log('MENSAJES_INFO: pendientes=' + tam);
 
   for (let i = 0; i < tam; i++) {
     const data_img = await compraEntregaConnection.query("select first * from gen_imagenes where cod_imagen =" + data[i].cod_imagen);
