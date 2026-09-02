@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.21 29/08/2026   */
+/*version: 4.04.22 02/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.20 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.22 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -2168,6 +2168,12 @@ function applyTenantConfig(conf) {
   if (conf.api_mensajes_confirmacion_mensaje !== undefined || conf.apiMensajesConfirmacionMensaje !== undefined) {
     api_mensajes_confirmacion_mensaje = String(conf.api_mensajes_confirmacion_mensaje ?? conf.apiMensajesConfirmacionMensaje ?? api_mensajes_confirmacion_mensaje);
   }
+  if (conf.api_mensajes_confirmacion_mensajes !== undefined || conf.apiMensajesConfirmacionMensajes !== undefined) {
+    const variantes = conf.api_mensajes_confirmacion_mensajes ?? conf.apiMensajesConfirmacionMensajes;
+    api_mensajes_confirmacion_mensajes = Array.isArray(variantes)
+      ? variantes.map(v => String(v || '').trim()).filter(Boolean)
+      : [];
+  }
   if (conf.api_mensajes_confirmacion_respuestas_ok !== undefined || conf.apiMensajesConfirmacionRespuestasOk !== undefined) {
     api_mensajes_confirmacion_respuestas_ok = conf.api_mensajes_confirmacion_respuestas_ok ?? conf.apiMensajesConfirmacionRespuestasOk;
   }
@@ -2184,6 +2190,12 @@ function applyTenantConfig(conf) {
       api_mensajes_confirmacion_validez_ms
     );
     if (!Number.isFinite(api_mensajes_confirmacion_validez_ms) || api_mensajes_confirmacion_validez_ms < 0) api_mensajes_confirmacion_validez_ms = 0;
+  }
+  if (conf.api_mensajes_limite_diario !== undefined || conf.apiMensajesLimiteDiario !== undefined) {
+    api_mensajes_limite_diario = Math.max(0, Math.floor(asNumber(
+      conf.api_mensajes_limite_diario ?? conf.apiMensajesLimiteDiario,
+      api_mensajes_limite_diario
+    )));
   }
 
  
@@ -3968,11 +3980,14 @@ var api_mensajes_confirmacion_mensaje = String(
   process.env.API_MENSAJES_CONFIRMACION_MENSAJE ||
   'Hola, vas a recibir un mensaje de nuestra parte. Respondé OK para autorizar la recepción.'
 );
+var api_mensajes_confirmacion_mensajes = [];
 var api_mensajes_confirmacion_respuestas_ok = process.env.API_MENSAJES_CONFIRMACION_RESPUESTAS_OK || 'OK,SI,SÍ,S';
 var api_mensajes_confirmacion_reenviar_ms = Number(process.env.API_MENSAJES_CONFIRMACION_REENVIAR_MS || 86400000);
 if (!Number.isFinite(api_mensajes_confirmacion_reenviar_ms) || api_mensajes_confirmacion_reenviar_ms < 0) api_mensajes_confirmacion_reenviar_ms = 86400000;
 var api_mensajes_confirmacion_validez_ms = Number(process.env.API_MENSAJES_CONFIRMACION_VALIDEZ_MS || 0);
 if (!Number.isFinite(api_mensajes_confirmacion_validez_ms) || api_mensajes_confirmacion_validez_ms < 0) api_mensajes_confirmacion_validez_ms = 0;
+var api_mensajes_limite_diario = Math.max(0, Math.floor(Number(process.env.API_MENSAJES_LIMITE_DIARIO || 0) || 0));
+let apiMensajesLimiteLogDayKey = '';
 
 
 var consultaApiMensajesRunning = false;
@@ -7095,6 +7110,11 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
       }
 
       if (accion === 'E') {
+        const cupo = await estadoLimiteDiarioApiMensajes();
+        if (!cupo.permitido) {
+          logLimiteDiarioApiMensajes(cupo);
+          break;
+        }
         if (ultimoNro) await sleep(calcularDelayConsultaMensajesMs(ultimoNro, to));
         let contentNombre = item.content_nombre;
         if (contentNombre == null || contentNombre === '') contentNombre = 'archivo';
@@ -7238,14 +7258,56 @@ function respuestaConfirmaApiMensajes(body) {
   return respuestasOkApiMensajesConfirmacion().includes(b);
 }
 
-function textoSolicitudConfirmacionApiMensajes() {
-  return String(api_mensajes_confirmacion_mensaje || '').trim() || 'Hola, vas a recibir un mensaje de nuestra parte. Respondé OK para autorizar la recepción.';
+function textosSolicitudConfirmacionApiMensajes() {
+  const variantes = Array.isArray(api_mensajes_confirmacion_mensajes)
+    ? api_mensajes_confirmacion_mensajes.map(v => String(v || '').trim()).filter(Boolean)
+    : [];
+  const principal = String(api_mensajes_confirmacion_mensaje || '').trim();
+  if (principal && !variantes.includes(principal)) variantes.unshift(principal);
+  return variantes.length
+    ? variantes
+    : ['Hola, vas a recibir un mensaje de nuestra parte. Respondé OK para autorizar la recepción.'];
+}
+
+function textoSolicitudConfirmacionApiMensajes(nroTel = '') {
+  const variantes = textosSolicitudConfirmacionApiMensajes();
+  const semilla = String(tenantId || '') + ':' + onlyDigits(nroTel || '');
+  let hash = 0;
+  for (let i = 0; i < semilla.length; i++) hash = ((hash * 31) + semilla.charCodeAt(i)) >>> 0;
+  return variantes[hash % variantes.length];
 }
 
 function esTextoSolicitudConfirmacionApiMensajes(body) {
   const b = normalizarRespuestaConfirmacionApiMensajes(body);
   if (!b) return false;
-  return b === normalizarRespuestaConfirmacionApiMensajes(textoSolicitudConfirmacionApiMensajes());
+  return textosSolicitudConfirmacionApiMensajes()
+    .some(texto => b === normalizarRespuestaConfirmacionApiMensajes(texto));
+}
+
+async function estadoLimiteDiarioApiMensajes() {
+  const limite = Math.max(0, Math.floor(Number(api_mensajes_limite_diario) || 0));
+  if (limite <= 0) return { permitido: true, limite: 0, enviados: 0, restantes: null };
+  if (!await ensureMongo()) return { permitido: false, limite, enviados: 0, restantes: 0, motivo: 'mongo_no_disponible' };
+  const col = getDataCollection('wa_wweb_message_log');
+  if (!col) return { permitido: false, limite, enviados: 0, restantes: 0, motivo: 'coleccion_no_disponible' };
+  const dayKey = arDatePartsForStats(new Date()).dayKey;
+  const docs = await col.find({
+    tenantId: String(tenantId || ''),
+    numero: String(numero || ''),
+    direction: 'out',
+    dayKey
+  }).limit(limite).toArray();
+  const enviados = Array.isArray(docs) ? docs.length : 0;
+  return { permitido: enviados < limite, limite, enviados, restantes: Math.max(0, limite - enviados), dayKey };
+}
+
+function logLimiteDiarioApiMensajes(estado) {
+  const key = String(estado?.dayKey || arDatePartsForStats(new Date()).dayKey);
+  if (apiMensajesLimiteLogDayKey === key) return;
+  apiMensajesLimiteLogDayKey = key;
+  const log = '[API_MENSAJES] limite diario alcanzado: ' + String(estado?.enviados || 0) + '/' + String(estado?.limite || 0) + ' fecha=' + key;
+  console.log(log);
+  EscribirLog(log, 'event');
 }
 
 function esRespuestaNoValidaConfirmacionApiMensajes(body) {
@@ -7491,7 +7553,12 @@ async function estadoConfirmacionApiMensajes(nroTel) {
  
 
   if (debePedir) {
-    const texto = textoSolicitudConfirmacionApiMensajes();
+    const cupo = await estadoLimiteDiarioApiMensajes();
+    if (!cupo.permitido) {
+      logLimiteDiarioApiMensajes(cupo);
+      return { autorizado: false, motivo: 'limite_diario', solicitudEnviada: false, limiteDiario: true };
+    }
+    const texto = textoSolicitudConfirmacionApiMensajes(to);
     await safeSend(to + '@c.us', texto);
     await col.updateOne(
       { _id },
@@ -7830,6 +7897,13 @@ async function ConsultaApiMensajes(){
         continue;
       }
 
+      const cupoAntesDeConsultar = await estadoLimiteDiarioApiMensajes();
+      if (!cupoAntesDeConsultar.permitido) {
+        logLimiteDiarioApiMensajes(cupoAntesDeConsultar);
+        await sleepConsultaMensajesFueraDeHorario();
+        continue;
+      }
+
       const nroTelFrom = getApiMensajesNroTelFrom();
       if (!api2 || !api3 || !key || !nroTelFrom) {
         const detalle = `ConsultaApiMensajes sin configuración completa api2=${!!api2} api3=${!!api3} key=${!!key} nro_tel_from=${nroTelFrom || '(vacío)'}`;
@@ -8001,6 +8075,8 @@ async function ConsultaApiMensajes(){
               console.log(log);
               EscribirLog(log, 'event');
 
+              if (permisoConfirmacion.limiteDiario === true) return;
+
               if (permisoConfirmacion.cancelarMensaje !== true) {
                 await guardarPendienteConfirmacionApiMensajes(Nro_tel, {
                   id_msj_dest: Id_msj_dest_local,
@@ -8026,6 +8102,12 @@ async function ConsultaApiMensajes(){
 
               if (permisoConfirmacion.solicitudEnviada) ultimoNroTelConsultaMensajes = Nro_tel;
               continue;
+            }
+
+            const cupoAntesDeEnviar = await estadoLimiteDiarioApiMensajes();
+            if (!cupoAntesDeEnviar.permitido) {
+              logLimiteDiarioApiMensajes(cupoAntesDeEnviar);
+              return;
             }
 
             if (Content_nombre == null || Content_nombre === '') Content_nombre = 'archivo';
@@ -8201,6 +8283,7 @@ function getRuntimeConfigSnapshot() {
     api_mensajes_confirmacion_habilitada: api_mensajes_confirmacion_habilitada === true,
     api_mensajes_confirmacion_reenviar_ms: Number(api_mensajes_confirmacion_reenviar_ms) || 0,
     api_mensajes_confirmacion_validez_ms: Number(api_mensajes_confirmacion_validez_ms) || 0,
+    api_mensajes_limite_diario: Number(api_mensajes_limite_diario) || 0,
     seg_desde: Number(seg_desde) || 0,
     seg_hasta: Number(seg_hasta) || 0,
     seg_desde2: Number(seg_desde2) || 0,
