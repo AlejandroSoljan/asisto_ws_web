@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.22 02/09/2026   */
+/*version: 4.04.23 02/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.22 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.23 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -2197,6 +2197,39 @@ function applyTenantConfig(conf) {
       api_mensajes_limite_diario
     )));
   }
+  if (conf.api_mensajes_limite_no_contactos !== undefined || conf.apiMensajesLimiteNoContactos !== undefined) {
+    api_mensajes_limite_no_contactos = Math.max(0, Math.floor(asNumber(
+      conf.api_mensajes_limite_no_contactos ?? conf.apiMensajesLimiteNoContactos,
+      api_mensajes_limite_no_contactos
+    )));
+  }
+  if (conf.api_mensajes_requerir_contacto_o_historial !== undefined || conf.apiMensajesRequerirContactoOHistorial !== undefined) {
+    api_mensajes_requerir_contacto_o_historial = parseBoolLike(
+      conf.api_mensajes_requerir_contacto_o_historial ?? conf.apiMensajesRequerirContactoOHistorial,
+      api_mensajes_requerir_contacto_o_historial
+    );
+  }
+  if (conf.api_mensajes_historial_whatsapp_limite !== undefined || conf.apiMensajesHistorialWhatsappLimite !== undefined) {
+    api_mensajes_historial_whatsapp_limite = Math.max(1, Math.min(500, Math.floor(asNumber(
+      conf.api_mensajes_historial_whatsapp_limite ?? conf.apiMensajesHistorialWhatsappLimite,
+      api_mensajes_historial_whatsapp_limite
+    ))));
+  }
+  if (conf.api_mensajes_respuestas_baja !== undefined || conf.apiMensajesRespuestasBaja !== undefined) {
+    api_mensajes_respuestas_baja = conf.api_mensajes_respuestas_baja ?? conf.apiMensajesRespuestasBaja;
+  }
+  if (conf.api_mensajes_circuit_min_muestra !== undefined || conf.apiMensajesCircuitMinMuestra !== undefined) {
+    api_mensajes_circuit_min_muestra = Math.max(1, Math.floor(asNumber(conf.api_mensajes_circuit_min_muestra ?? conf.apiMensajesCircuitMinMuestra, api_mensajes_circuit_min_muestra)));
+  }
+  if (conf.api_mensajes_circuit_sin_respuesta_ratio !== undefined || conf.apiMensajesCircuitSinRespuestaRatio !== undefined) {
+    api_mensajes_circuit_sin_respuesta_ratio = Math.max(0, Math.min(1, asNumber(conf.api_mensajes_circuit_sin_respuesta_ratio ?? conf.apiMensajesCircuitSinRespuestaRatio, api_mensajes_circuit_sin_respuesta_ratio)));
+  }
+  if (conf.api_mensajes_circuit_antiguedad_ms !== undefined || conf.apiMensajesCircuitAntiguedadMs !== undefined) {
+    api_mensajes_circuit_antiguedad_ms = Math.max(60000, asNumber(conf.api_mensajes_circuit_antiguedad_ms ?? conf.apiMensajesCircuitAntiguedadMs, api_mensajes_circuit_antiguedad_ms));
+  }
+  if (conf.api_mensajes_circuit_fallos_consecutivos !== undefined || conf.apiMensajesCircuitFallosConsecutivos !== undefined) {
+    api_mensajes_circuit_fallos_consecutivos = Math.max(1, Math.floor(asNumber(conf.api_mensajes_circuit_fallos_consecutivos ?? conf.apiMensajesCircuitFallosConsecutivos, api_mensajes_circuit_fallos_consecutivos)));
+  }
 
  
 
@@ -3987,6 +4020,15 @@ if (!Number.isFinite(api_mensajes_confirmacion_reenviar_ms) || api_mensajes_conf
 var api_mensajes_confirmacion_validez_ms = Number(process.env.API_MENSAJES_CONFIRMACION_VALIDEZ_MS || 0);
 if (!Number.isFinite(api_mensajes_confirmacion_validez_ms) || api_mensajes_confirmacion_validez_ms < 0) api_mensajes_confirmacion_validez_ms = 0;
 var api_mensajes_limite_diario = Math.max(0, Math.floor(Number(process.env.API_MENSAJES_LIMITE_DIARIO || 0) || 0));
+var api_mensajes_limite_no_contactos = Math.max(0, Math.floor(Number(process.env.API_MENSAJES_LIMITE_NO_CONTACTOS || 0) || 0));
+var api_mensajes_requerir_contacto_o_historial = parseBoolLike(process.env.API_MENSAJES_REQUERIR_CONTACTO_O_HISTORIAL, false);
+var api_mensajes_historial_whatsapp_limite = Math.max(1, Math.min(500, Math.floor(Number(process.env.API_MENSAJES_HISTORIAL_WHATSAPP_LIMITE || 100) || 100)));
+var api_mensajes_respuestas_baja = process.env.API_MENSAJES_RESPUESTAS_BAJA || 'BAJA';
+var api_mensajes_circuit_min_muestra = Math.max(1, Math.floor(Number(process.env.API_MENSAJES_CIRCUIT_MIN_MUESTRA || 10) || 10));
+var api_mensajes_circuit_sin_respuesta_ratio = Math.max(0, Math.min(1, Number(process.env.API_MENSAJES_CIRCUIT_SIN_RESPUESTA_RATIO || 0.8) || 0.8));
+var api_mensajes_circuit_antiguedad_ms = Math.max(60000, Number(process.env.API_MENSAJES_CIRCUIT_ANTIGUEDAD_MS || 7200000) || 7200000);
+var api_mensajes_circuit_fallos_consecutivos = Math.max(1, Math.floor(Number(process.env.API_MENSAJES_CIRCUIT_FALLOS_CONSECUTIVOS || 3) || 3));
+let apiMensajesFallosConsecutivos = 0;
 let apiMensajesLimiteLogDayKey = '';
 
 
@@ -7126,6 +7168,7 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
           const media = new MessageMedia(mimeType, String(contenido), contentNombre);
           await io.emit('message', 'Mensaje: ' + nroTelFormat + ': ' + msj);
           const sentApiMensaje = await safeSend(nroTelFormat, media, { caption: msj });
+          apiMensajesFallosConsecutivos = 0;
           await recordApiMensajesBillingWindow(to, {
             sentMessage: sentApiMensaje,
             messageType: 'media',
@@ -7144,6 +7187,7 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
         } else {
           await io.emit('message', 'Mensaje: ' + nroTelFormat + ': ' + msj);
           const sentApiMensaje = await safeSend(nroTelFormat, msj);
+          apiMensajesFallosConsecutivos = 0;
           await recordApiMensajesBillingWindow(to, {
             sentMessage: sentApiMensaje,
             messageType: 'text',
@@ -7269,6 +7313,14 @@ function textosSolicitudConfirmacionApiMensajes() {
     : ['Hola, vas a recibir un mensaje de nuestra parte. Respondé OK para autorizar la recepción.'];
 }
 
+function respuestaBajaApiMensajes(body) {
+  const raw = Array.isArray(api_mensajes_respuestas_baja)
+    ? api_mensajes_respuestas_baja
+    : String(api_mensajes_respuestas_baja || '').split(',');
+  const value = String(body || '').trim().toUpperCase();
+  return !!value && raw.map(v => String(v || '').trim().toUpperCase()).filter(Boolean).includes(value);
+}
+
 function textoSolicitudConfirmacionApiMensajes(nroTel = '') {
   const variantes = textosSolicitudConfirmacionApiMensajes();
   const semilla = String(tenantId || '') + ':' + onlyDigits(nroTel || '');
@@ -7308,6 +7360,139 @@ function logLimiteDiarioApiMensajes(estado) {
   const log = '[API_MENSAJES] limite diario alcanzado: ' + String(estado?.enviados || 0) + '/' + String(estado?.limite || 0) + ' fecha=' + key;
   console.log(log);
   EscribirLog(log, 'event');
+}
+
+async function señalesContactoApiMensajes(nroTel) {
+  const to = onlyDigits(nroTel || '');
+  let esContactoPropio = false;
+  let historialEntrante = false;
+  let historialOrigen = '';
+  try {
+    const contacto = await client.getContactById(to + '@c.us');
+    esContactoPropio = contacto?.isMyContact === true;
+  } catch (e) {
+    try { EscribirLog('[API_MENSAJES_RIESGO] no se pudo consultar isMyContact nro=' + to + ': ' + String(e?.message || e), 'error'); } catch {}
+  }
+  try {
+    if (await ensureMongo()) {
+      const col = getDataCollection('wa_wweb_message_log');
+      const rows = col
+        ? await col.find({ tenantId: String(tenantId || ''), numero: String(numero || ''), contact: to, direction: 'in' }).limit(1).toArray()
+        : [];
+      historialEntrante = Array.isArray(rows) && rows.length > 0;
+      if (historialEntrante) historialOrigen = 'mongo';
+    }
+  } catch (e) {
+    try { EscribirLog('[API_MENSAJES_RIESGO] no se pudo consultar historial nro=' + to + ': ' + String(e?.message || e), 'error'); } catch {}
+  }
+  if (!historialEntrante) {
+    try {
+      const chat = await client.getChatById(to + '@c.us');
+      const limite = Math.max(1, Math.min(500, Number(api_mensajes_historial_whatsapp_limite) || 100));
+      const messages = chat && typeof chat.fetchMessages === 'function'
+        ? await chat.fetchMessages({ limit: limite })
+        : [];
+      historialEntrante = Array.isArray(messages) && messages.some(m => m?.fromMe === false);
+      if (historialEntrante) historialOrigen = 'whatsapp';
+    } catch (e) {
+      try { EscribirLog('[API_MENSAJES_RIESGO] no se pudo consultar historial WhatsApp nro=' + to + ': ' + String(e?.message || e), 'error'); } catch {}
+    }
+  }
+  return {
+    esContactoPropio,
+    historialEntrante,
+    historialOrigen: historialOrigen || 'sin_evidencia',
+    historialVerificadoAt: new Date(),
+    contactoConocido: esContactoPropio || historialEntrante
+  };
+}
+
+async function estadoLimiteNoContactosApiMensajes() {
+  const limite = Math.max(0, Math.floor(Number(api_mensajes_limite_no_contactos) || 0));
+  if (limite <= 0) return { permitido: true, limite: 0, enviados: 0 };
+  if (!await ensureMongo()) return { permitido: false, limite, enviados: 0, motivo: 'mongo_no_disponible' };
+  const col = apiMensajesConfirmacionCollection();
+  if (!col) return { permitido: false, limite, enviados: 0, motivo: 'coleccion_no_disponible' };
+  const dayKey = arDatePartsForStats(new Date()).dayKey;
+  const docs = await col.find({
+    tenantId: String(tenantId || '').toUpperCase(),
+    numeroFrom: getApiMensajesNroTelFrom(),
+    solicitudDayKey: dayKey,
+    contactoConocido: false
+  }).limit(limite).toArray();
+  const enviados = Array.isArray(docs) ? docs.length : 0;
+  return { permitido: enviados < limite, limite, enviados, restantes: Math.max(0, limite - enviados), dayKey };
+}
+
+async function registrarExclusionApiMensajes(nroTel, motivo, respuesta = '') {
+  try {
+    if (!await ensureMongo()) return false;
+    const col = apiMensajesConfirmacionCollection();
+    if (!col) return false;
+    const to = onlyDigits(nroTel || '');
+    if (!to) return false;
+    const now = new Date();
+    await col.updateOne(
+      { _id: apiMensajesConfirmacionId(to) },
+      {
+        $setOnInsert: { createdAt: now },
+        $set: {
+          ...buildSetCanceladoConfirmacionApiMensajes(now, to, respuesta, motivo),
+          exclusionPermanente: true,
+          exclusionMotivo: String(motivo || 'excluido'),
+          exclusionAt: now
+        }
+      },
+      { upsert: true }
+    );
+    return true;
+  } catch (e) {
+    try { EscribirLog('[API_MENSAJES_EXCLUSION] error nro=' + String(nroTel || '') + ': ' + String(e?.message || e), 'error'); } catch {}
+    return false;
+  }
+}
+
+async function registrarMetricaApiMensajes(tipo) {
+  try {
+    if (!await ensureMongo()) return;
+    const col = apiMensajesConfirmacionCollection();
+    if (!col) return;
+    const dayKey = arDatePartsForStats(new Date()).dayKey;
+    const key = String(tipo || 'evento').replace(/[^a-z0-9_]/gi, '_');
+    await col.updateOne(
+      { _id: apiMensajesConfirmacionTenantId() + ':' + apiMensajesConfirmacionNumeroFrom() + ':metricas:' + dayKey },
+      {
+        $setOnInsert: { createdAt: new Date(), tenantId: apiMensajesConfirmacionTenantId(), numeroFrom: apiMensajesConfirmacionNumeroFrom(), solicitudDayKey: dayKey, tipoDocumento: 'metrica' },
+        $set: { updatedAt: new Date() },
+        $inc: { ['contadores.' + key]: 1 }
+      },
+      { upsert: true }
+    );
+  } catch {}
+}
+
+async function estadoCircuitBreakerApiMensajes() {
+  try {
+    if (!await ensureMongo()) return { abierto: true, motivo: 'mongo_no_disponible' };
+    const col = apiMensajesConfirmacionCollection();
+    if (!col) return { abierto: true, motivo: 'coleccion_no_disponible' };
+    const dayKey = arDatePartsForStats(new Date()).dayKey;
+    const cutoff = new Date(Date.now() - Math.max(60000, Number(api_mensajes_circuit_antiguedad_ms) || 7200000));
+    const docs = await col.find({
+      tenantId: apiMensajesConfirmacionTenantId(),
+      numeroFrom: apiMensajesConfirmacionNumeroFrom(),
+      solicitudDayKey: dayKey,
+      tipoDocumento: { $ne: 'metrica' },
+      pedidoAt: { $lte: cutoff }
+    }).limit(500).toArray();
+    const muestra = Array.isArray(docs) ? docs.length : 0;
+    const sinRespuesta = (docs || []).filter(d => d?.estado === 'pendiente' || d?.motivoCancelacion === 'sin_respuesta_timeout').length;
+    const ratio = muestra > 0 ? sinRespuesta / muestra : 0;
+    const abierto = muestra >= Math.max(1, Number(api_mensajes_circuit_min_muestra) || 10) && ratio >= Number(api_mensajes_circuit_sin_respuesta_ratio || 0.8);
+    return { abierto, muestra, sinRespuesta, ratio, dayKey };
+  } catch (e) {
+    return { abierto: true, motivo: String(e?.message || e) };
+  }
 }
 
 function esRespuestaNoValidaConfirmacionApiMensajes(body) {
@@ -7421,6 +7606,7 @@ async function detectarNoValidaConfirmacionApiMensajesEnChat(nroTel, doc) {
       if (!col) return false;
       const now = new Date();
       const setCancelado = buildSetCanceladoConfirmacionApiMensajes(now, to, body, 'respuesta_no_valida');
+      if (respuestaBajaApiMensajes(body)) Object.assign(setCancelado, { exclusionPermanente: true, exclusionMotivo: 'baja_cliente', exclusionAt: now });
       await col.updateOne(
         { _id: doc._id || apiMensajesConfirmacionId(to) },
         {
@@ -7449,9 +7635,15 @@ async function detectarNoValidaConfirmacionApiMensajesEnChat(nroTel, doc) {
 }
 
 async function estadoConfirmacionApiMensajes(nroTel) {
-  if (api_mensajes_confirmacion_habilitada !== true) return { autorizado: true, motivo: 'disabled' };
   const to = onlyDigits(nroTel || '');
   if (!to) return { autorizado: false, motivo: 'sin_numero' };
+  if (api_mensajes_confirmacion_habilitada !== true) {
+    if (api_mensajes_requerir_contacto_o_historial !== true) return { autorizado: true, motivo: 'disabled' };
+    const señales = await señalesContactoApiMensajes(to);
+    return señales.contactoConocido
+      ? { autorizado: true, motivo: 'contacto_o_historial', señales }
+      : { autorizado: false, motivo: 'contacto_o_historial_requerido', solicitudEnviada: false, detenerConsulta: true, señales };
+  }
   if (!await ensureMongo()) return { autorizado: false, motivo: 'mongo_no_disponible' };
   const col = apiMensajesConfirmacionCollection();
   if (!col) return { autorizado: false, motivo: 'coleccion_no_disponible' };
@@ -7461,8 +7653,14 @@ async function estadoConfirmacionApiMensajes(nroTel) {
   const reenviarMs = Math.max(0, Number(api_mensajes_confirmacion_reenviar_ms) || 0);
   let doc = await col.findOne({ _id });
 
+  if (doc?.exclusionPermanente === true) {
+    return { autorizado: false, motivo: doc.exclusionMotivo || 'exclusion_permanente', solicitudEnviada: false, cancelarMensaje: true, doc };
+  }
 
   if (apiMensajesConfirmacionAceptada(doc)) return { autorizado: true, motivo: 'aceptado', doc };
+  if (doc && doc.solicitudDayKey === arDatePartsForStats(now).dayKey && doc.estado === 'cancelado') {
+    return { autorizado: false, motivo: doc.motivoCancelacion || 'solicitud_ya_realizada_hoy', solicitudEnviada: false, cancelarMensaje: true, doc };
+  }
   if (doc && doc.estado === 'cancelado') {
     const baseCancelMs = new Date(doc.canceladoAt || doc.updatedAt || doc.pedidoAt || 0).getTime();
     const cancelacionVigente = reenviarMs <= 0 || !Number.isFinite(baseCancelMs) || baseCancelMs <= 0 || (Date.now() - baseCancelMs) < reenviarMs;
@@ -7558,6 +7756,18 @@ async function estadoConfirmacionApiMensajes(nroTel) {
       logLimiteDiarioApiMensajes(cupo);
       return { autorizado: false, motivo: 'limite_diario', solicitudEnviada: false, limiteDiario: true };
     }
+    const señales = await señalesContactoApiMensajes(to);
+    if (!señales.contactoConocido) {
+      const cupoNoContactos = await estadoLimiteNoContactosApiMensajes();
+      if (!cupoNoContactos.permitido) {
+        const logRiesgo = '[API_MENSAJES_RIESGO] limite de solicitudes sin contacto/historial alcanzado: ' +
+          String(cupoNoContactos.enviados || 0) + '/' + String(cupoNoContactos.limite || 0) +
+          ' fecha=' + String(cupoNoContactos.dayKey || '');
+        console.log(logRiesgo);
+        EscribirLog(logRiesgo, 'event');
+        return { autorizado: false, motivo: 'limite_no_contactos', solicitudEnviada: false, limiteDiario: true };
+      }
+    }
     const texto = textoSolicitudConfirmacionApiMensajes(to);
     await safeSend(to + '@c.us', texto);
     await col.updateOne(
@@ -7571,6 +7781,13 @@ async function estadoConfirmacionApiMensajes(nroTel) {
           estado: 'pendiente',
           pedidoAt: now,
           pedidoTexto: texto,
+          solicitudDayKey: arDatePartsForStats(now).dayKey,
+          esContactoPropio: señales.esContactoPropio,
+          historialEntrante: señales.historialEntrante,
+          historialOrigen: señales.historialOrigen,
+          historialVerificadoAt: señales.historialVerificadoAt,
+          contactoConocido: señales.contactoConocido,
+          requiereContactoOHistorial: api_mensajes_requerir_contacto_o_historial === true,
           respuestasOk: respuestasOkApiMensajesConfirmacion(),
           updatedAt: now
         }
@@ -7745,7 +7962,12 @@ async function registrarRespuestaNoValidaConfirmacionApiMensajes(message) {
       ]
     }).limit(20).toArray();
 
-   const docsConPendientes = docsPendientes.filter((d) => pendientesConfirmacionApiMensajesArray(d).length > 0);
+   const respuestaMs = getWhatsappMessageTimestampMs(message);
+   const docsConPendientes = docsPendientes.filter((d) => {
+     if (!pendientesConfirmacionApiMensajesArray(d).length) return false;
+     const pedidoMs = d?.pedidoAt ? new Date(d.pedidoAt).getTime() : 0;
+     return !(pedidoMs && respuestaMs && respuestaMs < (pedidoMs - 5000));
+   });
     if (!docsConPendientes.length) return false;
 
     const docIds = docsConPendientes.map((d) => d._id).filter(Boolean);
@@ -7764,6 +7986,7 @@ async function registrarRespuestaNoValidaConfirmacionApiMensajes(message) {
 
     
      const setData = buildSetCanceladoConfirmacionApiMensajes(now, cancelPhone, bodyRaw, 'respuesta_no_valida');
+    if (respuestaBajaApiMensajes(bodyRaw)) Object.assign(setData, { exclusionPermanente: true, exclusionMotivo: 'baja_cliente', exclusionAt: now });
     const upd = await col.updateMany({ _id: { $in: docIds } }, { $set: setData });
     matched = Number(upd?.matchedCount || upd?.modifiedCount || matched || 0);
 
@@ -7900,6 +8123,16 @@ async function ConsultaApiMensajes(){
       const cupoAntesDeConsultar = await estadoLimiteDiarioApiMensajes();
       if (!cupoAntesDeConsultar.permitido) {
         logLimiteDiarioApiMensajes(cupoAntesDeConsultar);
+        await sleepConsultaMensajesFueraDeHorario();
+        continue;
+      }
+      const circuit = await estadoCircuitBreakerApiMensajes();
+      if (circuit.abierto) {
+        const logCircuit = '[API_MENSAJES_CIRCUIT] lote detenido muestra=' + String(circuit.muestra || 0) +
+          ' sin_respuesta=' + String(circuit.sinRespuesta || 0) + ' ratio=' + String(Number(circuit.ratio || 0).toFixed(3)) +
+          (circuit.motivo ? ' motivo=' + String(circuit.motivo) : '');
+        console.log(logCircuit);
+        EscribirLog(logCircuit, 'event');
         await sleepConsultaMensajesFueraDeHorario();
         continue;
       }
@@ -8044,6 +8277,7 @@ async function ConsultaApiMensajes(){
               console.log("numero no registrado");
               await io.emit('message', 'Mensaje: ' + Nro_tel_format + ': Número no Registrado');
               await actualizar_estado_mensaje(url_confirma_msg, 'I', null, null, null, null, null, Id_msj_renglon_local, Id_msj_dest_local);
+              await registrarExclusionApiMensajes(Nro_tel, 'numero_no_registrado');
               continue;
             }
 
@@ -8075,7 +8309,7 @@ async function ConsultaApiMensajes(){
               console.log(log);
               EscribirLog(log, 'event');
 
-              if (permisoConfirmacion.limiteDiario === true) return;
+              if (permisoConfirmacion.limiteDiario === true || permisoConfirmacion.detenerConsulta === true) return;
 
               if (permisoConfirmacion.cancelarMensaje !== true) {
                 await guardarPendienteConfirmacionApiMensajes(Nro_tel, {
@@ -8132,6 +8366,7 @@ async function ConsultaApiMensajes(){
               }
               await io.emit('message', 'Mensaje: ' + Nro_tel_format + ': ' + Msj);
               const sentApiMensaje = await safeSend(Nro_tel_format, media, { caption: Msj });
+              apiMensajesFallosConsecutivos = 0;
               await recordApiMensajesBillingWindow(Nro_tel, {
                 sentMessage: sentApiMensaje,
                 messageType: 'media',
@@ -8157,6 +8392,7 @@ async function ConsultaApiMensajes(){
               }
               await io.emit('message', 'Mensaje: ' + Nro_tel_format + ': ' + Msj);
               const sentApiMensaje = await safeSend(Nro_tel_format, Msj);
+              apiMensajesFallosConsecutivos = 0;
               await recordApiMensajesBillingWindow(Nro_tel, {
                 sentMessage: sentApiMensaje,
                 messageType: 'text',
@@ -8206,6 +8442,14 @@ async function ConsultaApiMensajes(){
       } catch (err) {
         console.log(err);
         EscribirLog('ConsultaApiMensajes error: ' + String(err?.message || err), "error");
+        apiMensajesFallosConsecutivos++;
+        registrarMetricaApiMensajes('fallos').catch(() => {});
+        if (apiMensajesFallosConsecutivos >= Math.max(1, Number(api_mensajes_circuit_fallos_consecutivos) || 3)) {
+          const logCircuit = '[API_MENSAJES_CIRCUIT] lote detenido por fallos consecutivos=' + String(apiMensajesFallosConsecutivos);
+          console.log(logCircuit);
+          EscribirLog(logCircuit, 'error');
+          return;
+        }
       }
     
 
@@ -8284,6 +8528,13 @@ function getRuntimeConfigSnapshot() {
     api_mensajes_confirmacion_reenviar_ms: Number(api_mensajes_confirmacion_reenviar_ms) || 0,
     api_mensajes_confirmacion_validez_ms: Number(api_mensajes_confirmacion_validez_ms) || 0,
     api_mensajes_limite_diario: Number(api_mensajes_limite_diario) || 0,
+    api_mensajes_limite_no_contactos: Number(api_mensajes_limite_no_contactos) || 0,
+    api_mensajes_requerir_contacto_o_historial: api_mensajes_requerir_contacto_o_historial === true,
+    api_mensajes_historial_whatsapp_limite: Number(api_mensajes_historial_whatsapp_limite) || 100,
+    api_mensajes_circuit_min_muestra: Number(api_mensajes_circuit_min_muestra) || 10,
+    api_mensajes_circuit_sin_respuesta_ratio: Number(api_mensajes_circuit_sin_respuesta_ratio) || 0.8,
+    api_mensajes_circuit_antiguedad_ms: Number(api_mensajes_circuit_antiguedad_ms) || 7200000,
+    api_mensajes_circuit_fallos_consecutivos: Number(api_mensajes_circuit_fallos_consecutivos) || 3,
     seg_desde: Number(seg_desde) || 0,
     seg_hasta: Number(seg_hasta) || 0,
     seg_desde2: Number(seg_desde2) || 0,
@@ -10363,6 +10614,7 @@ client.on('authenticated', async () => {
 
 
 client.on('auth_failure', async function(session) {
+  registrarMetricaApiMensajes('bloqueos').catch(() => {});
   telefono_qr = "";
   io.emit('message', 'Auth failure');
  
