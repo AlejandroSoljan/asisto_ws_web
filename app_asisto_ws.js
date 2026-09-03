@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.26 03/09/2026   */
+/*version: 4.04.27 03/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.26 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.27 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -8908,7 +8908,7 @@ async function altaApiMensaje({ nroTel, mensaje, identificacion1, tipo = 'MENSAJ
   try { return res.text ? JSON.parse(res.text) : true; } catch { return res.text || true; }
 }
 
-async function altaApiMensajeCompra({ nroTel, mensaje, identificacion1 }) {
+async function altaApiMensajeCompra({ nroTel, mensaje, identificacion1, prioridad = 2, content = null, contentNombre = null, tipo = 'COMPRA' }) {
   const nroDestino = onlyDigits(nroTel);
   const nroFrom = getApiMensajesNroTelFrom();
   if (!api_mensajes_alta) throw new Error('api_mensajes_alta_sin_configurar');
@@ -8921,15 +8921,21 @@ async function altaApiMensajeCompra({ nroTel, mensaje, identificacion1 }) {
     nro_tel_from: nroFrom
   });
 
+  const prioridadNormalizada = Math.max(1, Math.floor(Number(prioridad) || 1));
+  const linea = { orden: 1, mensaje: String(mensaje || '') };
+  if (content != null && String(content) !== '') {
+    linea.content = String(content);
+    linea.content_nombre = String(contentNombre || 'archivo');
+  }
+
   const body = {
     mensaje: [
       { fecha_envio: formatFechaEnvioApiMensajes(),
-        agente:'SUPER'
+        agente:'SUPER',
+        prioridad: prioridadNormalizada
        }
     ],
-    lineas: [
-      { orden: 1, mensaje: String(mensaje || '') }
-    ],
+    lineas: [linea],
     destinatarios: [
       {
         orden: 1,
@@ -8958,15 +8964,15 @@ async function altaApiMensajeCompra({ nroTel, mensaje, identificacion1 }) {
   }
 
   try {
-    console.log('COMPRA: API Alta OK -> ' + nroDestino + ' status=' + resp.status);
-    io.emit('message', 'COMPRA: API Alta OK -> ' + nroDestino);
+    console.log(String(tipo || 'MENSAJE') + ': API Alta OK -> ' + nroDestino + ' status=' + resp.status + ' prioridad=' + prioridadNormalizada);
+    io.emit('message', String(tipo || 'MENSAJE') + ': API Alta OK -> ' + nroDestino);
   } catch {}
 
   return resp.data;
 }
 
 async function altaApiMensajeEntrega({ nroTel, mensaje, identificacion1 }) {
-  const data = await altaApiMensajeCompra({ nroTel, mensaje, identificacion1 });
+  const data = await altaApiMensajeCompra({ nroTel, mensaje, identificacion1, prioridad: 1, tipo: 'ENTREGA' });
   try {
    const nroDestino = onlyDigits(nroTel);
     console.log('ENTREGA: API Alta OK -> ' + nroDestino);
@@ -9372,10 +9378,9 @@ async function enviar_mensajes_info() {
   for (let i = 0; i < tam; i++) {
     const data_img = await compraEntregaConnection.query("select first * from gen_imagenes where cod_imagen =" + data[i].cod_imagen);
     const tam_img = data_img.length;
-    const segundos = Math.random() * (seg_hasta - seg_desde) + seg_desde;
-
     let arrayTelefono = String(data[i].destino || '').split(';');
     const tam2 = arrayTelefono.length;
+    let altasOk = 0;
 
     for (let j = 0; j < tam2; j++) {
       // Misma lógica de app_chatbot_super: normalizo y armo JID antes de validar/enviar.
@@ -9387,8 +9392,10 @@ async function enviar_mensajes_info() {
       if (telefono_api == true) {
         const msg_utf = new String(data[i].cuerpo, 'UTF-8');
         console.log('MENSAJE: ' + data[i].asunto + ' ' + msg_utf + ' ' + jid);
-        io.emit('message', 'MENSAJE: ' + data[i].asunto + ' ' + msg_utf + ' ' + jid + ' ' + segundos);
+        io.emit('message', 'MENSAJE API Alta prioridad 3: ' + data[i].asunto + ' ' + jid);
 
+        let content = null;
+        let contentNombre = null;
         if (tam_img > 0) {
           console.log('img ' + data_img[0].path);
 
@@ -9401,35 +9408,34 @@ async function enviar_mensajes_info() {
 
           const fileData = fs.readFileSync(data_img[0].path, { encoding: 'base64' });
           console.log('tipo de dato: ' + detectMimeType(fileData));
+          content = fileData;
+          contentNombre = data_img[0].nombre || data_img[0].path || 'archivo';
+        }
 
-          const media = new MessageMedia(detectMimeType(fileData), fileData, data_img[0].nombre);
-          const isReg = await client.isRegisteredUser(jid).catch(() => false);
-          if (!isReg) {
-            console.log('numero no registrado');
-            await compraEntregaConnection.query("update es_mensajes set motivo_no_envio = 'numero no registrado' where id='" + data[i].id + "'");
-          } else {
-            // Guardamos wsMsgId -> id DB para que message_ack no dependa sólo de id_msg.
-            const sent = await safeSendMessage(jid, media, { caption: String(msg_utf) });
-            if (sent?.id?.id) pendingAck.set(sent.id.id, data[i].id);
-            if (!id_msg) id_msg = data[i].id;
-          }
-        } else {
-          const isReg2 = await client.isRegisteredUser(jid).catch(() => false);
-          if (!isReg2) {
-            console.log('numero no registrado');
-            await compraEntregaConnection.query("update es_mensajes set motivo_no_envio = 'numero no registrado' where id='" + data[i].id + "'");
-          } else {
-            const sent2 = await safeSendMessage(jid, String(msg_utf));
-            if (sent2?.id?.id) pendingAck.set(sent2.id.id, data[i].id);
-            if (!id_msg) id_msg = data[i].id;
-          }
+        try {
+          await altaApiMensajeCompra({
+            nroTel: jid,
+            mensaje: String(msg_utf),
+            identificacion1: String(data[i].id || data[i].asunto || 'es_mensajes'),
+            prioridad: 3,
+            content,
+            contentNombre,
+            tipo: 'MENSAJE'
+          });
+          altasOk++;
+        } catch (e) {
+          console.log('MENSAJE: API Alta ERROR ->', jid, e?.message || e);
+          io.emit('message', 'MENSAJE: API Alta ERROR -> ' + jid);
         }
       } else {
         console.log('TELEFONO BLOQUEADO: ' + arrayTelefono[j]);
         io.emit('message', 'TELEFONO BLOQUEADO: ' + arrayTelefono[j]);
       }
 
+      if (altasOk !== tam2) continue;
+
       await compraEntregaConnection.query("update es_mensajes set estado = 'S' where id='" + data[i].id + "'");
+
 
       let l_fecha = new Date();
       const numberOfMlSeconds = l_fecha.getTime();
@@ -9443,8 +9449,6 @@ async function enviar_mensajes_info() {
       // No pisar id_msg si todavía esperamos ACK de otro envío.
       if (!id_msg) id_msg = data[i].id;
 
-      console.log('segundos espera. ' + segundos);
-      await sleep(segundos);
     }
   }
 }
