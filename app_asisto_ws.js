@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.28 03/09/2026   */
+/*version: 4.04.29 03/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.28 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.29 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -8937,7 +8937,9 @@ async function altaApiMensaje({ nroTel, mensaje, identificacion1, tipo = 'MENSAJ
 
 async function altaApiMensajeCompra({ nroTel, mensaje, identificacion1, prioridad = 2, content = null, contentNombre = null, tipo = 'COMPRA' }) {
   const nroDestino = onlyDigits(nroTel);
-  const nroFrom = getApiMensajesNroTelFrom();
+  const nroFrom = normalizarNroTelFromApiMensajes(getApiMensajesNroTelFrom())
+    .replace(/^549(\d{10})$/, '$1')
+    .replace(/^54(\d{10})$/, '$1');
   if (!api_mensajes_alta) throw new Error('api_mensajes_alta_sin_configurar');
   if (!api_mensajes_alta_key) throw new Error('api_mensajes_alta_key_sin_configurar');
   if (!nroFrom) throw new Error('api_mensajes_alta_nro_tel_from_sin_configurar');
