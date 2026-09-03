@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.27 03/09/2026   */
+/*version: 4.04.28 03/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.27 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.28 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -2169,6 +2169,10 @@ function applyTenantConfig(conf) {
       api_mensajes_confirmacion_habilitada
     );
   }
+  if (conf.api_mensajes_confirmacion_prioridades !== undefined || conf.apiMensajesConfirmacionPrioridades !== undefined) {
+    api_mensajes_confirmacion_prioridades = normalizarPrioridadesConfirmacion(
+      conf.api_mensajes_confirmacion_prioridades ?? conf.apiMensajesConfirmacionPrioridades);
+  }
   if (conf.api_mensajes_confirmacion_mensaje !== undefined || conf.apiMensajesConfirmacionMensaje !== undefined) {
     api_mensajes_confirmacion_mensaje = String(conf.api_mensajes_confirmacion_mensaje ?? conf.apiMensajesConfirmacionMensaje ?? api_mensajes_confirmacion_mensaje);
   }
@@ -4013,6 +4017,9 @@ var api_mensajes_confirmacion_habilitada = parseBoolLike(
   process.env.API_MENSAJES_CONFIRMACION_HABILITADA || process.env.CONFIRMAR_API_MENSAJES,
   false
 );
+var api_mensajes_confirmacion_prioridades = process.env.API_MENSAJES_CONFIRMACION_PRIORIDADES !== undefined
+  ? normalizarPrioridadesConfirmacion(process.env.API_MENSAJES_CONFIRMACION_PRIORIDADES)
+  : null;
 var api_mensajes_confirmacion_mensaje = String(
   process.env.API_MENSAJES_CONFIRMACION_MENSAJE ||
   'Hola, vas a recibir un mensaje de nuestra parte. Respondé OK para autorizar la recepción.'
@@ -7317,6 +7324,22 @@ function respuestasOkApiMensajesConfirmacion() {
   const out = arr.map(normalizarRespuestaConfirmacionApiMensajes).filter(Boolean);
   return out.length ? out : ['OK'];
 }
+function normalizarPrioridadesConfirmacion(value) {
+  if (value === undefined || value === null) return null;
+  const raw = Array.isArray(value) ? value : String(value).split(/[|,;]/g);
+  return Array.from(new Set(raw
+    .map((item) => Number(item))
+    .filter((item) => Number.isFinite(item))
+    .map((item) => Math.floor(item))));
+}
+
+function requiereConfirmacionPrioridadApiMensajes(prioridad) {
+  if (api_mensajes_confirmacion_habilitada !== true) return false;
+  if (api_mensajes_confirmacion_prioridades === null) return true;
+  const valor = Number(prioridad);
+  return Number.isFinite(valor) && api_mensajes_confirmacion_prioridades.includes(Math.floor(valor));
+}
+
 
 function respuestaConfirmaApiMensajes(body) {
   const b = normalizarRespuestaConfirmacionApiMensajes(body);
@@ -7672,9 +7695,12 @@ async function detectarNoValidaConfirmacionApiMensajesEnChat(nroTel, doc) {
   return false;
 }
 
-async function estadoConfirmacionApiMensajes(nroTel, descripcion = '') {
+async function estadoConfirmacionApiMensajes(nroTel, descripcion = '', prioridad = null) {
   const to = onlyDigits(nroTel || '');
   if (!to) return { autorizado: false, motivo: 'sin_numero' };
+  if (api_mensajes_confirmacion_habilitada === true && !requiereConfirmacionPrioridadApiMensajes(prioridad)) {
+    return { autorizado: true, motivo: 'prioridad_sin_confirmacion', prioridad };
+  }
   if (api_mensajes_confirmacion_habilitada !== true) {
     if (api_mensajes_requerir_contacto_o_historial !== true) return { autorizado: true, motivo: 'disabled' };
     const señales = await señalesContactoApiMensajes(to);
@@ -8418,7 +8444,7 @@ async function ConsultaApiMensajes(){
             }
 
 
-            const permisoConfirmacion = await estadoConfirmacionApiMensajes(Nro_tel, msg.Agente_id_desc_msj);
+            const permisoConfirmacion = await estadoConfirmacionApiMensajes(Nro_tel, msg.Agente_id_desc_msj, dest.prioridad ?? msg.Prioridad);
             if (!permisoConfirmacion.autorizado) {
               const log = '[API_MENSAJES_CONFIRMACION] envío retenido a ' + Nro_tel +
                 ' motivo=' + String(permisoConfirmacion.motivo || '') +
@@ -8647,6 +8673,7 @@ function getRuntimeConfigSnapshot() {
     api_mensajes_confirmacion_habilitada: api_mensajes_confirmacion_habilitada === true,
     api_mensajes_confirmacion_reenviar_ms: Number(api_mensajes_confirmacion_reenviar_ms) || 0,
     api_mensajes_confirmacion_validez_ms: Number(api_mensajes_confirmacion_validez_ms) || 0,
+    api_mensajes_confirmacion_prioridades: api_mensajes_confirmacion_prioridades,
     api_mensajes_limite_diario: Number(api_mensajes_limite_diario) || 0,
     api_mensajes_limite_no_contactos: Number(api_mensajes_limite_no_contactos) || 0,
     api_mensajes_requerir_contacto_o_historial: api_mensajes_requerir_contacto_o_historial === true,
