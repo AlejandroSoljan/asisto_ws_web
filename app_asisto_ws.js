@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.24 02/09/2026   */
+/*version: 4.04.25 03/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.24 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.25 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -7071,6 +7071,8 @@ async function guardarPendienteConfirmacionApiMensajes(nroTel, data) {
       msj: String(data?.msj ?? data?.Msj ?? ''),
       content: data?.content ?? data?.Content ?? null,
       content_nombre: data?.content_nombre ?? data?.Content_nombre ?? null,
+      agente_id_desc_msj: data?.agente_id_desc_msj ?? data?.Agente_id_desc_msj ?? '',
+      renglones: Array.isArray(data?.renglones) ? data.renglones : null,
       guardadoAt: now,
       updatedAt: now
     };
@@ -7153,7 +7155,9 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
       }
 
       if (accion === 'C') {
-        const updOk = await actualizar_estado_mensaje(url_confirma_msg, 'C', null, null, null, null, null, idRenglon, idDest);
+        const updOk = await actualizarEstadoUnidadApiMensajes(url_confirma_msg, 'C', null, {
+          Id_msj_dest: idDest, Id_msj_renglon: idRenglon, __renglones: item.renglones
+        });
         const logC = '[API_MENSAJES_CONFIRMACION] mensaje actualizado a C por ' + String(motivo || 'confirmacion_cancelada') +
           ' nro=' + to +
           ' id_msj_dest=' + String(idDest || '') +
@@ -7221,7 +7225,9 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
         }
 
         const info = await getInfoContactoApiMensajes(nroTelFormat);
-        const updOk = await actualizar_estado_mensaje(url_confirma_msg, 'E', info.tipo, info.nombre, info.contacto, info.direccion, info.email, idRenglon, idDest);
+        const updOk = await actualizarEstadoUnidadApiMensajes(url_confirma_msg, 'E', info, {
+          Id_msj_dest: idDest, Id_msj_renglon: idRenglon, __renglones: item.renglones
+        });
         const logE = '[API_MENSAJES_CONFIRMACION] pendiente enviado y actualizado a E nro=' + to +
           ' id_msj_dest=' + String(idDest || '') +
           ' id_msj_renglon=' + String(idRenglon || '') +
@@ -7338,12 +7344,25 @@ function respuestaBajaApiMensajes(body) {
   return !!value && raw.map(v => String(v || '').trim().toUpperCase()).filter(Boolean).includes(value);
 }
 
-function textoSolicitudConfirmacionApiMensajes(nroTel = '') {
+function nombreClienteDesdeDescripcionApiMensajes(descripcion = '') {
+  const raw = String(descripcion || '').trim();
+  const match = raw.match(/\(([^()]*)\)\s*$/);
+  let nombre = String(match?.[1] || '').trim();
+  nombre = nombre.replace(/\s+-\s+\d+\s*$/, '').trim();
+  return nombre;
+}
+
+function textoSolicitudConfirmacionApiMensajes(nroTel = '', descripcion = '') {
   const variantes = textosSolicitudConfirmacionApiMensajes();
   const semilla = String(tenantId || '') + ':' + onlyDigits(nroTel || '');
   let hash = 0;
   for (let i = 0; i < semilla.length; i++) hash = ((hash * 31) + semilla.charCodeAt(i)) >>> 0;
-  return variantes[hash % variantes.length];
+  let texto = variantes[hash % variantes.length];
+  const cliente = nombreClienteDesdeDescripcionApiMensajes(descripcion);
+  if (!cliente) return texto;
+  if (/\{\{?cliente\}?\}/i.test(texto)) return texto.replace(/\{\{?cliente\}?\}/gi, cliente);
+  if (/^hola\b\s*,?/i.test(texto)) return texto.replace(/^hola\b\s*,?/i, 'Hola ' + cliente + ',');
+  return 'Hola ' + cliente + ', ' + texto;
 }
 
 function esTextoSolicitudConfirmacionApiMensajes(body) {
@@ -7613,6 +7632,9 @@ async function detectarNoValidaConfirmacionApiMensajesEnChat(nroTel, doc) {
     const messages = await chat.fetchMessages({ limit: 15 });
     const list = Array.isArray(messages) ? messages : [];
     for (const m of list) {
+      // Sólo una respuesta entrante del cliente puede cancelar la solicitud.
+      // Los mensajes enviados desde el teléfono, el panel o el propio agente no cuentan.
+      if (m?.fromMe === true) continue;
       const body = String(m?.body || m?._data?.body || '').trim();
       if (!esRespuestaNoValidaConfirmacionApiMensajes(body)) continue;
 
@@ -7651,7 +7673,7 @@ async function detectarNoValidaConfirmacionApiMensajesEnChat(nroTel, doc) {
   return false;
 }
 
-async function estadoConfirmacionApiMensajes(nroTel) {
+async function estadoConfirmacionApiMensajes(nroTel, descripcion = '') {
   const to = onlyDigits(nroTel || '');
   if (!to) return { autorizado: false, motivo: 'sin_numero' };
   if (api_mensajes_confirmacion_habilitada !== true) {
@@ -7785,7 +7807,7 @@ async function estadoConfirmacionApiMensajes(nroTel) {
         return { autorizado: false, motivo: 'limite_no_contactos', solicitudEnviada: false, limiteDiario: true };
       }
     }
-    const texto = textoSolicitudConfirmacionApiMensajes(to);
+    const texto = textoSolicitudConfirmacionApiMensajes(to, descripcion);
     await safeSend(to + '@c.us', texto);
     await col.updateOne(
       { _id },
@@ -8067,6 +8089,66 @@ function calcularDelayConsultaMensajesMs(nroTelAnterior, nroTelActual) {
   return delay;
 }
 
+function prepararUnidadesApiMensajes(mensajesRaw, destinatariosRaw) {
+  const mensajes = Array.isArray(mensajesRaw) ? mensajesRaw : [];
+  const destinatarios = Array.isArray(destinatariosRaw) ? destinatariosRaw : [];
+  const porRenglon = new Map(mensajes.map((m) => [String(m?.Id_msj_renglon), m || {}]));
+  const grupos = new Map();
+
+  destinatarios.forEach((dest, index) => {
+    const key = String(dest?.Id_msj_dest) + '|' + onlyDigits(dest?.Nro_tel || '');
+    if (!grupos.has(key)) grupos.set(key, { index, destinos: [], mensajes: [] });
+    const grupo = grupos.get(key);
+    grupo.destinos.push(dest || {});
+    const mensaje = porRenglon.get(String(dest?.Id_msj_renglon));
+    if (mensaje) grupo.mensajes.push(mensaje);
+  });
+
+  return [...grupos.values()].flatMap((grupo) => {
+    const pares = grupo.destinos.map((dest) => ({ dest, msg: porRenglon.get(String(dest?.Id_msj_renglon)) || {} }));
+    const textos = [...new Set(pares.map(({ msg }) => String(msg?.Msj || '').trim()).filter(Boolean))];
+    const adjuntos = pares.filter(({ msg }) => msg?.Content != null && String(msg.Content) !== '');
+    const prioridades = pares.map(({ msg }) => Number(msg?.Prioridad)).filter(Number.isFinite);
+    const prioridad = prioridades.length ? Math.min(...prioridades) : 999999;
+    const descripcion = pares.map(({ msg }) => String(msg?.Agente_id_desc_msj || '').trim()).find(Boolean) || '';
+    const principales = adjuntos.length ? adjuntos : [pares[0] || { dest: {}, msg: {} }];
+    const sinAdjunto = pares.filter(({ msg }) => msg?.Content == null || String(msg.Content) === '');
+    return principales.map((principal, adjuntoIndex) => {
+      // WhatsApp admite un archivo por mensaje. Si excepcionalmente llegan varios,
+      // el texto acompaña al primero y los restantes se envían sin perderlos.
+      const filasUnidad = !adjuntos.length ? pares : (adjuntoIndex === 0 ? [principal, ...sinAdjunto] : [principal]);
+      return {
+        index: grupo.index + (adjuntoIndex / 1000),
+        prioridad,
+        dest: {
+          ...principal.dest,
+          __renglones: filasUnidad.map(({ dest }) => ({ id_msj_dest: dest?.Id_msj_dest, id_msj_renglon: dest?.Id_msj_renglon }))
+        },
+        msg: {
+          ...principal.msg,
+          Msj: adjuntoIndex === 0 ? textos.join('\n\n') : '',
+          Agente_id_desc_msj: descripcion
+        }
+      };
+    });
+  }).sort((a, b) => a.prioridad - b.prioridad || a.index - b.index);
+}
+
+async function actualizarEstadoUnidadApiMensajes(url, estado, info, dest) {
+  const rows = Array.isArray(dest?.__renglones) && dest.__renglones.length
+    ? dest.__renglones
+    : [{ id_msj_dest: dest?.Id_msj_dest, id_msj_renglon: dest?.Id_msj_renglon }];
+  let ok = true;
+  for (const row of rows) {
+    const actualizado = await actualizar_estado_mensaje(
+      url, estado, info?.tipo ?? null, info?.nombre ?? null, info?.contacto ?? null,
+      info?.direccion ?? null, info?.email ?? null, row.id_msj_renglon, row.id_msj_dest
+    );
+    ok = actualizado && ok;
+  }
+  return ok;
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
  
  
@@ -8235,8 +8317,9 @@ async function ConsultaApiMensajes(){
         }
 
 
-        const mensajes = Array.isArray(jsonResp[0].mensajes) ? jsonResp[0].mensajes : [];
-        const destinatarios = Array.isArray(jsonResp[0].destinatarios) ? jsonResp[0].destinatarios : [];
+        const unidades = prepararUnidadesApiMensajes(jsonResp[0].mensajes, jsonResp[0].destinatarios);
+        const mensajes = unidades.map((u) => ({ ...u.msg, Id_msj_renglon: u.dest.Id_msj_renglon }));
+        const destinatarios = unidades.map((u) => u.dest);
         let ultimoNroTelConsultaMensajes = '';
 
         for (let i = 0; i < destinatarios.length; i++) {
@@ -8279,7 +8362,7 @@ async function ConsultaApiMensajes(){
             if (!Nro_tel || isNaN(Number(Nro_tel))) {
               console.log("numero invalido");
               await io.emit('message', 'Mensaje: ' + Nro_tel_format + ': Número Inválido');
-              await actualizar_estado_mensaje(url_confirma_msg, 'I', null, null, null, null, null, Id_msj_renglon_local, Id_msj_dest_local);
+              await actualizarEstadoUnidadApiMensajes(url_confirma_msg, 'I', null, dest);
               continue;
              
             }
@@ -8293,7 +8376,7 @@ async function ConsultaApiMensajes(){
               EscribirLog('Mensaje: ' + Nro_tel_format + ': Número no Registrado', "event");
               console.log("numero no registrado");
               await io.emit('message', 'Mensaje: ' + Nro_tel_format + ': Número no Registrado');
-              await actualizar_estado_mensaje(url_confirma_msg, 'I', null, null, null, null, null, Id_msj_renglon_local, Id_msj_dest_local);
+              await actualizarEstadoUnidadApiMensajes(url_confirma_msg, 'I', null, dest);
               await registrarExclusionApiMensajes(Nro_tel, 'numero_no_registrado');
               continue;
             }
@@ -8317,7 +8400,7 @@ async function ConsultaApiMensajes(){
             }
 
 
-            const permisoConfirmacion = await estadoConfirmacionApiMensajes(Nro_tel);
+            const permisoConfirmacion = await estadoConfirmacionApiMensajes(Nro_tel, msg.Agente_id_desc_msj);
             if (!permisoConfirmacion.autorizado) {
               const log = '[API_MENSAJES_CONFIRMACION] envío retenido a ' + Nro_tel +
                 ' motivo=' + String(permisoConfirmacion.motivo || '') +
@@ -8334,13 +8417,15 @@ async function ConsultaApiMensajes(){
                   id_msj_renglon: Id_msj_renglon_local,
                   msj: Msj,
                   content: contenido,
-                  content_nombre: Content_nombre
+                  content_nombre: Content_nombre,
+                  agente_id_desc_msj: msg.Agente_id_desc_msj,
+                  renglones: dest.__renglones
                 });
               }
 
 
               if (permisoConfirmacion.cancelarMensaje === true) {
-                const okCancel = await actualizar_estado_mensaje(url_confirma_msg, 'C', null, null, null, null, null, Id_msj_renglon_local, Id_msj_dest_local);
+                const okCancel = await actualizarEstadoUnidadApiMensajes(url_confirma_msg, 'C', null, dest);
                 const logCancel = '[API_MENSAJES_CONFIRMACION] mensaje actualizado a C por ' + String(permisoConfirmacion.motivo || 'confirmacion_cancelada') +
                   ' nro=' + Nro_tel +
                   ' id_msj_dest=' + String(Id_msj_dest_local || '') +
@@ -8445,7 +8530,7 @@ async function ConsultaApiMensajes(){
 
 
                 
-            const okEstadoE = await actualizar_estado_mensaje(url_confirma_msg, 'E', tipo, nombre, contacto, direccion, email, Id_msj_renglon_local, Id_msj_dest_local);
+            const okEstadoE = await actualizarEstadoUnidadApiMensajes(url_confirma_msg, 'E', { tipo, nombre, contacto, direccion, email }, dest);
             const logEstadoE = '[API_MENSAJES] estado E actualizado nro=' + Nro_tel +
               ' id_msj_dest=' + String(Id_msj_dest_local || '') +
               ' id_msj_renglon=' + String(Id_msj_renglon_local || '') +
