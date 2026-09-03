@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.23 02/09/2026   */
+/*version: 4.04.24 02/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.23 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.24 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -926,6 +926,10 @@ class BaileysCompatClient extends EventEmitter {
     return {
       number,
       id: { user, _serialized: compat || baileysToCompatJid(requested) },
+      // En Baileys `name` corresponde al nombre guardado por el usuario;
+      // `notify` es el pushname público. Esto conserva la semántica de
+      // whatsapp-web.js para las políticas de contacto.
+      isMyContact: !!String(contact?.name || '').trim(),
       isBusiness: !!businessProfile,
       businessProfile: businessProfile ? {
         email: businessProfile.email || null,
@@ -4034,6 +4038,19 @@ let apiMensajesLimiteLogDayKey = '';
 
 var consultaApiMensajesRunning = false;
 
+function getClientInfoUser() {
+  try {
+    return String(
+      client?.info?.me?.user ||
+      client?.info?.wid?.user ||
+      client?.info?.wid?._serialized ||
+      ''
+    ).split('@')[0].trim();
+  } catch {
+    return '';
+  }
+}
+
 let consultaMensajesHoursCache = { expiresAt: 0, hours: null, updatedAt: null };
 let lastConsultaMensajesHorarioLogKey = '';
 
@@ -6545,7 +6562,7 @@ async function handleActionDoc(doc) {
       EscribirLog('Accion REANUDAR recibida: ' + reason, 'event');
       try { console.log('Accion REANUDAR recibida: ' + reason); } catch {}
       lastPolicyBlocked = false;
-      if (client && client.info && client.info.me && client.info.me.user) {
+      if (getClientInfoUser()) {
         localWsPanelState = 'online';
         try { await updateLockStateSafe('online'); } catch {}
         try { startConsultaApiMensajesIfEnabled('resume'); } catch {}
@@ -6934,7 +6951,7 @@ async function notifyWwebOperatorOutgoingMessage(message) {
     const body = getMessageBodyText(message);
     if (!body) return false;
 
-    const ownPhone = onlyDigits(telefono_qr || numero || client?.info?.me?.user || '');
+    const ownPhone = onlyDigits(telefono_qr || numero || getClientInfoUser() || '');
     if (!ownPhone || !tenantId) return false;
 
     const logicMode = await getWwebBotLogicModeForPhone(ownPhone);
@@ -8083,7 +8100,7 @@ async function ConsultaApiMensajes(){
       // Si la sesión no está ONLINE no hay que consultar la API de mensajes salientes.
       // Al desloguearse queda QR, pero este loop puede seguir vivo desde el ready anterior.
       const consultaWsState = String(localWsPanelState || '').toLowerCase();
-      const consultaTieneSesionActiva = !!(client && client.info && client.info.me && client.info.me.user);
+      const consultaTieneSesionActiva = !!getClientInfoUser();
       if (consultaWsState !== 'online' || consultaTieneSesionActiva !== true) {
         const waitMs = Math.max(5000, Number(devolver_seg_tele()) || 30000);
         try { console.log('[WAIT] ConsultaApiMensajes pausada: sesión WhatsApp no online state=' + consultaWsState); } catch {}
@@ -9069,15 +9086,16 @@ async function queryAccessComprasEntregas(source = '') {
       return;
     }
 
-    if (!client || !client.info || !client.info.me) {
+    const clientInfoUser = getClientInfoUser();
+    if (!clientInfoUser) {
       try { EscribirLog('queryAccessComprasEntregas: client.info no disponible, se omite inicio del loop', 'event'); } catch {}
       return;
     }
 
     var telefono = normalizarNroTelFromApiMensajes(telefono_qr || numero) + '@c.us';
     console.log("Telefono Habilitado:" + telefono);
-    console.log("cliente:" + normalizarNroTelFromApiMensajes(client.info.me.user) + '@c.us');
-    telefono_local = normalizarNroTelFromApiMensajes(client.info.me.user) + '@c.us';
+    console.log("cliente:" + normalizarNroTelFromApiMensajes(clientInfoUser) + '@c.us');
+    telefono_local = normalizarNroTelFromApiMensajes(clientInfoUser) + '@c.us';
 
     if (telefono != telefono_local) {
       console.log(telefono_local + ' ' + telefono);
@@ -10118,7 +10136,7 @@ EscribirLog(message.from +' '+message.to+' '+message.type+' '+message.body ,"eve
     var telefonoTo = String(
      message?.to ||
      message?._data?.to ||
-     client?.info?.me?.user ||
+     getClientInfoUser() ||
      telefono_qr ||
      numero ||
      ''
@@ -10549,8 +10567,8 @@ client.on('ready', async () => {
   clearAuthReadyWatchdog('ready');
   restartInFlight = false;
   console.log("listo ready....");
-  telefono_qr = client.info.me.user
-  console.log("TEL QR: "+client.info.me.user);
+  telefono_qr = getClientInfoUser();
+  console.log("TEL QR: "+telefono_qr);
   
     
    await io.emit('message', 'Whatsapp Listo!');
