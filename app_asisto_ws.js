@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.25 03/09/2026   */
+/*version: 4.04.26 03/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.25 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.26 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -7178,7 +7178,6 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
           logLimiteDiarioApiMensajes(cupo);
           break;
         }
-        if (ultimoNro) await sleep(calcularDelayConsultaMensajesMs(ultimoNro, to));
         let contentNombre = item.content_nombre;
         if (contentNombre == null || contentNombre === '') contentNombre = 'archivo';
         const msj = String(item.msj || '');
@@ -7188,7 +7187,7 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
           const mimeType = detectMimeType(String(contenido)) || mime.lookup(contentNombre) || 'application/octet-stream';
           const media = new MessageMedia(mimeType, String(contenido), contentNombre);
           await io.emit('message', 'Mensaje: ' + nroTelFormat + ': ' + msj);
-          const sentApiMensaje = await safeSend(nroTelFormat, media, { caption: msj });
+          const sentApiMensaje = await enviarApiMensajesConPausa(to, () => safeSend(nroTelFormat, media, { caption: msj }));
           apiMensajesFallosConsecutivos = 0;
           await recordApiMensajesBillingWindow(to, {
             sentMessage: sentApiMensaje,
@@ -7207,7 +7206,7 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
           EscribirLog(logEnvioApi, 'event');
         } else {
           await io.emit('message', 'Mensaje: ' + nroTelFormat + ': ' + msj);
-          const sentApiMensaje = await safeSend(nroTelFormat, msj);
+          const sentApiMensaje = await enviarApiMensajesConPausa(to, () => safeSend(nroTelFormat, msj));
           apiMensajesFallosConsecutivos = 0;
           await recordApiMensajesBillingWindow(to, {
             sentMessage: sentApiMensaje,
@@ -7808,7 +7807,7 @@ async function estadoConfirmacionApiMensajes(nroTel, descripcion = '') {
       }
     }
     const texto = textoSolicitudConfirmacionApiMensajes(to, descripcion);
-    await safeSend(to + '@c.us', texto);
+    await enviarApiMensajesConPausa(to, () => safeSend(to + '@c.us', texto));
     await col.updateOne(
       { _id },
       {
@@ -8087,6 +8086,29 @@ function calcularDelayConsultaMensajesMs(nroTelAnterior, nroTelActual) {
 
   seg_msg = delay;
   return delay;
+}
+
+let apiMensajesEnvioTail = Promise.resolve();
+let apiMensajesUltimoNroEnviado = '';
+
+async function enviarApiMensajesConPausa(nroTel, enviar) {
+  const actual = onlyDigits(nroTel || '');
+  let liberar;
+  const turnoAnterior = apiMensajesEnvioTail;
+  apiMensajesEnvioTail = new Promise((resolve) => { liberar = resolve; });
+
+  await turnoAnterior.catch(() => {});
+  try {
+    if (apiMensajesUltimoNroEnviado) {
+      const delay = calcularDelayConsultaMensajesMs(apiMensajesUltimoNroEnviado, actual);
+      if (delay > 0) await sleep(delay);
+    }
+    const resultado = await enviar();
+    apiMensajesUltimoNroEnviado = actual;
+    return resultado;
+  } finally {
+    liberar();
+  }
 }
 
 function prepararUnidadesApiMensajes(mensajesRaw, destinatariosRaw) {
@@ -8381,10 +8403,6 @@ async function ConsultaApiMensajes(){
               continue;
             }
 
-          if (ultimoNroTelConsultaMensajes) {
-              await sleep(calcularDelayConsultaMensajesMs(ultimoNroTelConsultaMensajes, Nro_tel));
-              try { await pollActionsOnce(); } catch {}
-            }
 
             if (String(localWsPanelState || '').toLowerCase() === 'paused' || lastPolicyBlocked === true || await isWwebMessagesBlockedSafe()) {
               try { console.log('[WAIT] ConsultaApiMensajes detenida despues del delay: bot en pausa'); } catch {}
@@ -8467,7 +8485,7 @@ async function ConsultaApiMensajes(){
                 return;
               }
               await io.emit('message', 'Mensaje: ' + Nro_tel_format + ': ' + Msj);
-              const sentApiMensaje = await safeSend(Nro_tel_format, media, { caption: Msj });
+              const sentApiMensaje = await enviarApiMensajesConPausa(Nro_tel, () => safeSend(Nro_tel_format, media, { caption: Msj }));
               apiMensajesFallosConsecutivos = 0;
               await recordApiMensajesBillingWindow(Nro_tel, {
                 sentMessage: sentApiMensaje,
@@ -8493,7 +8511,7 @@ async function ConsultaApiMensajes(){
                 return;
               }
               await io.emit('message', 'Mensaje: ' + Nro_tel_format + ': ' + Msj);
-              const sentApiMensaje = await safeSend(Nro_tel_format, Msj);
+              const sentApiMensaje = await enviarApiMensajesConPausa(Nro_tel, () => safeSend(Nro_tel_format, Msj));
               apiMensajesFallosConsecutivos = 0;
               await recordApiMensajesBillingWindow(Nro_tel, {
                 sentMessage: sentApiMensaje,
