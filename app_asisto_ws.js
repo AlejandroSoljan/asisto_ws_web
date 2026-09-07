@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.30 04/09/2026   */
+/*version: 4.04.31 07/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.30 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.31 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -9399,7 +9399,10 @@ async function enviar_mensajes_info() {
  const tam = data.length;
 
   for (let i = 0; i < tam; i++) {
-    const data_img = await compraEntregaConnection.query("select first * from gen_imagenes where cod_imagen =" + data[i].cod_imagen);
+    const codImagen = String(data[i]?.cod_imagen ?? '').trim();
+    const data_img = /^\d+$/.test(codImagen)
+      ? await compraEntregaConnection.query("select first * from gen_imagenes where cod_imagen =" + codImagen)
+      : [];
     const tam_img = data_img.length;
     let arrayTelefono = String(data[i].destino || '').split(';');
     const tam2 = arrayTelefono.length;
