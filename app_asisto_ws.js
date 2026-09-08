@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.31 07/09/2026   */
+/*version: 4.04.32 08/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.31 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.32 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -7374,17 +7374,70 @@ function nombreClienteDesdeDescripcionApiMensajes(descripcion = '') {
   return nombre;
 }
 
+function tipoDocumentoDesdeDescripcionApiMensajes(descripcion = '') {
+  const raw = String(descripcion || '').trim();
+  if (!raw) return '';
+  return raw
+    .replace(/\s*\([^()]*\)\s*$/, '')
+    .replace(/\s+cliente\s*$/i, '')
+    .trim();
+}
+
+function descripcionContextualDesdeMensajeApiMensajes(msg = {}) {
+  const existente = String(msg?.Agente_id_desc_msj || msg?.agente_id_desc_msj || '').trim();
+  if (existente) return existente;
+
+  const texto = String(msg?.Msj || msg?.msj || '');
+  const nombreArchivo = String(msg?.Content_nombre || msg?.content_nombre || '');
+  const saludo = texto.match(/\bhola\s+([^\r\n*]+)/i);
+  const cliente = String(saludo?.[1] || '')
+    .replace(/[,:;.!?\s]+$/g, '')
+    .trim();
+  const contenido = (nombreArchivo + ' ' + texto).toLowerCase();
+  let documento = 'Mensaje informativo';
+  if (/factura/.test(contenido)) documento = 'Factura';
+  else if (/resumen\s+(?:de\s+)?(?:cuenta|cta)|cta\.?\s*cte/.test(contenido)) documento = 'Resumen de cuenta corriente';
+  else if (/recibo/.test(contenido)) documento = 'Recibo';
+  else if (/comprobante/.test(contenido)) documento = 'Comprobante';
+
+  return cliente ? documento + ' Cliente (' + cliente + ')' : documento;
+}
+
+function reemplazarVariablesConfirmacionApiMensajes(texto = '', contexto = {}) {
+  return String(texto || '')
+    .replace(/\{\{?empresa\}?\}/gi, String(contexto.empresa || ''))
+    .replace(/\{\{?(?:documento|tipo_documento)\}?\}/gi, String(contexto.documento || ''))
+    .replace(/\{\{?cliente\}?\}/gi, String(contexto.cliente || ''));
+}
+
 function textoSolicitudConfirmacionApiMensajes(nroTel = '', descripcion = '') {
   const variantes = textosSolicitudConfirmacionApiMensajes();
   const semilla = String(tenantId || '') + ':' + onlyDigits(nroTel || '');
   let hash = 0;
   for (let i = 0; i < semilla.length; i++) hash = ((hash * 31) + semilla.charCodeAt(i)) >>> 0;
-  let texto = variantes[hash % variantes.length];
+  const base = variantes[hash % variantes.length];
   const cliente = nombreClienteDesdeDescripcionApiMensajes(descripcion);
-  if (!cliente) return texto;
-  if (/\{\{?cliente\}?\}/i.test(texto)) return texto.replace(/\{\{?cliente\}?\}/gi, cliente);
-  if (/^hola\b\s*,?/i.test(texto)) return texto.replace(/^hola\b\s*,?/i, 'Hola ' + cliente + ',');
-  return 'Hola ' + cliente + ', ' + texto;
+  const documento = tipoDocumentoDesdeDescripcionApiMensajes(descripcion);
+  const empresa = String(nom_chatbot || tenantId || 'nuestra empresa').trim();
+  const usaVariables = /\{\{?(?:empresa|documento|tipo_documento|cliente)\}?\}/i.test(base);
+
+  if (usaVariables) {
+    return reemplazarVariablesConfirmacionApiMensajes(base, { empresa, documento, cliente });
+  }
+
+  if (!cliente && !documento) return base;
+
+  const saludo = cliente ? 'Hola ' + cliente + ',' : 'Hola,';
+  const lineas = [saludo, '', 'Te contactamos de *' + empresa + '*.'];
+  if (documento) lineas.push('Tipo de documento: *' + documento + '*');
+  if (cliente) lineas.push('Cliente: *' + cliente + '*');
+  const cierres = [
+    ['¿Nos autorizás a enviarlo por WhatsApp?', 'Respondé *OK* para recibirlo.'],
+    ['Antes de enviarlo necesitamos tu autorización.', 'Respondé *OK* para continuar.'],
+    ['¿Confirmás que podemos enviártelo por este medio?', 'Respondé *OK* para autorizar la recepción.']
+  ];
+  lineas.push('', ...cierres[hash % cierres.length]);
+  return lineas.join('\n');
 }
 
 function esTextoSolicitudConfirmacionApiMensajes(body) {
@@ -8158,7 +8211,9 @@ function prepararUnidadesApiMensajes(mensajesRaw, destinatariosRaw) {
     const adjuntos = pares.filter(({ msg }) => msg?.Content != null && String(msg.Content) !== '');
     const prioridades = pares.map(({ msg }) => Number(msg?.Prioridad)).filter(Number.isFinite);
     const prioridad = prioridades.length ? Math.min(...prioridades) : 999999;
-    const descripcion = pares.map(({ msg }) => String(msg?.Agente_id_desc_msj || '').trim()).find(Boolean) || '';
+    const descripcion = pares
+      .map(({ msg }) => descripcionContextualDesdeMensajeApiMensajes(msg))
+      .find(Boolean) || '';
     const principales = adjuntos.length ? adjuntos : [pares[0] || { dest: {}, msg: {} }];
     const sinAdjunto = pares.filter(({ msg }) => msg?.Content == null || String(msg.Content) === '');
     return principales.map((principal, adjuntoIndex) => {
