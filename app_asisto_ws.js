@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.34 10/09/2026   */
+/*version: 4.04.35 10/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.34 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.35 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -7374,6 +7374,10 @@ function nombreClienteDesdeDescripcionApiMensajes(descripcion = '') {
   return nombre;
 }
 
+function respuestaCancelaApiMensajes(body) {
+  return normalizarRespuestaConfirmacionApiMensajes(body) === 'CANCELAR';
+}
+
 function tipoDocumentoDesdeDescripcionApiMensajes(descripcion = '') {
   const raw = String(descripcion || '').trim();
   if (!raw) return '';
@@ -7422,19 +7426,26 @@ function textoSolicitudConfirmacionApiMensajes(nroTel = '', descripcion = '') {
   const usaVariables = /\{\{?(?:empresa|documento|tipo_documento|cliente)\}?\}/i.test(base);
 
   if (usaVariables) {
-    return reemplazarVariablesConfirmacionApiMensajes(base, { empresa, documento, cliente });
+    const personalizado = reemplazarVariablesConfirmacionApiMensajes(base, { empresa, documento, cliente });
+    return /\bCANCELAR\b/i.test(personalizado)
+      ? personalizado
+      : personalizado + '\nRespondé *OK* para recibirlo o *CANCELAR* para no recibir más mensajes.';
   }
 
-  if (!cliente && !documento) return base;
+  if (!cliente && !documento) {
+    return /\bCANCELAR\b/i.test(base)
+      ? base
+      : base + '\nRespondé *OK* para recibirlo o *CANCELAR* para no recibir más mensajes.';
+  }
 
   const saludo = cliente ? '¡Hola, ' + cliente + '! 👋' : '¡Hola! 👋';
   const esInformativo = !documento || /^mensaje informativo$/i.test(documento);
   const referencia = esInformativo ? 'información' : 'tu *' + documento.toLowerCase() + '*';
   const pronombre = esInformativo || /^(?:factura|documentación)/i.test(documento) ? 'la' : 'lo';
   const mensajes = [
-    [saludo, 'Somos *' + empresa + '*.', 'Tenemos ' + referencia + ' para compartirte por WhatsApp.', 'Si querés recibir' + pronombre + ', respondé *OK* y te ' + pronombre + ' enviamos.'],
-    [saludo, 'Te escribimos de *' + empresa + '* porque tenemos ' + referencia + ' para enviarte.', 'Respondé *OK* y te ' + pronombre + ' mandamos por acá.'],
-    [saludo, 'Desde *' + empresa + '* queremos compartirte ' + referencia + '.', 'Si querés recibir' + pronombre + ' por WhatsApp, respondé *OK*.']
+    [saludo, 'Somos *' + empresa + '*.', 'Tenemos ' + referencia + ' para compartirte por WhatsApp.', 'Respondé *OK* para recibir' + pronombre + ' o *CANCELAR* para no recibir más mensajes.'],
+    [saludo, 'Te escribimos de *' + empresa + '* porque tenemos ' + referencia + ' para enviarte.', 'Respondé *OK* y te ' + pronombre + ' mandamos por acá, o *CANCELAR* para no recibir más mensajes.'],
+    [saludo, 'Desde *' + empresa + '* queremos compartirte ' + referencia + '.', 'Respondé *OK* para recibir' + pronombre + ' por WhatsApp o *CANCELAR* para no recibir más mensajes.']
   ];
   return mensajes[hash % mensajes.length].join('\n');
 }
@@ -7606,11 +7617,7 @@ async function estadoCircuitBreakerApiMensajes() {
 }
 
 function esRespuestaNoValidaConfirmacionApiMensajes(body) {
-  const raw = String(body || '').trim();
-  if (!raw) return false;
-  if (respuestaConfirmaApiMensajes(raw)) return false;
-  if (esTextoSolicitudConfirmacionApiMensajes(raw)) return false;
-  return true;
+  return respuestaCancelaApiMensajes(body);
 }
 
 function apiMensajesConfirmacionAceptada(doc) {
@@ -7654,8 +7661,11 @@ async function detectarOkConfirmacionApiMensajesEnChat(nroTel, doc) {
     const messages = await chat.fetchMessages({ limit: 15 });
     const list = Array.isArray(messages) ? messages : [];
     for (const m of list) {
-     const body = String(m?.body || m?._data?.body || '').trim();
-      if (!respuestaConfirmaApiMensajes(body)) continue;
+      const body = String(m?.body || m?._data?.body || '').trim();
+      if (!body || respuestaCancelaApiMensajes(body)) continue;
+      // Del cliente, cualquier texto confirma. De la propia cuenta solo se
+      // conserva la autorizacion manual explicita mediante OK/SI/S.
+      if (m?.fromMe === true && !respuestaConfirmaApiMensajes(body)) continue;
 
       const msgMs = getWhatsappMessageTimestampMs(m);
       if (pedidoMs && msgMs && msgMs < (pedidoMs - 5000)) continue;
@@ -7718,8 +7728,8 @@ async function detectarNoValidaConfirmacionApiMensajesEnChat(nroTel, doc) {
       const col = apiMensajesConfirmacionCollection();
       if (!col) return false;
       const now = new Date();
-      const setCancelado = buildSetCanceladoConfirmacionApiMensajes(now, to, body, 'respuesta_no_valida');
-      if (respuestaBajaApiMensajes(body)) Object.assign(setCancelado, { exclusionPermanente: true, exclusionMotivo: 'baja_cliente', exclusionAt: now });
+      const setCancelado = buildSetCanceladoConfirmacionApiMensajes(now, to, body, 'cancelar_cliente');
+      if (respuestaCancelaApiMensajes(body)) Object.assign(setCancelado, { exclusionPermanente: true, exclusionMotivo: 'cancelar_cliente', exclusionAt: now });
       await col.updateOne(
         { _id: doc._id || apiMensajesConfirmacionId(to) },
         {
@@ -7822,23 +7832,23 @@ async function estadoConfirmacionApiMensajes(nroTel, descripcion = '', prioridad
   // el evento message/message_create del OK, igual detectamos el OK leyendo
   // los últimos mensajes del chat antes de volver a pedir confirmación.
   if (doc && doc.estado === 'pendiente') {
+    const noValidaDetectada = await detectarNoValidaConfirmacionApiMensajesEnChat(to, doc);
+    if (noValidaDetectada) {
+      doc = await col.findOne({ _id });
+      await procesarPendientesConfirmacionApiMensajes([to], 'C', 'cancelar_cliente');
+      return {
+        autorizado: false,
+        motivo: 'cancelar_cliente',
+        solicitudEnviada: false,
+        cancelarMensaje: true,
+        doc
+      };
+    }
     const okDetectado = await detectarOkConfirmacionApiMensajesEnChat(to, doc);
     if (okDetectado) {
       doc = await col.findOne({ _id });
       await procesarPendientesConfirmacionApiMensajes([to], 'E', 'aceptado_chat_history');
       return { autorizado: true, motivo: 'aceptado_chat_history', doc };
-    }
-   const noValidaDetectada = await detectarNoValidaConfirmacionApiMensajesEnChat(to, doc);
-   if (noValidaDetectada) {
-      doc = await col.findOne({ _id });
-      await procesarPendientesConfirmacionApiMensajes([to], 'C', 'respuesta_no_valida');
-      return {
-        autorizado: false,
-        motivo: 'respuesta_no_valida',
-        solicitudEnviada: false,
-        cancelarMensaje: true,
-        doc
-      };
     }
   }
 
@@ -7926,12 +7936,17 @@ async function registrarRespuestaConfirmacionApiMensajes(message) {
       if (bodyRaw) logConfirmacionDebug('[API_MENSAJES_CONFIRMACION_DEBUG] ignorado: confirmacion deshabilitada ' );
       return false;
     }
-    if (!message) return false;
+    if (!message || !bodyRaw) return false;
     if (message.type && message.type !== 'chat') {
       if (respuestaConfirmaApiMensajes(bodyRaw)) logConfirmacionDebug('[API_MENSAJES_CONFIRMACION_DEBUG] OK ignorado por type=' + String(message.type));
      return false;
     }
-    if (!respuestaConfirmaApiMensajes(bodyRaw)) return false;
+    // Para una solicitud pendiente, cualquier respuesta entrante confirma la
+    // recepcion. La unica excepcion es la palabra exacta CANCELAR.
+    const source = String(message?._confirmacionSource || 'message');
+    const esConfirmacionSalienteManual = source.startsWith('message_create_fromMe');
+    if (respuestaCancelaApiMensajes(bodyRaw)) return false;
+    if (esConfirmacionSalienteManual && !respuestaConfirmaApiMensajes(bodyRaw)) return false;
 
     const fromRaw = String(message.from || message._data?.from || '').trim();
     if (!fromRaw || fromRaw === 'status@broadcast') {
@@ -7960,26 +7975,13 @@ async function registrarRespuestaConfirmacionApiMensajes(message) {
     if (query) {
       const setData = buildSetAceptadoConfirmacionApiMensajes(now, acceptedPhone, respuesta);
       const upd = await col.updateMany(
-        query,
+        { $and: [query, { estado: 'pendiente' }, { pendientes: { $exists: true } }] },
         {
           $set: setData,
           $setOnInsert: { createdAt: now }
         }
       );
       matched = Number(upd?.matchedCount || upd?.modifiedCount || 0);
-    }
-
-    if (!matched && acceptedPhone) {
-      const _id = apiMensajesConfirmacionId(acceptedPhone);
-      await col.updateOne(
-        { _id },
-        {
-          $setOnInsert: { createdAt: now },
-          $set: buildSetAceptadoConfirmacionApiMensajes(now, acceptedPhone, respuesta)
-        },
-        { upsert: true }
-      );
-      matched = 1;
     }
 
     // Si por LID no se pudo resolver el teléfono pero hay una única confirmación pendiente
@@ -8106,8 +8108,8 @@ async function registrarRespuestaNoValidaConfirmacionApiMensajes(message) {
       ' source=' + String(message?._confirmacionSource || 'message'));
 
     
-     const setData = buildSetCanceladoConfirmacionApiMensajes(now, cancelPhone, bodyRaw, 'respuesta_no_valida');
-    if (respuestaBajaApiMensajes(bodyRaw)) Object.assign(setData, { exclusionPermanente: true, exclusionMotivo: 'baja_cliente', exclusionAt: now });
+     const setData = buildSetCanceladoConfirmacionApiMensajes(now, cancelPhone, bodyRaw, 'cancelar_cliente');
+    if (respuestaCancelaApiMensajes(bodyRaw)) Object.assign(setData, { exclusionPermanente: true, exclusionMotivo: 'cancelar_cliente', exclusionAt: now });
     const upd = await col.updateMany({ _id: { $in: docIds } }, { $set: setData });
     matched = Number(upd?.matchedCount || upd?.modifiedCount || matched || 0);
 
@@ -8123,13 +8125,13 @@ async function registrarRespuestaNoValidaConfirmacionApiMensajes(message) {
     const proc = await procesarPendientesConfirmacionApiMensajes(
       phonesPendientes.length ? phonesPendientes : (cancelPhone ? [cancelPhone] : phoneCandidates),
       'C',
-      'respuesta_no_valida'
+      'cancelar_cliente'
     );
-    const logProc = '[API_MENSAJES_CONFIRMACION] pendientes actualizados a C por respuesta_no_valida total=' + String(proc.total || 0) + ' ok=' + String(proc.ok || 0);
+    const logProc = '[API_MENSAJES_CONFIRMACION] pendientes actualizados a C por cancelar_cliente total=' + String(proc.total || 0) + ' ok=' + String(proc.ok || 0);
     console.log(logProc);
     EscribirLog(logProc, proc.ok ? 'event' : 'error');
 
-    try { startConsultaApiMensajesIfEnabled('confirmacion_respuesta_no_valida'); } catch {}
+    try { startConsultaApiMensajesIfEnabled('confirmacion_cancelar_cliente'); } catch {}
     return true;
   } catch (e) {
     try { EscribirLog('[API_MENSAJES_CONFIRMACION] error respuesta no valida: ' + String(e?.message || e), 'error'); } catch {}
