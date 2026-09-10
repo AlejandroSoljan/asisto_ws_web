@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.32 08/09/2026   */
+/*version: 4.04.33 09/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.32 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.33 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -7427,17 +7427,16 @@ function textoSolicitudConfirmacionApiMensajes(nroTel = '', descripcion = '') {
 
   if (!cliente && !documento) return base;
 
-  const saludo = cliente ? 'Hola ' + cliente + ',' : 'Hola,';
-  const lineas = [saludo, '', 'Te contactamos de *' + empresa + '*.'];
-  if (documento) lineas.push('Tipo de documento: *' + documento + '*');
-  if (cliente) lineas.push('Cliente: *' + cliente + '*');
-  const cierres = [
-    ['¿Nos autorizás a enviarlo por WhatsApp?', 'Respondé *OK* para recibirlo.'],
-    ['Antes de enviarlo necesitamos tu autorización.', 'Respondé *OK* para continuar.'],
-    ['¿Confirmás que podemos enviártelo por este medio?', 'Respondé *OK* para autorizar la recepción.']
+  const saludo = cliente ? '¡Hola, ' + cliente + '! 👋' : '¡Hola! 👋';
+  const esInformativo = !documento || /^mensaje informativo$/i.test(documento);
+  const referencia = esInformativo ? 'información' : 'tu *' + documento.toLowerCase() + '*';
+  const pronombre = esInformativo || /^(?:factura|documentación)/i.test(documento) ? 'la' : 'lo';
+  const mensajes = [
+    [saludo, 'Somos *' + empresa + '*.', 'Tenemos ' + referencia + ' para compartirte por WhatsApp.', 'Si querés recibir' + pronombre + ', respondé *OK* y te ' + pronombre + ' enviamos.'],
+    [saludo, 'Te escribimos de *' + empresa + '* porque tenemos ' + referencia + ' para enviarte.', 'Respondé *OK* y te ' + pronombre + ' mandamos por acá.'],
+    [saludo, 'Desde *' + empresa + '* queremos compartirte ' + referencia + '.', 'Si querés recibir' + pronombre + ' por WhatsApp, respondé *OK*.']
   ];
-  lineas.push('', ...cierres[hash % cierres.length]);
-  return lineas.join('\n');
+  return mensajes[hash % mensajes.length].join('\n');
 }
 
 function esTextoSolicitudConfirmacionApiMensajes(body) {
