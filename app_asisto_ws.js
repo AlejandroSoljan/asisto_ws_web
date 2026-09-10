@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.35 10/09/2026   */
+/*version: 4.04.36 10/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.35 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.36 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -2791,7 +2791,8 @@ async function logMessageStat(direction, contact, payload) {
     const cleanContact = await normalizeContactForStats(contact);
     if (!cleanContact) return;
 
-    await MessageLogModel.create({
+    const messageId = String(payload?.messageId || '').trim();
+    const logDoc = {
       tenantId: String(tenantId || ''),
       numero: String(numero || ''),
       contact: cleanContact,
@@ -2803,7 +2804,17 @@ async function logMessageStat(direction, contact, payload) {
       at: now,
       atLocal: parts.atLocal,
       dayKey: parts.dayKey
-    });
+    };
+    if (messageId) logDoc.messageId = messageId;
+    if (messageId) {
+      await MessageLogModel.updateOne(
+        { tenantId: logDoc.tenantId, numero: logDoc.numero, direction: dir, messageId },
+        { $setOnInsert: logDoc },
+        { upsert: true }
+      );
+    } else {
+      await MessageLogModel.create(logDoc);
+    }
   } catch (e) {
     try { EscribirLog('logMessageStat error: ' + String(e?.message || e), 'error'); } catch {}
   }
@@ -2995,7 +3006,8 @@ async function logOutgoingFromMessageFallback(messageLike) {
       body: typeof messageLike.body === 'string' ? messageLike.body : '',
       caption: typeof messageLike.caption === 'string' ? messageLike.caption : (typeof messageLike._data?.caption === 'string' ? messageLike._data.caption : ''),
       type: messageLike.type || messageLike._data?.type || 'text',
-      hasMedia: !!(messageLike.hasMedia || messageLike._data?.mediaKey || messageLike._data?.isViewOnce)
+      hasMedia: !!(messageLike.hasMedia || messageLike._data?.mediaKey || messageLike._data?.isViewOnce),
+      messageId: getOutgoingStatMessageId(messageLike)
     };
 
     await logMessageStat('out', to, payload);
@@ -4468,6 +4480,7 @@ function initMongoModelsIfNeeded() {
           contact: { type: String, index: true },
           direction: { type: String, index: true },
           messageType: { type: String, index: true },
+          messageId: { type: String, index: true },
           body: { type: String },
           bodyLength: { type: Number },
           hasMedia: { type: Boolean, default: false },
@@ -5823,8 +5836,8 @@ async function safeSend(to, content, opts) {
       const sent = await client.sendMessage(to, content, sendOpts);
       try {
         const logPayload = (content && typeof content === 'object')
-          ? { body: sendOpts.caption || '', type: content.mimetype ? 'media' : (content.type || 'text'), mimetype: content.mimetype || '', filename: content.filename || '', data: content.data ? '[data]' : '' }
-          : { body: String(content || ''), type: 'text', hasMedia: false };
+          ? { body: sendOpts.caption || '', type: content.mimetype ? 'media' : (content.type || 'text'), mimetype: content.mimetype || '', filename: content.filename || '', data: content.data ? '[data]' : '', messageId: getOutgoingStatMessageId(sent) }
+          : { body: String(content || ''), type: 'text', hasMedia: false, messageId: getOutgoingStatMessageId(sent) };
         await logMessageStat('out', to, logPayload);
         rememberOutgoingStatLogged(sent);
       } catch {}
@@ -7464,13 +7477,29 @@ async function estadoLimiteDiarioApiMensajes() {
   const col = getDataCollection('wa_wweb_message_log');
   if (!col) return { permitido: false, limite, enviados: 0, restantes: 0, motivo: 'coleccion_no_disponible' };
   const dayKey = arDatePartsForStats(new Date()).dayKey;
-  const docs = await col.find({
-    tenantId: String(tenantId || ''),
-    numero: String(numero || ''),
-    direction: 'out',
-    dayKey
-  }).limit(limite).toArray();
-  const enviados = Array.isArray(docs) ? docs.length : 0;
+  const rows = await col.aggregate([
+    { $match: {
+        tenantId: String(tenantId || ''),
+        numero: String(numero || ''),
+        direction: 'out',
+        dayKey
+    } },
+    { $set: {
+        __messageId: { $toString: { $ifNull: ['$messageId', ''] } },
+        __second: { $floor: { $divide: [{ $toLong: '$at' }, 1000] } }
+    } },
+    { $group: {
+        _id: {
+          $cond: [
+            { $gt: [{ $strLenCP: '$__messageId' }, 0] },
+            { $concat: ['id:', '$__messageId'] },
+            { $concat: ['legacy:', { $ifNull: ['$contact', ''] }, ':', { $ifNull: ['$body', ''] }, ':', { $toString: '$__second' }] }
+          ]
+        }
+    } },
+    { $limit: limite }
+  ]).toArray();
+  const enviados = Array.isArray(rows) ? rows.length : 0;
   return { permitido: enviados < limite, limite, enviados, restantes: Math.max(0, limite - enviados), dayKey };
 }
 
