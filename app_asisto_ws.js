@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.37 10/09/2026   */
+/*version: 4.04.38 10/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.37 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.38 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -7919,7 +7919,14 @@ async function estadoConfirmacionApiMensajes(nroTel, descripcion = '', prioridad
       }
     }
     const texto = textoSolicitudConfirmacionApiMensajes(to, descripcion);
-    await enviarApiMensajesConPausa(to, () => safeSend(to + '@c.us', texto));
+    const sentConfirmacion = await enviarApiMensajesConPausa(to, () => safeSend(to + '@c.us', texto));
+    await recordApiMensajesBillingWindow(to, {
+      sentMessage: sentConfirmacion,
+      messageType: 'confirmation',
+      text: texto,
+      idDest: null,
+      idRenglon: null
+    });
     await col.updateOne(
       { _id },
       {
