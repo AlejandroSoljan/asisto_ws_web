@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.33 09/09/2026   */
+/*version: 4.04.34 10/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.33 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.34 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -8044,6 +8044,11 @@ async function registrarRespuestaNoValidaConfirmacionApiMensajes(message) {
     const bodyRaw = String(message?.body || message?._data?.body || '').trim();
     if (api_mensajes_confirmacion_habilitada !== true) return false;
     if (!message || !bodyRaw) return false;
+    // Una respuesta no valida solo puede venir del cliente. Nunca convertir un
+    // mensaje enviado por esta cuenta (ni un mensaje sintetizado desde fromMe)
+    // en rechazo: eso cancelaria el documento que acabamos de ofrecer.
+    if (message.fromMe === true || message?._data?.id?.fromMe === true) return false;
+    if (String(message?._confirmacionSource || '').startsWith('message_create_fromMe')) return false;
     if (message.type && message.type !== 'chat') return false;
     if (!esRespuestaNoValidaConfirmacionApiMensajes(bodyRaw)) return false;
 
@@ -10655,25 +10660,6 @@ client.on('message_create', async message => {
           };
           const okProcesado = await registrarRespuestaConfirmacionApiMensajes(fakeIncomingConfirmacion);
           logConfirmacionDebug('[API_MENSAJES_CONFIRMACION_DEBUG] resultado OK saliente procesado=' + String(okProcesado));
-        } else if (body && esRespuestaNoValidaConfirmacionApiMensajes(body)) {
-          const targetRaw = getOutgoingConfirmacionTargetRaw(message) || '__confirmacion_fromme_fallback__';
-          logConfirmacionDebug('[API_MENSAJES_CONFIRMACION_DEBUG] respuesta no valida saliente detectada fromMe=true target=' + targetRaw +
-            ' raw_from=' + String(message?.from || message?._data?.from || '') +
-            ' raw_to=' + String(message?.to || message?._data?.to || '') +
-            ' remote=' + String(message?.id?.remote || message?._data?.id?.remote || '') +
-            ' body=' );
-          const fakeNoValidaConfirmacion = {
-            from: targetRaw,
-            to: message?.from || message?._data?.from || '',
-            body,
-            type: 'chat',
-            fromMe: false,
-            id: message?.id,
-            _data: message?._data,
-            _confirmacionSource: 'message_create_fromMe_no_valida'
-          };
-          const noValidaProcesada = await registrarRespuestaNoValidaConfirmacionApiMensajes(fakeNoValidaConfirmacion);
-          logConfirmacionDebug('[API_MENSAJES_CONFIRMACION_DEBUG] resultado respuesta no valida saliente procesada=' + String(noValidaProcesada));
         }
       } catch (e) {
         try { EscribirLog('[API_MENSAJES_CONFIRMACION] error procesando OK saliente: ' + String(e?.message || e), 'error'); } catch {}
