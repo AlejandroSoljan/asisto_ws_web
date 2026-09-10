@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.36 10/09/2026   */
+/*version: 4.04.37 10/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.36 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.37 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -7477,29 +7477,24 @@ async function estadoLimiteDiarioApiMensajes() {
   const col = getDataCollection('wa_wweb_message_log');
   if (!col) return { permitido: false, limite, enviados: 0, restantes: 0, motivo: 'coleccion_no_disponible' };
   const dayKey = arDatePartsForStats(new Date()).dayKey;
-  const rows = await col.aggregate([
-    { $match: {
-        tenantId: String(tenantId || ''),
-        numero: String(numero || ''),
-        direction: 'out',
-        dayKey
-    } },
-    { $set: {
-        __messageId: { $toString: { $ifNull: ['$messageId', ''] } },
-        __second: { $floor: { $divide: [{ $toLong: '$at' }, 1000] } }
-    } },
-    { $group: {
-        _id: {
-          $cond: [
-            { $gt: [{ $strLenCP: '$__messageId' }, 0] },
-            { $concat: ['id:', '$__messageId'] },
-            { $concat: ['legacy:', { $ifNull: ['$contact', ''] }, ':', { $ifNull: ['$body', ''] }, ':', { $toString: '$__second' }] }
-          ]
-        }
-    } },
-    { $limit: limite }
-  ]).toArray();
-  const enviados = Array.isArray(rows) ? rows.length : 0;
+  // getDataCollection puede ser un wrapper remoto o un modelo, no siempre una
+  // colección nativa con aggregate(). Leemos una muestra acotada y deduplicamos
+  // en memoria para mantener compatibilidad con ambos backends.
+  const docs = await col.find({
+    tenantId: String(tenantId || ''),
+    numero: String(numero || ''),
+    direction: 'out',
+    dayKey
+  }).limit(Math.max(1000, limite * 5)).toArray();
+  const reales = new Set();
+  for (const doc of (Array.isArray(docs) ? docs : [])) {
+    const messageId = String(doc?.messageId || '').trim();
+    const second = Math.floor(new Date(doc?.at || 0).getTime() / 1000);
+    const legacyKey = [doc?.contact || '', doc?.body || '', Number.isFinite(second) ? second : ''].join(':');
+    reales.add(messageId ? 'id:' + messageId : 'legacy:' + legacyKey);
+    if (reales.size >= limite) break;
+  }
+  const enviados = reales.size;
   return { permitido: enviados < limite, limite, enviados, restantes: Math.max(0, limite - enviados), dayKey };
 }
 
@@ -8299,8 +8294,6 @@ async function ConsultaApiMensajes(){
   }
 
   consultaApiMensajesRunning = true;
-  console.log("Consultando a API de mensajes salientes");
-  EscribirLog("Consultando a API de mensajes salientes", "event");
 
   try {
     await sleep(1000);
@@ -8700,8 +8693,6 @@ async function ConsultaApiMensajes(){
     }
   } finally {
     consultaApiMensajesRunning = false;
-    console.log("ConsultaApiMensajes detenido");
-    EscribirLog("ConsultaApiMensajes detenido", "event");
   }
 }
 
@@ -9265,14 +9256,6 @@ async function startCompraEntregaLoopIfEnabled(source = '') {
   try {
     
     if (!isCompraEntregaSessionEnabled()) {
-      const motivo = habilitar_odbc_manager !== true ? 'habilitar_odbc_manager=false' : 'multi_session_no_designada';
-      try {
-        const msg = 'queryAccessComprasEntregas no inicia: ' + motivo +
-          ' tenant=' + String(tenantId || '') + ' numero=' + String(numero || '') +
-          (source ? ' source=' + source : '');
-        console.log(msg);
-        EscribirLog(msg, 'event');
-      } catch {} 
       return;
     }
     if (compraEntregaQueryRunning) return;
@@ -9289,7 +9272,6 @@ async function startCompraEntregaLoopIfEnabled(source = '') {
 
 async function queryAccessComprasEntregas(source = '') {
   if (!isCompraEntregaSessionEnabled()) {
-    try { EscribirLog('queryAccessComprasEntregas: sesión no habilitada tenant=' + String(tenantId || '') + ' numero=' + String(numero || ''), 'event'); } catch {}
     return;
   }
 
