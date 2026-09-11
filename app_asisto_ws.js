@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.40 11/09/2026   */
+/*version: 4.04.41 11/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.40 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.41 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -7176,9 +7176,11 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
       }
 
       if (accion === 'C') {
-        const updOk = await actualizarEstadoUnidadApiMensajes(url_confirma_msg, 'C', null, {
-          Id_msj_dest: idDest, Id_msj_renglon: idRenglon, __renglones: item.renglones
-        });
+        const updOk = item.apiEntregadoAt
+          ? true
+          : await actualizarEstadoUnidadApiMensajes(url_confirma_msg, 'C', null, {
+              Id_msj_dest: idDest, Id_msj_renglon: idRenglon, __renglones: item.renglones
+            });
         const logC = '[API_MENSAJES_CONFIRMACION] mensaje actualizado a C por ' + String(motivo || 'confirmacion_cancelada') +
           ' nro=' + to +
           ' id_msj_dest=' + String(idDest || '') +
@@ -7256,9 +7258,11 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
         }
 
         const info = await getInfoContactoApiMensajes(nroTelFormat);
-        const updOk = await actualizarEstadoUnidadApiMensajes(url_confirma_msg, 'E', info, {
-          Id_msj_dest: idDest, Id_msj_renglon: idRenglon, __renglones: item.renglones
-        });
+        const updOk = item.apiEntregadoAt
+          ? true
+          : await actualizarEstadoUnidadApiMensajes(url_confirma_msg, 'E', info, {
+              Id_msj_dest: idDest, Id_msj_renglon: idRenglon, __renglones: item.renglones
+            });
         const logE = '[API_MENSAJES_CONFIRMACION] pendiente enviado y actualizado a E nro=' + to +
           ' id_msj_dest=' + String(idDest || '') +
           ' id_msj_renglon=' + String(idRenglon || '') +
@@ -7401,12 +7405,13 @@ function nombreClienteDesdeDescripcionApiMensajes(descripcion = '') {
 
 async function guardarLoteRecibidoApiMensajes(unidades) {
   const lista = Array.isArray(unidades) ? unidades : [];
-  if (!lista.length) return { ok: true, duplicados: new Set() };
-  if (!await ensureMongo()) return { ok: false, duplicados: new Set() };
+  if (!lista.length) return { ok: true, duplicados: new Set(), asumibles: new Set() };
+  if (!await ensureMongo()) return { ok: false, duplicados: new Set(), asumibles: new Set() };
   const col = apiMensajesConfirmacionCollection();
-  if (!col) return { ok: false, duplicados: new Set() };
+  if (!col) return { ok: false, duplicados: new Set(), asumibles: new Set() };
   const porTelefono = new Map();
   const duplicados = new Set();
+  const asumibles = new Set();
   for (const unidad of lista) {
     const dest = unidad?.dest || {};
     const msg = unidad?.msg || {};
@@ -7426,7 +7431,7 @@ async function guardarLoteRecibidoApiMensajes(unidades) {
       );
     } catch (e) {
       try { EscribirLog('[API_MENSAJES] error leyendo deduplicacion nro=' + nroTel + ': ' + String(e?.message || e), 'error'); } catch {}
-      return { ok: false, duplicados };
+      return { ok: false, duplicados, asumibles };
     }
     const pendientesExistentes = existente?.pendientes && typeof existente.pendientes === 'object'
       ? existente.pendientes
@@ -7437,6 +7442,11 @@ async function guardarLoteRecibidoApiMensajes(unidades) {
       const k = keyPendienteConfirmacionApiMensajes(idDest, idRenglon);
       if (pendientesExistentes[k]) {
         duplicados.add(k);
+        // Sólo se puede cerrar el registro del API si sabemos que la solicitud
+        // de confirmación ya salió, o que el documento mismo ya fue enviado.
+        if (existente?.pedidoAt || existente?.estado === 'aceptado' || pendientesExistentes[k]?.envioCompletadoAt) {
+          asumibles.add(k);
+        }
         continue;
       }
       set[`pendientes.${k}`] = {
@@ -7472,10 +7482,10 @@ async function guardarLoteRecibidoApiMensajes(unidades) {
       );
     } catch (e) {
       try { EscribirLog('[API_MENSAJES] error persistiendo lote nro=' + nroTel + ': ' + String(e?.message || e), 'error'); } catch {}
-      return { ok: false, duplicados };
+      return { ok: false, duplicados, asumibles };
     }
   }
-  return { ok: true, duplicados };
+  return { ok: true, duplicados, asumibles };
 }
 
 async function marcarPendienteEnviadoApiMensajes(nroTel, idDest, idRenglon, sentMessage) {
@@ -7499,6 +7509,29 @@ async function marcarPendienteEnviadoApiMensajes(nroTel, idDest, idRenglon, sent
     return Number(result?.matchedCount || 0) > 0;
   } catch (e) {
     try { EscribirLog('[API_MENSAJES] error marcando envio persistido: ' + String(e?.message || e), 'error'); } catch {}
+    return false;
+  }
+}
+
+async function marcarPendienteAsumidoPorAsistoApiMensajes(nroTel, idDest, idRenglon) {
+  try {
+    if (!await ensureMongo()) return false;
+    const col = apiMensajesConfirmacionCollection();
+    if (!col) return false;
+    const k = keyPendienteConfirmacionApiMensajes(idDest, idRenglon);
+    const now = new Date();
+    const result = await col.updateOne(
+      { _id: apiMensajesConfirmacionId(onlyDigits(nroTel || '')), [`pendientes.${k}`]: { $exists: true } },
+      { $set: {
+        [`pendientes.${k}.apiEntregadoAt`]: now,
+        [`pendientes.${k}.updatedAt`]: now,
+        pendientesUpdatedAt: now,
+        updatedAt: now
+      } }
+    );
+    return Number(result?.matchedCount || 0) > 0;
+  } catch (e) {
+    try { EscribirLog('[API_MENSAJES] error marcando responsabilidad de Asisto: ' + String(e?.message || e), 'error'); } catch {}
     return false;
   }
 }
@@ -8628,7 +8661,7 @@ async function ConsultaApiMensajes(){
         }
 
         const unidadesRecibidas = prepararUnidadesApiMensajes(jsonResp[0].mensajes, jsonResp[0].destinatarios);
-        let persistenciaLote = { ok: false, duplicados: new Set() };
+        let persistenciaLote = { ok: false, duplicados: new Set(), asumibles: new Set() };
         while (!persistenciaLote.ok) {
           persistenciaLote = await guardarLoteRecibidoApiMensajes(unidadesRecibidas);
           if (!persistenciaLote.ok) {
@@ -8641,15 +8674,42 @@ async function ConsultaApiMensajes(){
         const clavesDuplicadas = persistenciaLote.duplicados instanceof Set
           ? persistenciaLote.duplicados
           : new Set();
+        const clavesAsumibles = persistenciaLote.asumibles instanceof Set
+          ? persistenciaLote.asumibles
+          : new Set();
         const unidades = unidadesRecibidas.filter((unidad) => {
           const dest = unidad?.dest || {};
-          return !clavesDuplicadas.has(keyPendienteConfirmacionApiMensajes(dest?.Id_msj_dest, dest?.Id_msj_renglon));
+          return !clavesAsumibles.has(keyPendienteConfirmacionApiMensajes(dest?.Id_msj_dest, dest?.Id_msj_renglon));
         });
         if (clavesDuplicadas.size) {
           const logDuplicados = '[API_MENSAJES] lote repetido omitido; pendientes existentes=' + String(clavesDuplicadas.size) +
             ' nuevos=' + String(unidades.length);
           console.log(logDuplicados);
           EscribirLog(logDuplicados, 'event');
+
+          // El API sólo entrega una cantidad acotada de registros P/N. Una vez que
+          // Asisto ya los guardó de forma durable, el API puede considerarlos
+          // entregados: desde acá la confirmación y el envío final son responsabilidad
+          // de la cola local/Mongo de Asisto. Esto libera el lote sin reenviar nada.
+          for (const unidadDuplicada of unidadesRecibidas) {
+            const destDuplicado = unidadDuplicada?.dest || {};
+            const claveDuplicada = keyPendienteConfirmacionApiMensajes(destDuplicado?.Id_msj_dest, destDuplicado?.Id_msj_renglon);
+            if (!clavesAsumibles.has(claveDuplicada)) continue;
+            const okAck = await actualizarEstadoUnidadApiMensajes(url_confirma_msg, 'E', null, destDuplicado);
+            if (okAck) {
+              await marcarPendienteAsumidoPorAsistoApiMensajes(
+                destDuplicado?.Nro_tel,
+                destDuplicado?.Id_msj_dest,
+                destDuplicado?.Id_msj_renglon
+              );
+            }
+            const logAck = '[API_MENSAJES] pendiente ya asumido por Asisto; estado API E' +
+              ' id_msj_dest=' + String(destDuplicado?.Id_msj_dest || '') +
+              ' id_msj_renglon=' + String(destDuplicado?.Id_msj_renglon || '') +
+              ' ok=' + String(okAck);
+            console.log(logAck);
+            EscribirLog(logAck, okAck ? 'event' : 'error');
+          }
         }
 
         if (String(localWsPanelState || '').toLowerCase() === 'paused' || lastPolicyBlocked === true || await isWwebMessagesBlockedSafe()) {
@@ -8772,6 +8832,26 @@ async function ConsultaApiMensajes(){
                   ' ok=' + String(okCancel);
                 console.log(logCancel);
                 EscribirLog(logCancel, okCancel ? 'event' : 'error');
+              }
+
+              // Si la solicitud se envió o ya estaba pendiente, el documento quedó
+              // bajo custodia durable de Asisto. Para el API ya fue entregado al
+              // agente y se informa E, aunque el WhatsApp final espere la respuesta.
+              if (permisoConfirmacion.cancelarMensaje !== true &&
+                  permisoConfirmacion.limiteDiario !== true &&
+                  permisoConfirmacion.detenerConsulta !== true &&
+                  (permisoConfirmacion.solicitudEnviada === true || permisoConfirmacion.motivo === 'pendiente')) {
+                const okAsumido = await actualizarEstadoUnidadApiMensajes(url_confirma_msg, 'E', null, dest);
+                if (okAsumido) {
+                  await marcarPendienteAsumidoPorAsistoApiMensajes(Nro_tel, Id_msj_dest_local, Id_msj_renglon_local);
+                }
+                const logAsumido = '[API_MENSAJES] documento asumido por Asisto; estado API E nro=' + Nro_tel +
+                  ' id_msj_dest=' + String(Id_msj_dest_local || '') +
+                  ' id_msj_renglon=' + String(Id_msj_renglon_local || '') +
+                  ' motivo=' + String(permisoConfirmacion.motivo || '') +
+                  ' ok=' + String(okAsumido);
+                console.log(logAsumido);
+                EscribirLog(logAsumido, okAsumido ? 'event' : 'error');
               }
 
 
