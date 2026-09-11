@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.41 11/09/2026   */
+/*version: 4.04.42 11/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.41 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.42 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -7574,7 +7574,33 @@ async function recuperarLotePersistidoApiMensajes() {
         await procesarPendientesDocConfirmacionApiMensajes(doc, 'C', 'recuperacion_lote');
         continue;
       }
-      if (doc.estado === 'pendiente') continue;
+      if (doc.estado === 'pendiente') {
+        // La confirmación ya fue enviada y el documento está bajo custodia de
+        // Asisto. No mantener estos registros ocupando el lote P/N del API:
+        // se confirman como E sin reenviar ni la solicitud ni el documento.
+        const urlConfirma = buildUrlConfirmaApiMensajes();
+        for (const item of pendientesConfirmacionApiMensajesArray(doc)) {
+          if (item?.apiEntregadoAt) continue;
+          const idDest = item?.id_msj_dest;
+          const idRenglon = item?.id_msj_renglon;
+          if (!idDest || !idRenglon || !doc?.pedidoAt) continue;
+          const okAsumido = await actualizarEstadoUnidadApiMensajes(urlConfirma, 'E', null, {
+            Id_msj_dest: idDest,
+            Id_msj_renglon: idRenglon,
+            __renglones: item?.renglones
+          });
+          if (okAsumido) {
+            await marcarPendienteAsumidoPorAsistoApiMensajes(doc.nroTel, idDest, idRenglon);
+          }
+          const logAsumido = '[API_MENSAJES] recuperacion pendiente asumida por Asisto; estado API E nro=' + String(doc.nroTel || '') +
+            ' id_msj_dest=' + String(idDest || '') +
+            ' id_msj_renglon=' + String(idRenglon || '') +
+            ' ok=' + String(okAsumido);
+          console.log(logAsumido);
+          EscribirLog(logAsumido, okAsumido ? 'event' : 'error');
+        }
+        continue;
+      }
 
       const itemsPendientes = pendientesConfirmacionApiMensajesArray(doc);
       // Si el lote mezcla prioridades, recuperar de manera conservadora: basta
