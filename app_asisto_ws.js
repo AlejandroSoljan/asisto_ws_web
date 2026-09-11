@@ -1,5 +1,5 @@
 /*script:app_asisto*/
-/*version: 4.04.38 10/09/2026   */
+/*version: 4.04.39 11/09/2026   */
 try {
   console.log(`[BOOT] app_asisto version=4.04.38 file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -7092,6 +7092,7 @@ async function guardarPendienteConfirmacionApiMensajes(nroTel, data) {
       content: data?.content ?? data?.Content ?? null,
       content_nombre: data?.content_nombre ?? data?.Content_nombre ?? null,
       agente_id_desc_msj: data?.agente_id_desc_msj ?? data?.Agente_id_desc_msj ?? '',
+      prioridad: data?.prioridad ?? data?.Prioridad ?? null,
       renglones: Array.isArray(data?.renglones) ? data.renglones : null,
       guardadoAt: now,
       updatedAt: now
@@ -7387,6 +7388,126 @@ function nombreClienteDesdeDescripcionApiMensajes(descripcion = '') {
   return nombre;
 }
 
+async function guardarLoteRecibidoApiMensajes(unidades) {
+  const lista = Array.isArray(unidades) ? unidades : [];
+  if (!lista.length) return true;
+  if (!await ensureMongo()) return false;
+  const col = apiMensajesConfirmacionCollection();
+  if (!col) return false;
+  const porTelefono = new Map();
+  for (const unidad of lista) {
+    const dest = unidad?.dest || {};
+    const msg = unidad?.msg || {};
+    const nroTel = onlyDigits(dest?.Nro_tel || '');
+    if (!nroTel) continue;
+    if (!porTelefono.has(nroTel)) porTelefono.set(nroTel, []);
+    porTelefono.get(nroTel).push({ unidad, dest, msg });
+  }
+  for (const [nroTel, items] of porTelefono.entries()) {
+    const now = new Date();
+    const set = { pendientesUpdatedAt: now, updatedAt: now };
+    for (const { unidad, dest, msg } of items) {
+      const idDest = dest?.Id_msj_dest ?? '';
+      const idRenglon = dest?.Id_msj_renglon ?? '';
+      const k = keyPendienteConfirmacionApiMensajes(idDest, idRenglon);
+      set[`pendientes.${k}`] = {
+        key: k,
+        tenantId: apiMensajesConfirmacionTenantId(),
+        numeroFrom: apiMensajesConfirmacionNumeroFrom(),
+        nroTel,
+        id_msj_dest: idDest,
+        id_msj_renglon: idRenglon,
+        msj: String(msg?.Msj ?? ''),
+        content: msg?.Content ?? null,
+        content_nombre: msg?.Content_nombre ?? null,
+        agente_id_desc_msj: msg?.Agente_id_desc_msj ?? '',
+        prioridad: unidad?.prioridad ?? dest?.prioridad ?? msg?.Prioridad ?? null,
+        renglones: Array.isArray(dest?.__renglones) ? dest.__renglones : null,
+        guardadoAt: now,
+        updatedAt: now
+      };
+    }
+    try {
+      await col.updateOne(
+        { _id: apiMensajesConfirmacionId(nroTel) },
+        {
+          $setOnInsert: {
+            createdAt: now,
+            tenantId: apiMensajesConfirmacionTenantId(),
+            numeroFrom: apiMensajesConfirmacionNumeroFrom(),
+            nroTel
+          },
+          $set: set
+        },
+        { upsert: true }
+      );
+    } catch (e) {
+      try { EscribirLog('[API_MENSAJES] error persistiendo lote nro=' + nroTel + ': ' + String(e?.message || e), 'error'); } catch {}
+      return false;
+    }
+  }
+  return true;
+}
+
+async function eliminarPendientePersistidoApiMensajes(nroTel, idDest, idRenglon) {
+  try {
+    if (!await ensureMongo()) return false;
+    const col = apiMensajesConfirmacionCollection();
+    if (!col) return false;
+    const k = keyPendienteConfirmacionApiMensajes(idDest, idRenglon);
+    await col.updateOne(
+      { _id: apiMensajesConfirmacionId(onlyDigits(nroTel || '')) },
+      { $unset: { [`pendientes.${k}`]: '' }, $set: { pendientesUpdatedAt: new Date(), updatedAt: new Date() } }
+    );
+    return true;
+  } catch (e) {
+    try { EscribirLog('[API_MENSAJES] error quitando pendiente persistido: ' + String(e?.message || e), 'error'); } catch {}
+    return false;
+  }
+}
+
+async function recuperarLotePersistidoApiMensajes() {
+  try {
+    if (!await ensureMongo()) return;
+    const col = apiMensajesConfirmacionCollection();
+    if (!col) return;
+    const docs = await col.find({
+      tenantId: apiMensajesConfirmacionTenantId(),
+      numeroFrom: apiMensajesConfirmacionNumeroFrom(),
+      pendientes: { $exists: true }
+    }).limit(50).toArray();
+
+    for (const doc of docs) {
+      if (!pendientesConfirmacionApiMensajesArray(doc).length) continue;
+      if (doc.estado === 'aceptado') {
+        await procesarPendientesDocConfirmacionApiMensajes(doc, 'E', 'recuperacion_lote');
+        continue;
+      }
+      if (doc.estado === 'cancelado') {
+        await procesarPendientesDocConfirmacionApiMensajes(doc, 'C', 'recuperacion_lote');
+        continue;
+      }
+      if (doc.estado === 'pendiente') continue;
+
+      const itemsPendientes = pendientesConfirmacionApiMensajesArray(doc);
+      // Si el lote mezcla prioridades, recuperar de manera conservadora: basta
+      // con que una requiera permiso para pedir confirmación antes de enviar todo.
+      const primerItem = itemsPendientes.find((item) => requiereConfirmacionPrioridadApiMensajes(item?.prioridad)) || itemsPendientes[0] || {};
+      const permiso = await estadoConfirmacionApiMensajes(
+        doc.nroTel,
+        primerItem.agente_id_desc_msj,
+        primerItem.prioridad
+      );
+      if (permiso.autorizado) {
+        const actualizado = await col.findOne({ _id: doc._id });
+        await procesarPendientesDocConfirmacionApiMensajes(actualizado || doc, 'E', 'recuperacion_lote');
+      }
+    }
+  } catch (e) {
+    try { EscribirLog('[API_MENSAJES] error recuperando lote persistido: ' + String(e?.message || e), 'error'); } catch {}
+  }
+}
+
 function respuestaCancelaApiMensajes(body) {
   return normalizarRespuestaConfirmacionApiMensajes(body) === 'CANCELAR';
 }
@@ -7472,30 +7593,34 @@ function esTextoSolicitudConfirmacionApiMensajes(body) {
 
 async function estadoLimiteDiarioApiMensajes() {
   const limite = Math.max(0, Math.floor(Number(api_mensajes_limite_diario) || 0));
-  if (limite <= 0) return { permitido: true, limite: 0, enviados: 0, restantes: null };
-  if (!await ensureMongo()) return { permitido: false, limite, enviados: 0, restantes: 0, motivo: 'mongo_no_disponible' };
-  const col = getDataCollection('wa_wweb_message_log');
-  if (!col) return { permitido: false, limite, enviados: 0, restantes: 0, motivo: 'coleccion_no_disponible' };
-  const dayKey = arDatePartsForStats(new Date()).dayKey;
-  // getDataCollection puede ser un wrapper remoto o un modelo, no siempre una
-  // colección nativa con aggregate(). Leemos una muestra acotada y deduplicamos
-  // en memoria para mantener compatibilidad con ambos backends.
-  const docs = await col.find({
-    tenantId: String(tenantId || ''),
-    numero: String(numero || ''),
-    direction: 'out',
-    dayKey
-  }).limit(Math.max(1000, limite * 5)).toArray();
-  const reales = new Set();
-  for (const doc of (Array.isArray(docs) ? docs : [])) {
-    const messageId = String(doc?.messageId || '').trim();
-    const second = Math.floor(new Date(doc?.at || 0).getTime() / 1000);
-    const legacyKey = [doc?.contact || '', doc?.body || '', Number.isFinite(second) ? second : ''].join(':');
-    reales.add(messageId ? 'id:' + messageId : 'legacy:' + legacyKey);
-    if (reales.size >= limite) break;
+  try {
+    if (limite <= 0) return { permitido: true, limite: 0, enviados: 0, restantes: null };
+    if (!await ensureMongo()) return { permitido: true, limite, enviados: 0, restantes: null, degradado: true, motivo: 'mongo_no_disponible' };
+    const col = getDataCollection('wa_wweb_message_log');
+    if (!col) return { permitido: true, limite, enviados: 0, restantes: null, degradado: true, motivo: 'coleccion_no_disponible' };
+    const dayKey = arDatePartsForStats(new Date()).dayKey;
+    // getDataCollection puede ser un wrapper remoto o un modelo, no siempre una
+    // colección nativa con aggregate(). Leemos una muestra acotada y deduplicamos
+    // en memoria para mantener compatibilidad con ambos backends.
+    const docs = await col.find({
+      tenantId: String(tenantId || ''),
+      numero: String(numero || ''),
+      direction: 'out',
+      dayKey
+    }).limit(Math.max(1000, limite * 5)).toArray();
+    const reales = new Set();
+    for (const doc of (Array.isArray(docs) ? docs : [])) {
+      const messageId = String(doc?.messageId || '').trim();
+      const second = Math.floor(new Date(doc?.at || 0).getTime() / 1000);
+      const legacyKey = [doc?.contact || '', doc?.body || '', Number.isFinite(second) ? second : ''].join(':');
+      reales.add(messageId ? 'id:' + messageId : 'legacy:' + legacyKey);
+      if (reales.size >= limite) break;
+    }
+    const enviados = reales.size;
+    return { permitido: enviados < limite, limite, enviados, restantes: Math.max(0, limite - enviados), dayKey };
+  } catch (e) {
+    return { permitido: true, limite, enviados: 0, restantes: null, degradado: true, motivo: String(e?.message || e) };
   }
-  const enviados = reales.size;
-  return { permitido: enviados < limite, limite, enviados, restantes: Math.max(0, limite - enviados), dayKey };
 }
 
 function logLimiteDiarioApiMensajes(estado) {
@@ -7554,19 +7679,23 @@ async function señalesContactoApiMensajes(nroTel) {
 
 async function estadoLimiteNoContactosApiMensajes() {
   const limite = Math.max(0, Math.floor(Number(api_mensajes_limite_no_contactos) || 0));
-  if (limite <= 0) return { permitido: true, limite: 0, enviados: 0 };
-  if (!await ensureMongo()) return { permitido: false, limite, enviados: 0, motivo: 'mongo_no_disponible' };
-  const col = apiMensajesConfirmacionCollection();
-  if (!col) return { permitido: false, limite, enviados: 0, motivo: 'coleccion_no_disponible' };
-  const dayKey = arDatePartsForStats(new Date()).dayKey;
-  const docs = await col.find({
-    tenantId: String(tenantId || '').toUpperCase(),
-    numeroFrom: getApiMensajesNroTelFrom(),
-    solicitudDayKey: dayKey,
-    contactoConocido: false
-  }).limit(limite).toArray();
-  const enviados = Array.isArray(docs) ? docs.length : 0;
-  return { permitido: enviados < limite, limite, enviados, restantes: Math.max(0, limite - enviados), dayKey };
+  try {
+    if (limite <= 0) return { permitido: true, limite: 0, enviados: 0 };
+    if (!await ensureMongo()) return { permitido: true, limite, enviados: 0, degradado: true, motivo: 'mongo_no_disponible' };
+    const col = apiMensajesConfirmacionCollection();
+    if (!col) return { permitido: true, limite, enviados: 0, degradado: true, motivo: 'coleccion_no_disponible' };
+    const dayKey = arDatePartsForStats(new Date()).dayKey;
+    const docs = await col.find({
+      tenantId: String(tenantId || '').toUpperCase(),
+      numeroFrom: getApiMensajesNroTelFrom(),
+      solicitudDayKey: dayKey,
+      contactoConocido: false
+    }).limit(limite).toArray();
+    const enviados = Array.isArray(docs) ? docs.length : 0;
+    return { permitido: enviados < limite, limite, enviados, restantes: Math.max(0, limite - enviados), dayKey };
+  } catch (e) {
+    return { permitido: true, limite, enviados: 0, degradado: true, motivo: String(e?.message || e) };
+  }
 }
 
 async function registrarExclusionApiMensajes(nroTel, motivo, respuesta = '') {
@@ -7636,7 +7765,9 @@ async function estadoCircuitBreakerApiMensajes() {
     const abierto = muestra >= Math.max(1, Number(api_mensajes_circuit_min_muestra) || 10) && ratio >= Number(api_mensajes_circuit_sin_respuesta_ratio || 0.8);
     return { abierto, muestra, sinRespuesta, ratio, dayKey };
   } catch (e) {
-    return { abierto: true, motivo: String(e?.message || e) };
+    // Una indisponibilidad del servicio de métricas no es evidencia de riesgo
+    // en WhatsApp. No bloquear la consulta de mensajes por un timeout técnico.
+    return { abierto: false, degradado: true, motivo: String(e?.message || e) };
   }
 }
 
@@ -8349,6 +8480,7 @@ async function ConsultaApiMensajes(){
       }
 
       await procesarTimeoutsPendientesConfirmacionApiMensajes();
+      await recuperarLotePersistidoApiMensajes();
 
       const horarioConsulta = await getConsultaMensajesScheduleStatus();
       logConsultaMensajesScheduleStatus(horarioConsulta);
@@ -8440,7 +8572,19 @@ async function ConsultaApiMensajes(){
           await sleep(Number(devolver_seg_tele()) || 30000);
           continue;
         }
- 
+
+        const unidades = prepararUnidadesApiMensajes(jsonResp[0].mensajes, jsonResp[0].destinatarios);
+        let lotePersistido = false;
+        while (!lotePersistido) {
+          lotePersistido = await guardarLoteRecibidoApiMensajes(unidades);
+          if (!lotePersistido) {
+            const logPersistencia = '[API_MENSAJES] lote recibido pero todavía no persistido; se reintenta antes de procesar';
+            console.log(logPersistencia);
+            EscribirLog(logPersistencia, 'error');
+            await sleep(5000);
+          }
+        }
+
         if (String(localWsPanelState || '').toLowerCase() === 'paused' || lastPolicyBlocked === true || await isWwebMessagesBlockedSafe()) {
           try { console.log('[WAIT] ConsultaApiMensajes detenida luego de leer API: bot en pausa'); } catch {}
           try { EscribirLog('[WAIT] ConsultaApiMensajes detenida luego de leer API: bot en pausa', 'event'); } catch {}
@@ -8454,11 +8598,10 @@ async function ConsultaApiMensajes(){
           return;
         }
 
-
-        const unidades = prepararUnidadesApiMensajes(jsonResp[0].mensajes, jsonResp[0].destinatarios);
         const mensajes = unidades.map((u) => ({ ...u.msg, Id_msj_renglon: u.dest.Id_msj_renglon }));
         const destinatarios = unidades.map((u) => u.dest);
         let ultimoNroTelConsultaMensajes = '';
+        const permisosLoteApiMensajes = new Map();
 
         for (let i = 0; i < destinatarios.length; i++) {
           const dest = destinatarios[i] || {};
@@ -8514,7 +8657,8 @@ async function ConsultaApiMensajes(){
               EscribirLog('Mensaje: ' + Nro_tel_format + ': Número no Registrado', "event");
               console.log("numero no registrado");
               await io.emit('message', 'Mensaje: ' + Nro_tel_format + ': Número no Registrado');
-              await actualizarEstadoUnidadApiMensajes(url_confirma_msg, 'I', null, dest);
+              const okInvalido = await actualizarEstadoUnidadApiMensajes(url_confirma_msg, 'I', null, dest);
+              if (okInvalido) await eliminarPendientePersistidoApiMensajes(Nro_tel, Id_msj_dest_local, Id_msj_renglon_local);
               await registrarExclusionApiMensajes(Nro_tel, 'numero_no_registrado');
               continue;
             }
@@ -8534,7 +8678,13 @@ async function ConsultaApiMensajes(){
             }
 
 
-            const permisoConfirmacion = await estadoConfirmacionApiMensajes(Nro_tel, msg.Agente_id_desc_msj, dest.prioridad ?? msg.Prioridad);
+            const prioridadConfirmacion = dest.prioridad ?? msg.Prioridad;
+            const permisoKey = Nro_tel + '|' + String(prioridadConfirmacion ?? '');
+            let permisoConfirmacion = permisosLoteApiMensajes.get(permisoKey);
+            if (!permisoConfirmacion) {
+              permisoConfirmacion = await estadoConfirmacionApiMensajes(Nro_tel, msg.Agente_id_desc_msj, prioridadConfirmacion);
+              permisosLoteApiMensajes.set(permisoKey, permisoConfirmacion);
+            }
             if (!permisoConfirmacion.autorizado) {
               const log = '[API_MENSAJES_CONFIRMACION] envío retenido a ' + Nro_tel +
                 ' motivo=' + String(permisoConfirmacion.motivo || '') +
@@ -8545,21 +8695,9 @@ async function ConsultaApiMensajes(){
 
               if (permisoConfirmacion.limiteDiario === true || permisoConfirmacion.detenerConsulta === true) return;
 
-              if (permisoConfirmacion.cancelarMensaje !== true) {
-                await guardarPendienteConfirmacionApiMensajes(Nro_tel, {
-                  id_msj_dest: Id_msj_dest_local,
-                  id_msj_renglon: Id_msj_renglon_local,
-                  msj: Msj,
-                  content: contenido,
-                  content_nombre: Content_nombre,
-                  agente_id_desc_msj: msg.Agente_id_desc_msj,
-                  renglones: dest.__renglones
-                });
-              }
-
-
               if (permisoConfirmacion.cancelarMensaje === true) {
                 const okCancel = await actualizarEstadoUnidadApiMensajes(url_confirma_msg, 'C', null, dest);
+                if (okCancel) await eliminarPendientePersistidoApiMensajes(Nro_tel, Id_msj_dest_local, Id_msj_renglon_local);
                 const logCancel = '[API_MENSAJES_CONFIRMACION] mensaje actualizado a C por ' + String(permisoConfirmacion.motivo || 'confirmacion_cancelada') +
                   ' nro=' + Nro_tel +
                   ' id_msj_dest=' + String(Id_msj_dest_local || '') +
@@ -8665,6 +8803,7 @@ async function ConsultaApiMensajes(){
 
                 
             const okEstadoE = await actualizarEstadoUnidadApiMensajes(url_confirma_msg, 'E', { tipo, nombre, contacto, direccion, email }, dest);
+            if (okEstadoE) await eliminarPendientePersistidoApiMensajes(Nro_tel, Id_msj_dest_local, Id_msj_renglon_local);
             const logEstadoE = '[API_MENSAJES] estado E actualizado nro=' + Nro_tel +
               ' id_msj_dest=' + String(Id_msj_dest_local || '') +
               ' id_msj_renglon=' + String(Id_msj_renglon_local || '') +
@@ -8676,8 +8815,9 @@ async function ConsultaApiMensajes(){
           
         }
       } catch (err) {
-        console.log(err);
-        EscribirLog('ConsultaApiMensajes error: ' + String(err?.message || err), "error");
+        const errorConsulta = 'ConsultaApiMensajes error: ' + String(err?.message || err);
+        console.log(errorConsulta);
+        EscribirLog(errorConsulta, "error");
         apiMensajesFallosConsecutivos++;
         registrarMetricaApiMensajes('fallos').catch(() => {});
         if (apiMensajesFallosConsecutivos >= Math.max(1, Number(api_mensajes_circuit_fallos_consecutivos) || 3)) {
