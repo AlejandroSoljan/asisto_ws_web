@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.39 11/09/2026   */
+/*version: 4.04.40 11/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.38 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.40 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -7203,12 +7203,19 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
         if (contentNombre == null || contentNombre === '') contentNombre = 'archivo';
         const msj = String(item.msj || '');
         const contenido = item.content;
+        let sentApiMensaje = null;
 
-        if (contenido != null && String(contenido) !== '') {
+        if (item.envioCompletadoAt) {
+          const logReintentoEstado = '[API_MENSAJES] envio ya realizado; se reintenta solo estado E nro=' + to +
+            ' id_msj_dest=' + String(idDest || '') +
+            ' id_msj_renglon=' + String(idRenglon || '');
+          console.log(logReintentoEstado);
+          EscribirLog(logReintentoEstado, 'event');
+        } else if (contenido != null && String(contenido) !== '') {
           const mimeType = detectMimeType(String(contenido)) || mime.lookup(contentNombre) || 'application/octet-stream';
           const media = new MessageMedia(mimeType, String(contenido), contentNombre);
           await io.emit('message', 'Mensaje: ' + nroTelFormat + ': ' + msj);
-          const sentApiMensaje = await enviarApiMensajesConPausa(to, () => safeSend(nroTelFormat, media, { caption: msj }));
+          sentApiMensaje = await enviarApiMensajesConPausa(to, () => safeSend(nroTelFormat, media, { caption: msj }));
           apiMensajesFallosConsecutivos = 0;
           await recordApiMensajesBillingWindow(to, {
             sentMessage: sentApiMensaje,
@@ -7227,7 +7234,7 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
           EscribirLog(logEnvioApi, 'event');
         } else {
           await io.emit('message', 'Mensaje: ' + nroTelFormat + ': ' + msj);
-          const sentApiMensaje = await enviarApiMensajesConPausa(to, () => safeSend(nroTelFormat, msj));
+          sentApiMensaje = await enviarApiMensajesConPausa(to, () => safeSend(nroTelFormat, msj));
           apiMensajesFallosConsecutivos = 0;
           await recordApiMensajesBillingWindow(to, {
             sentMessage: sentApiMensaje,
@@ -7242,6 +7249,10 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
             ' texto=' + msj.slice(0, 160);
           console.log(logEnvioApi);
           EscribirLog(logEnvioApi, 'event');
+        }
+
+        if (!item.envioCompletadoAt) {
+          await marcarPendienteEnviadoApiMensajes(to, idDest, idRenglon, sentApiMensaje);
         }
 
         const info = await getInfoContactoApiMensajes(nroTelFormat);
@@ -7390,11 +7401,12 @@ function nombreClienteDesdeDescripcionApiMensajes(descripcion = '') {
 
 async function guardarLoteRecibidoApiMensajes(unidades) {
   const lista = Array.isArray(unidades) ? unidades : [];
-  if (!lista.length) return true;
-  if (!await ensureMongo()) return false;
+  if (!lista.length) return { ok: true, duplicados: new Set() };
+  if (!await ensureMongo()) return { ok: false, duplicados: new Set() };
   const col = apiMensajesConfirmacionCollection();
-  if (!col) return false;
+  if (!col) return { ok: false, duplicados: new Set() };
   const porTelefono = new Map();
+  const duplicados = new Set();
   for (const unidad of lista) {
     const dest = unidad?.dest || {};
     const msg = unidad?.msg || {};
@@ -7406,10 +7418,27 @@ async function guardarLoteRecibidoApiMensajes(unidades) {
   for (const [nroTel, items] of porTelefono.entries()) {
     const now = new Date();
     const set = { pendientesUpdatedAt: now, updatedAt: now };
+    let existente = null;
+    try {
+      existente = await col.findOne(
+        { _id: apiMensajesConfirmacionId(nroTel) },
+        { projection: { pendientes: 1 } }
+      );
+    } catch (e) {
+      try { EscribirLog('[API_MENSAJES] error leyendo deduplicacion nro=' + nroTel + ': ' + String(e?.message || e), 'error'); } catch {}
+      return { ok: false, duplicados };
+    }
+    const pendientesExistentes = existente?.pendientes && typeof existente.pendientes === 'object'
+      ? existente.pendientes
+      : {};
     for (const { unidad, dest, msg } of items) {
       const idDest = dest?.Id_msj_dest ?? '';
       const idRenglon = dest?.Id_msj_renglon ?? '';
       const k = keyPendienteConfirmacionApiMensajes(idDest, idRenglon);
+      if (pendientesExistentes[k]) {
+        duplicados.add(k);
+        continue;
+      }
       set[`pendientes.${k}`] = {
         key: k,
         tenantId: apiMensajesConfirmacionTenantId(),
@@ -7443,10 +7472,35 @@ async function guardarLoteRecibidoApiMensajes(unidades) {
       );
     } catch (e) {
       try { EscribirLog('[API_MENSAJES] error persistiendo lote nro=' + nroTel + ': ' + String(e?.message || e), 'error'); } catch {}
-      return false;
+      return { ok: false, duplicados };
     }
   }
-  return true;
+  return { ok: true, duplicados };
+}
+
+async function marcarPendienteEnviadoApiMensajes(nroTel, idDest, idRenglon, sentMessage) {
+  try {
+    if (!await ensureMongo()) return false;
+    const col = apiMensajesConfirmacionCollection();
+    if (!col) return false;
+    const k = keyPendienteConfirmacionApiMensajes(idDest, idRenglon);
+    const now = new Date();
+    const wsId = getOutgoingStatMessageId(sentMessage) || '';
+    const result = await col.updateOne(
+      { _id: apiMensajesConfirmacionId(onlyDigits(nroTel || '')), [`pendientes.${k}`]: { $exists: true } },
+      { $set: {
+        [`pendientes.${k}.envioCompletadoAt`]: now,
+        [`pendientes.${k}.wsId`]: wsId,
+        [`pendientes.${k}.updatedAt`]: now,
+        pendientesUpdatedAt: now,
+        updatedAt: now
+      } }
+    );
+    return Number(result?.matchedCount || 0) > 0;
+  } catch (e) {
+    try { EscribirLog('[API_MENSAJES] error marcando envio persistido: ' + String(e?.message || e), 'error'); } catch {}
+    return false;
+  }
 }
 
 async function eliminarPendientePersistidoApiMensajes(nroTel, idDest, idRenglon) {
@@ -8573,16 +8627,29 @@ async function ConsultaApiMensajes(){
           continue;
         }
 
-        const unidades = prepararUnidadesApiMensajes(jsonResp[0].mensajes, jsonResp[0].destinatarios);
-        let lotePersistido = false;
-        while (!lotePersistido) {
-          lotePersistido = await guardarLoteRecibidoApiMensajes(unidades);
-          if (!lotePersistido) {
+        const unidadesRecibidas = prepararUnidadesApiMensajes(jsonResp[0].mensajes, jsonResp[0].destinatarios);
+        let persistenciaLote = { ok: false, duplicados: new Set() };
+        while (!persistenciaLote.ok) {
+          persistenciaLote = await guardarLoteRecibidoApiMensajes(unidadesRecibidas);
+          if (!persistenciaLote.ok) {
             const logPersistencia = '[API_MENSAJES] lote recibido pero todavía no persistido; se reintenta antes de procesar';
             console.log(logPersistencia);
             EscribirLog(logPersistencia, 'error');
             await sleep(5000);
           }
+        }
+        const clavesDuplicadas = persistenciaLote.duplicados instanceof Set
+          ? persistenciaLote.duplicados
+          : new Set();
+        const unidades = unidadesRecibidas.filter((unidad) => {
+          const dest = unidad?.dest || {};
+          return !clavesDuplicadas.has(keyPendienteConfirmacionApiMensajes(dest?.Id_msj_dest, dest?.Id_msj_renglon));
+        });
+        if (clavesDuplicadas.size) {
+          const logDuplicados = '[API_MENSAJES] lote repetido omitido; pendientes existentes=' + String(clavesDuplicadas.size) +
+            ' nuevos=' + String(unidades.length);
+          console.log(logDuplicados);
+          EscribirLog(logDuplicados, 'event');
         }
 
         if (String(localWsPanelState || '').toLowerCase() === 'paused' || lastPolicyBlocked === true || await isWwebMessagesBlockedSafe()) {
@@ -8719,6 +8786,7 @@ async function ConsultaApiMensajes(){
             }
 
             if (Content_nombre == null || Content_nombre === '') Content_nombre = 'archivo';
+            let sentApiMensaje = null;
 
             await pollActionsOnce();
             if (await isWwebMessagesBlockedSafe()) {
@@ -8739,7 +8807,7 @@ async function ConsultaApiMensajes(){
                 return;
               }
               await io.emit('message', 'Mensaje: ' + Nro_tel_format + ': ' + Msj);
-              const sentApiMensaje = await enviarApiMensajesConPausa(Nro_tel, () => safeSend(Nro_tel_format, media, { caption: Msj }));
+              sentApiMensaje = await enviarApiMensajesConPausa(Nro_tel, () => safeSend(Nro_tel_format, media, { caption: Msj }));
               apiMensajesFallosConsecutivos = 0;
               await recordApiMensajesBillingWindow(Nro_tel, {
                 sentMessage: sentApiMensaje,
@@ -8765,7 +8833,7 @@ async function ConsultaApiMensajes(){
                 return;
               }
               await io.emit('message', 'Mensaje: ' + Nro_tel_format + ': ' + Msj);
-              const sentApiMensaje = await enviarApiMensajesConPausa(Nro_tel, () => safeSend(Nro_tel_format, Msj));
+              sentApiMensaje = await enviarApiMensajesConPausa(Nro_tel, () => safeSend(Nro_tel_format, Msj));
               apiMensajesFallosConsecutivos = 0;
               await recordApiMensajesBillingWindow(Nro_tel, {
                 sentMessage: sentApiMensaje,
@@ -8781,6 +8849,8 @@ async function ConsultaApiMensajes(){
               console.log(logEnvioApi);
               EscribirLog(logEnvioApi, 'event');
             }
+
+            await marcarPendienteEnviadoApiMensajes(Nro_tel, Id_msj_dest_local, Id_msj_renglon_local, sentApiMensaje);
  
             let tipo = null, contacto = null, email = null, direccion = null, nombre = null;
             try {
