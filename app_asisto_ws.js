@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.42 11/09/2026   */
+/*version: 4.04.43 11/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.42 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.43 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -7563,6 +7563,22 @@ async function recuperarLotePersistidoApiMensajes() {
       numeroFrom: apiMensajesConfirmacionNumeroFrom(),
       pendientes: { $exists: true }
     }).limit(50).toArray();
+
+    // Prioridad operativa: primero quien ya confirmó, luego quien todavía no
+    // recibió solicitud, y recién después la limpieza de confirmaciones antiguas.
+    // De este modo muchos clientes sin respuesta nunca bloquean contactos nuevos.
+    docs.sort((a, b) => {
+      const prioridadRecuperacion = (doc) => {
+        if (doc?.estado === 'aceptado') return 0;
+        if (!doc?.pedidoAt && doc?.estado !== 'cancelado') return 1;
+        if (doc?.estado === 'pendiente') return 2;
+        if (doc?.estado === 'cancelado') return 3;
+        return 4;
+      };
+      const diff = prioridadRecuperacion(a) - prioridadRecuperacion(b);
+      if (diff) return diff;
+      return new Date(a?.updatedAt || a?.createdAt || 0).getTime() - new Date(b?.updatedAt || b?.createdAt || 0).getTime();
+    });
 
     for (const doc of docs) {
       if (!pendientesConfirmacionApiMensajesArray(doc).length) continue;
