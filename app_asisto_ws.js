@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.44 14/09/2026   */
+/*version: 4.04.45 14/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.44 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.45 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -7150,6 +7150,29 @@ async function getInfoContactoApiMensajes(nroTelFormat) {
   return { tipo, nombre, contacto, direccion, email };
 }
 
+async function pendienteYaRegistradoComoEnviadoApiMensajes(nroTel, idDest, idRenglon) {
+  try {
+    if (!ApiMessageWindowModel || !await ensureMongo()) return false;
+    const numeroFrom = normalizarNroTelFromApiMensajes(getApiMensajesNroTelFrom()) || onlyDigits(numero) || String(numero || '');
+    const doc = await ApiMessageWindowModel.findOne({
+      tenantId: String(tenantId || ''),
+      numeroFrom: String(numeroFrom),
+      contact: onlyDigits(nroTel || ''),
+      channelType: 'api_messages',
+      messages: {
+        $elemMatch: {
+          id_msj_dest: String(idDest),
+          id_msj_renglon: String(idRenglon),
+          type: { $in: ['media', 'document', 'text'] }
+        }
+      }
+    }).lean();
+    return !!doc;
+  } catch {
+    return false;
+  }
+}
+
 async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo) {
   const col = apiMensajesConfirmacionCollection();
   if (!col || !doc) return { total: 0, ok: 0 };
@@ -7206,8 +7229,10 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
         const msj = String(item.msj || '');
         const contenido = item.content;
         let sentApiMensaje = null;
+        const envioYaRegistrado = !!item.envioCompletadoAt ||
+          await pendienteYaRegistradoComoEnviadoApiMensajes(to, idDest, idRenglon);
 
-        if (item.envioCompletadoAt) {
+        if (envioYaRegistrado) {
           const logReintentoEstado = '[API_MENSAJES] envio ya realizado; se reintenta solo estado E nro=' + to +
             ' id_msj_dest=' + String(idDest || '') +
             ' id_msj_renglon=' + String(idRenglon || '');
@@ -7253,7 +7278,7 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
           EscribirLog(logEnvioApi, 'event');
         }
 
-        if (!item.envioCompletadoAt) {
+        if (!envioYaRegistrado) {
           await marcarPendienteEnviadoApiMensajes(to, idDest, idRenglon, sentApiMensaje);
         }
 
@@ -7558,13 +7583,12 @@ async function recuperarLotePersistidoApiMensajes() {
     if (!await ensureMongo()) return;
     const col = apiMensajesConfirmacionCollection();
     if (!col) return;
+    // Traer un conjunto suficientemente amplio antes de ordenar: con el límite
+    // histórico de 50, los aceptados podían quedar fuera indefinidamente.
     const docs = await col.find({
       tenantId: apiMensajesConfirmacionTenantId(),
       numeroFrom: apiMensajesConfirmacionNumeroFrom(),
-      // No traer documentos cuya cola ya quedó vacía. El límite anterior de 50
-      // se aplicaba antes de ordenar y podía dejar indefinidamente afuera a un
-      // cliente aceptado cuando el dominio acumulaba más de 50 confirmaciones.
-      pendientes: { $exists: true, $ne: {} }
+      pendientes: { $exists: true }
     }).limit(500).toArray();
 
     // Prioridad operativa: primero quien ya confirmó, luego quien todavía no
