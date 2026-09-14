@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.48 14/09/2026   */
+/*version: 4.04.49 14/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.48 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.49 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -7609,12 +7609,9 @@ async function recuperarLotePersistidoApiMensajes() {
     // El backend remoto limita el tamaño de cada lectura. Consultar por estado
     // garantiza que los aceptados y los contactos nuevos no queden desplazados
     // por decenas de confirmaciones pendientes antiguas.
-    const grupos = await Promise.all([
-      col.find({ ...baseQuery, estado: 'aceptado' }).limit(50).toArray(),
-      col.find({ ...baseQuery, pedidoAt: { $exists: false }, estado: { $ne: 'cancelado' } }).limit(50).toArray(),
-      col.find({ ...baseQuery, estado: 'pendiente' }).limit(50).toArray(),
-      col.find({ ...baseQuery, estado: 'cancelado' }).limit(50).toArray()
-    ]);
+    const grupos = [];
+    grupos.push(await col.find({ ...baseQuery, estado: 'aceptado' }).limit(50).toArray());
+    grupos.push(await col.find(baseQuery).limit(50).toArray());
     const docsById = new Map();
     for (const grupo of grupos) {
       for (const doc of (Array.isArray(grupo) ? grupo : [])) {
