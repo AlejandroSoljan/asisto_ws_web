@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.47 14/09/2026   */
+/*version: 4.04.48 14/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.47 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.48 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -7601,13 +7601,27 @@ async function recuperarLotePersistidoApiMensajes() {
     if (!await ensureMongo()) return;
     const col = apiMensajesConfirmacionCollection();
     if (!col) return;
-    // Traer un conjunto suficientemente amplio antes de ordenar: con el límite
-    // histórico de 50, los aceptados podían quedar fuera indefinidamente.
-    const docs = await col.find({
+    const baseQuery = {
       tenantId: apiMensajesConfirmacionTenantId(),
       numeroFrom: apiMensajesConfirmacionNumeroFrom(),
       pendientes: { $exists: true }
-    }).limit(500).toArray();
+    };
+    // El backend remoto limita el tamaño de cada lectura. Consultar por estado
+    // garantiza que los aceptados y los contactos nuevos no queden desplazados
+    // por decenas de confirmaciones pendientes antiguas.
+    const grupos = await Promise.all([
+      col.find({ ...baseQuery, estado: 'aceptado' }).limit(50).toArray(),
+      col.find({ ...baseQuery, pedidoAt: { $exists: false }, estado: { $ne: 'cancelado' } }).limit(50).toArray(),
+      col.find({ ...baseQuery, estado: 'pendiente' }).limit(50).toArray(),
+      col.find({ ...baseQuery, estado: 'cancelado' }).limit(50).toArray()
+    ]);
+    const docsById = new Map();
+    for (const grupo of grupos) {
+      for (const doc of (Array.isArray(grupo) ? grupo : [])) {
+        docsById.set(String(doc?._id || ''), doc);
+      }
+    }
+    const docs = Array.from(docsById.values());
 
     // Prioridad operativa: primero quien ya confirmó, luego quien todavía no
     // recibió solicitud, y recién después la limpieza de confirmaciones antiguas.
