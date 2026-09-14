@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.45 14/09/2026   */
+/*version: 4.04.46 14/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.45 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.46 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -6552,6 +6552,12 @@ async function handleActionDoc(doc) {
       EscribirLog('Accion SEND_MESSAGE recibida: to=' + target + ' len=' + text.length, 'event');
       await safeSendMessage(target, text, { sendSeen: false });
       return 'message_sent';
+    }
+
+    if (['process_pending_api_messages', 'recover_pending_api_messages'].includes(action)) {
+      EscribirLog('Accion RECUPERAR PENDIENTES API recibida: ' + reason, 'event');
+      await recuperarLotePersistidoApiMensajes();
+      return 'pending_api_messages_processed';
     }
 
 
