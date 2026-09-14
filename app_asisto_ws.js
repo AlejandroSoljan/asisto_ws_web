@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.50 14/09/2026   */
+/*version: 4.04.51 14/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.50 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.51 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -7610,8 +7610,7 @@ async function recuperarLotePersistidoApiMensajes() {
     // garantiza que los aceptados y los contactos nuevos no queden desplazados
     // por decenas de confirmaciones pendientes antiguas.
     const grupos = [];
-    grupos.push(await col.find({ ...baseQuery, estado: 'aceptado' }).limit(50).toArray());
-    grupos.push(await col.find(baseQuery).limit(50).toArray());
+    grupos.push(await col.find({ ...baseQuery, estado: 'aceptado', pendientes: { $exists: true, $ne: {} } }).limit(10).toArray());
     const docsById = new Map();
     for (const grupo of grupos) {
       for (const doc of (Array.isArray(grupo) ? grupo : [])) {
