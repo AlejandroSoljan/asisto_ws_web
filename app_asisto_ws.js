@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.49 14/09/2026   */
+/*version: 4.04.50 14/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.49 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.50 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -6556,8 +6556,8 @@ async function handleActionDoc(doc) {
 
     if (['process_pending_api_messages', 'recover_pending_api_messages'].includes(action)) {
       EscribirLog('Accion RECUPERAR PENDIENTES API recibida: ' + reason, 'event');
-      await recuperarLotePersistidoApiMensajes();
-      return 'pending_api_messages_processed';
+      const recovery = await recuperarLotePersistidoApiMensajes();
+      return { status: 'pending_api_messages_processed', recovery };
     }
 
 
@@ -7598,9 +7598,9 @@ async function eliminarPendientePersistidoApiMensajes(nroTel, idDest, idRenglon)
 
 async function recuperarLotePersistidoApiMensajes() {
   try {
-    if (!await ensureMongo()) return;
+    if (!await ensureMongo()) return { error: 'backend_no_disponible' };
     const col = apiMensajesConfirmacionCollection();
-    if (!col) return;
+    if (!col) return { error: 'coleccion_no_disponible' };
     const baseQuery = {
       tenantId: apiMensajesConfirmacionTenantId(),
       numeroFrom: apiMensajesConfirmacionNumeroFrom(),
@@ -7619,6 +7619,7 @@ async function recuperarLotePersistidoApiMensajes() {
       }
     }
     const docs = Array.from(docsById.values());
+    const resumen = { encontrados: docs.length, aceptados: 0, pendientesAceptados: 0, procesadosOk: 0 };
 
     // Prioridad operativa: primero quien ya confirmó, luego quien todavía no
     // recibió solicitud, y recién después la limpieza de confirmaciones antiguas.
@@ -7639,7 +7640,10 @@ async function recuperarLotePersistidoApiMensajes() {
     for (const doc of docs) {
       if (!pendientesConfirmacionApiMensajesArray(doc).length) continue;
       if (doc.estado === 'aceptado') {
-        await procesarPendientesDocConfirmacionApiMensajes(doc, 'E', 'recuperacion_lote');
+        resumen.aceptados++;
+        const proc = await procesarPendientesDocConfirmacionApiMensajes(doc, 'E', 'recuperacion_lote');
+        resumen.pendientesAceptados += Number(proc?.total || 0);
+        resumen.procesadosOk += Number(proc?.ok || 0);
         continue;
       }
       if (doc.estado === 'cancelado') {
@@ -7688,8 +7692,10 @@ async function recuperarLotePersistidoApiMensajes() {
         await procesarPendientesDocConfirmacionApiMensajes(actualizado || doc, 'E', 'recuperacion_lote');
       }
     }
+    return resumen;
   } catch (e) {
     try { EscribirLog('[API_MENSAJES] error recuperando lote persistido: ' + String(e?.message || e), 'error'); } catch {}
+    return { error: String(e?.message || e) };
   }
 }
 
