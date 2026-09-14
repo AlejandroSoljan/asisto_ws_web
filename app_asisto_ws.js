@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.43 11/09/2026   */
+/*version: 4.04.44 14/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.43 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.44 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -7561,8 +7561,11 @@ async function recuperarLotePersistidoApiMensajes() {
     const docs = await col.find({
       tenantId: apiMensajesConfirmacionTenantId(),
       numeroFrom: apiMensajesConfirmacionNumeroFrom(),
-      pendientes: { $exists: true }
-    }).limit(50).toArray();
+      // No traer documentos cuya cola ya quedó vacía. El límite anterior de 50
+      // se aplicaba antes de ordenar y podía dejar indefinidamente afuera a un
+      // cliente aceptado cuando el dominio acumulaba más de 50 confirmaciones.
+      pendientes: { $exists: true, $ne: {} }
+    }).limit(500).toArray();
 
     // Prioridad operativa: primero quien ya confirmó, luego quien todavía no
     // recibió solicitud, y recién después la limpieza de confirmaciones antiguas.
