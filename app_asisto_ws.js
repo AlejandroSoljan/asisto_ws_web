@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.46 14/09/2026   */
+/*version: 4.04.47 14/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.46 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.47 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -7308,7 +7308,19 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
         }
       }
     } catch (e) {
-      try { EscribirLog('[API_MENSAJES_CONFIRMACION] error procesando pendiente key=' + pendingKey + ': ' + String(e?.message || e), 'error'); } catch {}
+      const errorDetalle = String(e?.message || e);
+      try {
+        await col.updateOne(
+          { _id: doc._id, [`pendientes.${pendingKey}`]: { $exists: true } },
+          { $set: {
+            [`pendientes.${pendingKey}.lastAttemptAt`]: new Date(),
+            [`pendientes.${pendingKey}.lastError`]: errorDetalle.slice(0, 1000),
+            pendientesUpdatedAt: new Date(),
+            updatedAt: new Date()
+          } }
+        );
+      } catch {}
+      try { EscribirLog('[API_MENSAJES_CONFIRMACION] error procesando pendiente key=' + pendingKey + ': ' + errorDetalle, 'error'); } catch {}
     }
   }
 
