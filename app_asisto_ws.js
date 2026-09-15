@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.51 14/09/2026   */
+/*version: 4.04.52 15/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.51 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.52 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -2805,6 +2805,7 @@ async function logMessageStat(direction, contact, payload) {
       atLocal: parts.atLocal,
       dayKey: parts.dayKey
     };
+    if (payload?.asistoOrigin) logDoc.asistoOrigin = String(payload.asistoOrigin).slice(0, 40);
     if (messageId) logDoc.messageId = messageId;
     if (messageId) {
       await MessageLogModel.updateOne(
@@ -5836,8 +5837,8 @@ async function safeSend(to, content, opts) {
       const sent = await client.sendMessage(to, content, sendOpts);
       try {
         const logPayload = (content && typeof content === 'object')
-          ? { body: sendOpts.caption || '', type: content.mimetype ? 'media' : (content.type || 'text'), mimetype: content.mimetype || '', filename: content.filename || '', data: content.data ? '[data]' : '', messageId: getOutgoingStatMessageId(sent) }
-          : { body: String(content || ''), type: 'text', hasMedia: false, messageId: getOutgoingStatMessageId(sent) };
+          ? { body: sendOpts.caption || '', type: content.mimetype ? 'media' : (content.type || 'text'), mimetype: content.mimetype || '', filename: content.filename || '', data: content.data ? '[data]' : '', messageId: getOutgoingStatMessageId(sent), asistoOrigin: 'script' }
+          : { body: String(content || ''), type: 'text', hasMedia: false, messageId: getOutgoingStatMessageId(sent), asistoOrigin: 'script' };
         await logMessageStat('out', to, logPayload);
         rememberOutgoingStatLogged(sent);
       } catch {}
@@ -7786,24 +7787,33 @@ async function estadoLimiteDiarioApiMensajes() {
   try {
     if (limite <= 0) return { permitido: true, limite: 0, enviados: 0, restantes: null };
     if (!await ensureMongo()) return { permitido: true, limite, enviados: 0, restantes: null, degradado: true, motivo: 'mongo_no_disponible' };
-    const col = getDataCollection('wa_wweb_message_log');
-    if (!col) return { permitido: true, limite, enviados: 0, restantes: null, degradado: true, motivo: 'coleccion_no_disponible' };
     const dayKey = arDatePartsForStats(new Date()).dayKey;
-    // getDataCollection puede ser un wrapper remoto o un modelo, no siempre una
-    // colección nativa con aggregate(). Leemos una muestra acotada y deduplicamos
-    // en memoria para mantener compatibilidad con ambos backends.
-    const docs = await col.find({
+    // El cupo corresponde a la campaña/API de Asisto. wa_wweb_message_log también
+    // contiene mensajes escritos manualmente desde el teléfono o WhatsApp Web y
+    // no debe consumir este límite. Las ventanas API registran exclusivamente los
+    // envíos hechos por ConsultaApiMensajes (confirmación y documento).
+    const colVentanas = getDataCollection('wa_api_message_windows');
+    if (!colVentanas) return { permitido: true, limite, enviados: 0, restantes: null, degradado: true, motivo: 'coleccion_no_disponible' };
+    const desde = new Date(dayKey + 'T03:00:00.000Z');
+    const hasta = new Date(desde.getTime() + 24 * 60 * 60 * 1000);
+    const docs = await colVentanas.find({
       tenantId: String(tenantId || ''),
-      numero: String(numero || ''),
-      direction: 'out',
-      dayKey
-    }).limit(Math.max(1000, limite * 5)).toArray();
+      numeroFrom: String(getApiMensajesNroTelFrom() || numero || ''),
+      channelType: 'api_messages',
+      windowStartedAt: { $gte: desde, $lt: hasta }
+    }).limit(Math.max(200, limite * 3)).toArray();
     const reales = new Set();
     for (const doc of (Array.isArray(docs) ? docs : [])) {
-      const messageId = String(doc?.messageId || '').trim();
-      const second = Math.floor(new Date(doc?.at || 0).getTime() / 1000);
-      const legacyKey = [doc?.contact || '', doc?.body || '', Number.isFinite(second) ? second : ''].join(':');
-      reales.add(messageId ? 'id:' + messageId : 'legacy:' + legacyKey);
+      const entries = Array.isArray(doc?.messages) ? doc.messages : [];
+      for (let index = 0; index < entries.length; index++) {
+        const entry = entries[index] || {};
+        const atMs = new Date(entry.at || doc.windowStartedAt || 0).getTime();
+        if (!Number.isFinite(atMs) || atMs < desde.getTime() || atMs >= hasta.getTime()) continue;
+        const messageId = String(entry.waMessageId || '').trim();
+        const legacyKey = [doc?._id || '', entry.id_msj_dest || '', entry.id_msj_renglon || '', entry.type || '', Math.floor(atMs / 1000), index].join(':');
+        reales.add(messageId ? 'id:' + messageId : 'legacy:' + legacyKey);
+        if (reales.size >= limite) break;
+      }
       if (reales.size >= limite) break;
     }
     const enviados = reales.size;
