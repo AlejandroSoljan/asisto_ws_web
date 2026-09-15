@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.52 15/09/2026   */
+/*version: 4.04.53 15/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.52 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.53 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -7189,6 +7189,8 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
   const url_confirma_msg = buildUrlConfirmaApiMensajes();
   let ok = 0;
   let ultimoNro = '';
+  const errores = [];
+  let detenidoPor = '';
 
   for (const item of pendientes) {
     const to = onlyDigits(item.nroTel || doc.nroTel || '');
@@ -7202,6 +7204,7 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
         const logBad = '[API_MENSAJES_CONFIRMACION] pendiente invalido; no se procesa key=' + pendingKey + ' nro=' + to;
         console.log(logBad);
         EscribirLog(logBad, 'error');
+        errores.push({ key: pendingKey, error: 'pendiente_invalido' });
         continue;
       }
 
@@ -7226,10 +7229,16 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
       }
 
       if (accion === 'E') {
-        const cupo = await estadoLimiteDiarioApiMensajes();
-        if (!cupo.permitido) {
-          logLimiteDiarioApiMensajes(cupo);
-          break;
+        // El cupo limita el inicio de solicitudes nuevas. Una vez que el cliente
+        // respondió y el documento quedó aceptado, hay que completar ese envío:
+        // bloquearlo aquí deja un OK válido retenido indefinidamente.
+        if (doc?.estado !== 'aceptado') {
+          const cupo = await estadoLimiteDiarioApiMensajes();
+          if (!cupo.permitido) {
+            logLimiteDiarioApiMensajes(cupo);
+            detenidoPor = 'limite_diario';
+            break;
+          }
         }
         let contentNombre = item.content_nombre;
         if (contentNombre == null || contentNombre === '') contentNombre = 'archivo';
@@ -7310,6 +7319,7 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
       }
     } catch (e) {
       const errorDetalle = String(e?.message || e);
+      errores.push({ key: pendingKey, error: errorDetalle.slice(0, 1000) });
       try {
         await col.updateOne(
           { _id: doc._id, [`pendientes.${pendingKey}`]: { $exists: true } },
@@ -7320,12 +7330,26 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
             updatedAt: new Date()
           } }
         );
-      } catch {}
+      } catch {
+        // El error debe quedar visible aunque el backend remoto no acepte una
+        // actualización sobre la ruta dinámica del pendiente.
+        try {
+          await col.updateOne(
+            { _id: doc._id },
+            { $set: {
+              ultimoErrorPendiente: errorDetalle.slice(0, 1000),
+              ultimoErrorPendienteKey: pendingKey,
+              ultimoErrorPendienteAt: new Date(),
+              updatedAt: new Date()
+            } }
+          );
+        } catch {}
+      }
       try { EscribirLog('[API_MENSAJES_CONFIRMACION] error procesando pendiente key=' + pendingKey + ': ' + errorDetalle, 'error'); } catch {}
     }
   }
 
-  return { total: pendientes.length, ok };
+  return { total: pendientes.length, ok, detenidoPor, errores };
 }
 
 async function procesarPendientesConfirmacionApiMensajes(phoneCandidates, accion, motivo) {
@@ -7619,7 +7643,7 @@ async function recuperarLotePersistidoApiMensajes() {
       }
     }
     const docs = Array.from(docsById.values());
-    const resumen = { encontrados: docs.length, aceptados: 0, pendientesAceptados: 0, procesadosOk: 0 };
+    const resumen = { encontrados: docs.length, aceptados: 0, pendientesAceptados: 0, procesadosOk: 0, detenidoPor: '', errores: [] };
 
     // Prioridad operativa: primero quien ya confirmó, luego quien todavía no
     // recibió solicitud, y recién después la limpieza de confirmaciones antiguas.
@@ -7644,6 +7668,10 @@ async function recuperarLotePersistidoApiMensajes() {
         const proc = await procesarPendientesDocConfirmacionApiMensajes(doc, 'E', 'recuperacion_lote');
         resumen.pendientesAceptados += Number(proc?.total || 0);
         resumen.procesadosOk += Number(proc?.ok || 0);
+        if (proc?.detenidoPor) resumen.detenidoPor = String(proc.detenidoPor);
+        if (Array.isArray(proc?.errores) && proc.errores.length) {
+          resumen.errores.push(...proc.errores.map((item) => ({ telefono: doc.nroTel, ...item })));
+        }
         continue;
       }
       if (doc.estado === 'cancelado') {
