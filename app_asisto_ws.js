@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.55 16/09/2026   */
+/*version: 4.04.56 16/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.55 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.56 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -2182,6 +2182,12 @@ function applyTenantConfig(conf) {
       ? variantes.map(v => String(v || '').trim()).filter(Boolean)
       : [];
   }
+  if (conf.api_mensajes_confirmacion_mensajes_sin_documento !== undefined || conf.apiMensajesConfirmacionMensajesSinDocumento !== undefined) {
+    const variantes = conf.api_mensajes_confirmacion_mensajes_sin_documento ?? conf.apiMensajesConfirmacionMensajesSinDocumento;
+    api_mensajes_confirmacion_mensajes_sin_documento = Array.isArray(variantes)
+      ? variantes.map(v => String(v || '').trim()).filter(Boolean)
+      : [];
+  }
   if (conf.api_mensajes_confirmacion_respuestas_ok !== undefined || conf.apiMensajesConfirmacionRespuestasOk !== undefined) {
     api_mensajes_confirmacion_respuestas_ok = conf.api_mensajes_confirmacion_respuestas_ok ?? conf.apiMensajesConfirmacionRespuestasOk;
   }
@@ -3741,14 +3747,18 @@ async function autoUpdateForceTargetTagOnBoot(reason = 'boot_target_tag_force') 
   const changedFiles = String(changedOut.stdout || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
 
   // En arranque forzado ignoramos working tree local: reemplazamos sí o sí.
+  const localChanges = await runCommand('git', ['status', '--porcelain', '--untracked-files=normal'], { cwd: repoPath, timeout: 30_000 });
+  if (String(localChanges.stdout || '').trim()) {
+    autoUpdateLog(`[AUTO_UPDATE] skip (${reason}): hay cambios locales; no se reemplazan archivos del cliente`, 'error');
+    return false;
+  }
   await runCommand('git', ['reset', '--hard', targetHead], { cwd: repoPath, timeout: 120_000 });
-  await runCommand('git', ['clean', '-fd'], { cwd: repoPath, timeout: 120_000 });
 
   if (auto_update_run_npm_install) {
     const needsNpm = changedFiles.some((name) => /(^|\/)(package\.json|package-lock\.json)$/i.test(name));
     if (needsNpm) {
       autoUpdateLog('[AUTO_UPDATE] package*.json cambió, ejecutando npm install --omit=dev', 'event');
-      +      await runCommand('npm', ['install', '--omit=dev'], { cwd: repoPath, timeout: 10 * 60_000 });
+      await runCommand('npm', ['install', '--omit=dev'], { cwd: repoPath, timeout: 10 * 60_000 });
 
     }
   }
@@ -4043,6 +4053,8 @@ var api_mensajes_confirmacion_mensaje = String(
   'Hola, vas a recibir un mensaje de nuestra parte. Respondé OK para autorizar la recepción.'
 );
 var api_mensajes_confirmacion_mensajes = [];
+var api_mensajes_confirmacion_mensajes_sin_documento = [];
+var api_mensajes_confirmacion_siguiente_variante = 0;
 var api_mensajes_confirmacion_respuestas_ok = process.env.API_MENSAJES_CONFIRMACION_RESPUESTAS_OK || 'OK,SI,SÍ,S';
 var api_mensajes_confirmacion_reenviar_ms = Number(process.env.API_MENSAJES_CONFIRMACION_REENVIAR_MS || 86400000);
 if (!Number.isFinite(api_mensajes_confirmacion_reenviar_ms) || api_mensajes_confirmacion_reenviar_ms < 0) api_mensajes_confirmacion_reenviar_ms = 86400000;
@@ -7483,14 +7495,24 @@ function respuestaConfirmaApiMensajes(body) {
   return respuestasOkApiMensajesConfirmacion().includes(b);
 }
 
-function textosSolicitudConfirmacionApiMensajes() {
-  const variantes = Array.isArray(api_mensajes_confirmacion_mensajes)
-    ? api_mensajes_confirmacion_mensajes.map(v => String(v || '').trim()).filter(Boolean)
+function textosSolicitudConfirmacionApiMensajes(conDocumento = true) {
+  const lista = conDocumento ? api_mensajes_confirmacion_mensajes : api_mensajes_confirmacion_mensajes_sin_documento;
+  const variantes = Array.isArray(lista)
+    ? [...new Set(lista.map(v => String(v || '').trim()).filter(Boolean))]
     : [];
+  // La lista configurada tiene prioridad. El campo singular es sólo respaldo
+  // para instalaciones que todavía no configuraron variantes.
+  if (variantes.length) return variantes;
+  if (!conDocumento && api_mensajes_confirmacion_mensajes?.length) {
+    return [
+      '¡Hola, {cliente}! 👋 Desde *{empresa}* tenemos información para compartirte por WhatsApp. Respondé *OK* para recibirla o *CANCELAR* para no recibir más mensajes.',
+      '¡Hola, {cliente}! 👋 Te escribimos de *{empresa}* con información para vos. Si querés recibirla por este medio, respondé *OK*. Si no deseás más mensajes, respondé *CANCELAR*.',
+      '¡Hola, {cliente}! 👋 Somos *{empresa}*. ¿Podemos enviarte información por WhatsApp? Respondé *OK* para recibirla o *CANCELAR* para no recibir más mensajes.'
+    ];
+  }
   const principal = String(api_mensajes_confirmacion_mensaje || '').trim();
-  if (principal && !variantes.includes(principal)) variantes.unshift(principal);
-  return variantes.length
-    ? variantes
+  return principal
+    ? [principal]
     : ['Hola, vas a recibir un mensaje de nuestra parte. Respondé OK para autorizar la recepción.'];
 }
 
@@ -7803,25 +7825,48 @@ function reemplazarVariablesConfirmacionApiMensajes(texto = '', contexto = {}) {
   return String(texto || '')
     .replace(/\{\{?empresa\}?\}/gi, String(contexto.empresa || ''))
     .replace(/\{\{?(?:documento|tipo_documento)\}?\}/gi, String(contexto.documento || ''))
-    .replace(/\{\{?cliente\}?\}/gi, String(contexto.cliente || ''));
+    .replace(/\{\{?cliente\}?\}/gi, String(contexto.cliente || ''))
+    .replace(/¡Hola,\s*!/gi, '¡Hola!');
 }
 
 function textoSolicitudConfirmacionApiMensajes(nroTel = '', descripcion = '') {
-  const variantes = textosSolicitudConfirmacionApiMensajes();
+  const cliente = nombreClienteDesdeDescripcionApiMensajes(descripcion);
+  const documento = tipoDocumentoDesdeDescripcionApiMensajes(descripcion);
+  const conDocumento = !!documento && !/^mensaje informativo$/i.test(documento);
+  const variantes = textosSolicitudConfirmacionApiMensajes(conDocumento);
+  // Alterna entre solicitudes, también si se vuelve a escribir al mismo número.
+  // No adelanta el índice cuando hay una sola opción configurada.
+  const indice = api_mensajes_confirmacion_siguiente_variante % variantes.length;
+  if (variantes.length > 1) api_mensajes_confirmacion_siguiente_variante = (indice + 1) % variantes.length;
+  const base = variantes[indice];
   const semilla = String(tenantId || '') + ':' + onlyDigits(nroTel || '');
   let hash = 0;
   for (let i = 0; i < semilla.length; i++) hash = ((hash * 31) + semilla.charCodeAt(i)) >>> 0;
-  const base = variantes[hash % variantes.length];
-  const cliente = nombreClienteDesdeDescripcionApiMensajes(descripcion);
-  const documento = tipoDocumentoDesdeDescripcionApiMensajes(descripcion);
   const empresa = String(nom_chatbot || tenantId || 'nuestra empresa').trim();
   const usaVariables = /\{\{?(?:empresa|documento|tipo_documento|cliente)\}?\}/i.test(base);
 
   if (usaVariables) {
     const personalizado = reemplazarVariablesConfirmacionApiMensajes(base, { empresa, documento, cliente });
-    return /\bCANCELAR\b/i.test(personalizado)
+    return /\b(?:CANCELAR|BAJA)\b/i.test(personalizado)
       ? personalizado
       : personalizado + '\nRespondé *OK* para recibirlo o *CANCELAR* para no recibir más mensajes.';
+  }
+
+  // Conservamos la variante configurada y agregamos el contexto que antes
+  // incluía el texto generado (en particular el número del comprobante).
+  if ((conDocumento && api_mensajes_confirmacion_mensajes?.length) || (!conDocumento && api_mensajes_confirmacion_mensajes_sin_documento?.length)) {
+    const detalle = [
+      cliente ? 'Cliente: ' + cliente : '',
+      documento && !/^mensaje informativo$/i.test(documento) ? 'Documento: ' + documento : ''
+    ].filter(Boolean);
+    const instruccion = base.search(/\bRespond[eé]/i);
+    const texto = !detalle.length ? base
+      : instruccion > 0
+        ? base.slice(0, instruccion).trimEnd() + '\n' + detalle.join(' · ') + '\n' + base.slice(instruccion)
+        : base + '\n' + detalle.join(' · ');
+    return /\b(?:CANCELAR|BAJA)\b/i.test(texto)
+      ? texto
+      : texto + '\nRespondé *OK* para recibirlo o *CANCELAR* para no recibir más mensajes.';
   }
 
   if (!cliente && !documento) {
@@ -7845,7 +7890,7 @@ function textoSolicitudConfirmacionApiMensajes(nroTel = '', descripcion = '') {
 function esTextoSolicitudConfirmacionApiMensajes(body) {
   const b = normalizarRespuestaConfirmacionApiMensajes(body);
   if (!b) return false;
-  return textosSolicitudConfirmacionApiMensajes()
+  return [...textosSolicitudConfirmacionApiMensajes(true), ...textosSolicitudConfirmacionApiMensajes(false)]
     .some(texto => b === normalizarRespuestaConfirmacionApiMensajes(texto));
 }
 
