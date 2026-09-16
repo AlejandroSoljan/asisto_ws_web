@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.54 16/09/2026   */
+/*version: 4.04.55 16/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.54 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.55 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -7250,8 +7250,42 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
         const msj = String(item.msj || '');
         const contenido = item.content;
         let sentApiMensaje = null;
-        const envioYaRegistrado = !!item.envioCompletadoAt ||
+        let envioYaRegistrado = !!item.envioCompletadoAt ||
           await pendienteYaRegistradoComoEnviadoApiMensajes(to, idDest, idRenglon);
+
+        if (!envioYaRegistrado) {
+          // Dos eventos de la misma respuesta pueden procesar el mismo documento
+          // simultáneamente. Reservarlo en Mongo ANTES de safeSend evita dos envíos.
+          // Si el proceso cae después del envío, no liberamos la reserva a ciegas:
+          // el resultado es incierto y requiere revisión, no un reenvío automático.
+          if (item.envioClaimedAt) {
+            const logIncierto = '[API_MENSAJES] envio pendiente con resultado incierto; no se reenvia nro=' + to +
+              ' id_msj_dest=' + String(idDest) + ' id_msj_renglon=' + String(idRenglon);
+            console.log(logIncierto);
+            EscribirLog(logIncierto, 'error');
+            errores.push({ key: pendingKey, error: 'envio_incierto_revisar' });
+            continue;
+          }
+          const claimAt = new Date();
+          const claim = await col.updateOne(
+            {
+              _id: doc._id,
+              [`pendientes.${pendingKey}`]: { $exists: true },
+              [`pendientes.${pendingKey}.envioCompletadoAt`]: { $exists: false },
+              [`pendientes.${pendingKey}.envioClaimedAt`]: { $exists: false }
+            },
+            { $set: {
+              [`pendientes.${pendingKey}.envioClaimedAt`]: claimAt,
+              [`pendientes.${pendingKey}.updatedAt`]: claimAt,
+              pendientesUpdatedAt: claimAt,
+              updatedAt: claimAt
+            } }
+          );
+          if (Number(claim?.matchedCount || 0) !== 1) continue;
+          // Si otro camino ya registró el envío antes de esta reserva,
+          // sólo queda informar E al API, sin volver a mandar WhatsApp.
+          envioYaRegistrado = await pendienteYaRegistradoComoEnviadoApiMensajes(to, idDest, idRenglon);
+        }
 
         if (envioYaRegistrado) {
           const logReintentoEstado = '[API_MENSAJES] envio ya realizado; se reintenta solo estado E nro=' + to +
