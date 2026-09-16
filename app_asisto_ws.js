@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.53 15/09/2026   */
+/*version: 4.04.54 16/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.53 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.54 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -2205,6 +2205,9 @@ function applyTenantConfig(conf) {
       api_mensajes_limite_diario
     )));
   }
+  if (conf.es_mensajes_limite_diario !== undefined) {
+    es_mensajes_limite_diario = Math.max(0, Math.floor(asNumber(conf.es_mensajes_limite_diario, es_mensajes_limite_diario)));
+  }
   if (conf.api_mensajes_limite_no_contactos !== undefined || conf.apiMensajesLimiteNoContactos !== undefined) {
     api_mensajes_limite_no_contactos = Math.max(0, Math.floor(asNumber(
       conf.api_mensajes_limite_no_contactos ?? conf.apiMensajesLimiteNoContactos,
@@ -4010,6 +4013,8 @@ var habilitar_mensajes_info = parseBoolLike(
   process.env.HABILITAR_MENSAJES_INFO ?? process.env.MENSAJES_INFO_HABILITADO ?? process.env.ENVIAR_MENSAJES_INFO_HABILITADO,
   false
 );
+// Cupo independiente para altas de es_mensajes (prioridad 3); 0 no limita.
+var es_mensajes_limite_diario = Math.max(0, Math.floor(Number(process.env.ES_MENSAJES_LIMITE_DIARIO || 0) || 0));
 
 // Habilita el loop local por ODBC/Manager (compras, entregas y es_mensajes).
 // Para tenants que solo usan Api_Mensajes/Consulta_no_enviados, poner false en tenant_config.
@@ -9179,6 +9184,7 @@ function getRuntimeConfigSnapshot() {
     habilitar_bot: habilitar_bot === true,
     habilitar_consulta_mensajes: consulta_api_mensajes_habilitado === true,
     habilitar_mensajes_info: habilitar_mensajes_info === true,
+    es_mensajes_limite_diario: Number(es_mensajes_limite_diario) || 0,
     habilitar_odbc_manager: habilitar_odbc_manager === true,
     api2: String(api2 || ''),
     api3: String(api3 || ''),
@@ -9900,6 +9906,19 @@ async function enviar_mensajes_info() {
   if (!compraEntregaConnection) return;
 
   const origenLocal = onlyDigits(telefono_qr).slice(-10);
+  if (es_mensajes_limite_diario > 0) {
+    const dia = arDatePartsForStats(new Date()).dayKey;
+    const siguienteDia = new Date(Date.parse(dia + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10);
+    // fecha_envio se guarda en hora local de Argentina cuando Alta termina bien.
+    const enviados = await compraEntregaConnection.query(
+      "select count(*) as total from es_mensajes where estado = 'S' and tipo = 'WS' " +
+      "and right(cast(origen as varchar(30)), 10) = '" + origenLocal + "' " +
+      "and fecha_envio >= '" + dia + " 00:00:00' and fecha_envio < '" + siguienteDia + " 00:00:00'"
+    );
+    const total = Number(enviados?.[0]?.total ?? enviados?.[0]?.TOTAL ?? Object.values(enviados?.[0] || {})[0]);
+    if (!Number.isFinite(total)) throw new Error('es_mensajes: no se pudo calcular el cupo diario');
+    if (total >= es_mensajes_limite_diario) return;
+  }
   const data = await compraEntregaConnection.query(
     "select first * from es_mensajes " +
     "where estado <> 'S' and tipo = 'WS' " +
