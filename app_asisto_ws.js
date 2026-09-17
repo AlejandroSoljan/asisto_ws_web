@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.57 17/09/2026   */
+/*version: 4.04.58 17/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.57 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.58 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -8087,18 +8087,22 @@ function esRespuestaNoValidaConfirmacionApiMensajes(body) {
   return respuestaCancelaApiMensajes(body);
 }
 
-function apiMensajesConfirmacionAceptada(doc) {
+function apiMensajesConfirmacionSolicitudVigente(doc) {
   try {
-    if (!doc || doc.estado !== 'aceptado') return false;
-    if (!doc.aceptadoAt) return false;
+    if (!doc) return false;
     const validez = Number(api_mensajes_confirmacion_validez_ms) || 0;
     if (validez <= 0) return true;
-    const acceptedMs = new Date(doc.aceptadoAt).getTime();
-    if (!Number.isFinite(acceptedMs)) return false;
-    return (Date.now() - acceptedMs) <= validez;
+    // La ventana empieza cuando se ENVÍA la solicitud, no cuando responden.
+    // aceptadoAt sólo respalda registros anteriores que no tienen pedidoAt.
+    const pedidoMs = new Date(doc.pedidoAt || (doc.estado === 'aceptado' ? doc.aceptadoAt : 0) || 0).getTime();
+    return Number.isFinite(pedidoMs) && pedidoMs > 0 && (Date.now() - pedidoMs) < validez;
   } catch {
     return false;
   }
+}
+
+function apiMensajesConfirmacionAceptada(doc) {
+  return !!doc && doc.estado === 'aceptado' && !!doc.aceptadoAt && apiMensajesConfirmacionSolicitudVigente(doc);
 }
 
 function getWhatsappMessageTimestampMs(message) {
@@ -8227,8 +8231,7 @@ async function detectarNoValidaConfirmacionApiMensajesEnChat(nroTel, doc) {
 async function estadoConfirmacionApiMensajes(nroTel, descripcion = '', prioridad = null) {
   const to = onlyDigits(nroTel || '');
   if (!to) return { autorizado: false, motivo: 'sin_numero' };
-  const confirmacionDiariaRVL = String(tenantId || '').trim().toUpperCase() === 'RVL';
-  if (api_mensajes_confirmacion_habilitada === true && !confirmacionDiariaRVL && !requiereConfirmacionPrioridadApiMensajes(prioridad)) {
+  if (api_mensajes_confirmacion_habilitada === true && !requiereConfirmacionPrioridadApiMensajes(prioridad)) {
     return { autorizado: true, motivo: 'prioridad_sin_confirmacion', prioridad };
   }
   if (api_mensajes_confirmacion_habilitada !== true) {
@@ -8246,24 +8249,20 @@ async function estadoConfirmacionApiMensajes(nroTel, descripcion = '', prioridad
   const _id = apiMensajesConfirmacionId(to);
   const reenviarMs = Math.max(0, Number(api_mensajes_confirmacion_reenviar_ms) || 0);
   let doc = await col.findOne({ _id });
-  const solicitudHoy = !!doc && doc.solicitudDayKey === arDatePartsForStats(now).dayKey;
+  const solicitudVigente = apiMensajesConfirmacionSolicitudVigente(doc);
 
   if (doc?.exclusionPermanente === true) {
     return { autorizado: false, motivo: doc.exclusionMotivo || 'exclusion_permanente', solicitudEnviada: false, cancelarMensaje: true, doc };
   }
 
-  if (apiMensajesConfirmacionAceptada(doc) && (!confirmacionDiariaRVL || solicitudHoy)) {
+  if (apiMensajesConfirmacionAceptada(doc)) {
     return { autorizado: true, motivo: 'aceptado', doc };
   }
-  if (doc && doc.solicitudDayKey === arDatePartsForStats(now).dayKey && doc.estado === 'cancelado') {
-    return { autorizado: false, motivo: doc.motivoCancelacion || 'solicitud_ya_realizada_hoy', solicitudEnviada: false, cancelarMensaje: true, doc };
-  }
   if (doc && doc.estado === 'cancelado') {
-    // RVL pide una sola confirmación por día por cliente. Una cancelación
-    // temporal de ayer no agrega otra ventana de espera; CANCELAR permanente
-    // ya quedó protegido por exclusionPermanente más arriba.
+    // Una cancelación temporal no extiende la espera más allá de la validez
+    // calculada desde la última solicitud. CANCELAR permanente se conserva.
     const baseCancelMs = new Date(doc.canceladoAt || doc.updatedAt || doc.pedidoAt || 0).getTime();
-    const cancelacionVigente = !(confirmacionDiariaRVL && !solicitudHoy) &&
+    const cancelacionVigente = solicitudVigente &&
       (reenviarMs <= 0 || !Number.isFinite(baseCancelMs) || baseCancelMs <= 0 || (Date.now() - baseCancelMs) < reenviarMs);
 
     if (cancelacionVigente) {
@@ -8323,7 +8322,7 @@ async function estadoConfirmacionApiMensajes(nroTel, descripcion = '', prioridad
     if (okDetectado) {
       doc = await col.findOne({ _id });
       await procesarPendientesConfirmacionApiMensajes([to], 'E', 'aceptado_chat_history');
-      if (!confirmacionDiariaRVL || solicitudHoy) {
+      if (apiMensajesConfirmacionAceptada(doc)) {
         return { autorizado: true, motivo: 'aceptado_chat_history', doc };
       }
     }
@@ -8331,7 +8330,7 @@ async function estadoConfirmacionApiMensajes(nroTel, descripcion = '', prioridad
 
 
  const ultimoPedidoMs = doc?.pedidoAt ? new Date(doc.pedidoAt).getTime() : 0;
-   const expiroVentana = !!doc && doc.estado === 'pendiente' && !(confirmacionDiariaRVL && !solicitudHoy) && Number.isFinite(ultimoPedidoMs) && ultimoPedidoMs > 0 && reenviarMs > 0 && (Date.now() - ultimoPedidoMs) >= reenviarMs;
+   const expiroVentana = !!doc && doc.estado === 'pendiente' && solicitudVigente && Number.isFinite(ultimoPedidoMs) && ultimoPedidoMs > 0 && reenviarMs > 0 && (Date.now() - ultimoPedidoMs) >= reenviarMs;
 
   if (expiroVentana) {
     const setCancelado = buildSetCanceladoConfirmacionApiMensajes(now, to, '', 'sin_respuesta_timeout');
@@ -8350,7 +8349,7 @@ async function estadoConfirmacionApiMensajes(nroTel, descripcion = '', prioridad
     return { autorizado: false, motivo: 'sin_respuesta_timeout', solicitudEnviada: false, cancelarMensaje: true, doc: { ...(doc || {}), ...setCancelado } };
   }
 
-  const debePedir = !doc || !Number.isFinite(ultimoPedidoMs) || ultimoPedidoMs <= 0 || (confirmacionDiariaRVL && !solicitudHoy);
+  const debePedir = !doc || !Number.isFinite(ultimoPedidoMs) || ultimoPedidoMs <= 0 || !solicitudVigente;
  
 
   if (debePedir) {
