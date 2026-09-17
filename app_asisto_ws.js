@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.04.62 17/09/2026   */
-const ASISTO_SCRIPT_VERSION = '4.04.62';
+/*version: 4.04.63 17/09/2026   */
+const ASISTO_SCRIPT_VERSION = '4.04.63';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -7365,7 +7365,11 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
           const mimeType = detectMimeType(String(contenido)) || mime.lookup(contentNombre) || 'application/octet-stream';
           const media = new MessageMedia(mimeType, String(contenido), contentNombre);
           await io.emit('message', 'Mensaje: ' + nroTelFormat + ': ' + msj);
-          sentApiMensaje = await enviarApiMensajesConPausa(to, () => safeSend(nroTelFormat, media, { caption: msj, linkPreview: false }));
+          sentApiMensaje = await enviarApiMensajesConPausa(to, () => safeSend(nroTelFormat, media, {
+            caption: msj,
+            linkPreview: false,
+            sendMediaAsDocument: mimeType === 'application/pdf'
+          }));
           apiMensajesFallosConsecutivos = 0;
           await recordApiMensajesBillingWindow(to, {
             sentMessage: sentApiMensaje,
@@ -9216,7 +9220,11 @@ async function ConsultaApiMensajes(){
                 EscribirLog(logReserva, 'error');
                 continue;
               }
-              sentApiMensaje = await enviarApiMensajesConPausa(Nro_tel, () => safeSend(Nro_tel_format, media, { caption: Msj, linkPreview: false }));
+              sentApiMensaje = await enviarApiMensajesConPausa(Nro_tel, () => safeSend(Nro_tel_format, media, {
+                caption: Msj,
+                linkPreview: false,
+                sendMediaAsDocument: mimeType === 'application/pdf'
+              }));
               apiMensajesFallosConsecutivos = 0;
               await recordApiMensajesBillingWindow(Nro_tel, {
                 sentMessage: sentApiMensaje,
