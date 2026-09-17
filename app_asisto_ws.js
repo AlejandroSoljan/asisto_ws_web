@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.04.68 17/09/2026   */
-const ASISTO_SCRIPT_VERSION = '4.04.68';
+/*version: 4.04.69 17/09/2026   */
+const ASISTO_SCRIPT_VERSION = '4.04.69';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -6566,6 +6566,19 @@ async function handleActionDoc(doc) {
             const me = window.require('WAWebUserPrefsMeUser').getMaybeMePnUser();
             const id = await keyClass.newId();
             const key = new keyClass({ from: me, to: chat.id, id, selfDir: 'out' });
+            if (phase === 'message_key_getter') {
+              const msg = window.require('WAWebCollections').Msg;
+              const tested = {};
+              for (const [name, value] of [['string', key.toString()], ['key', key], ['object', { id: key }], ['object_string', { id: key.toString() }]]) {
+                try {
+                  const found = msg.get(value);
+                  tested[name] = { ok: true, found: !!found };
+                } catch (error) {
+                  tested[name] = { error: String(error?.message || error).slice(0, 220) };
+                }
+              }
+              return { status: 'message_getter_checked', tested };
+            }
             return { status: 'message_key_checked', hasChat: !!chat, keys: Object.keys(key || {}),
               serializedType: typeof key._serialized, serializedValue: String(key._serialized || '').slice(0, 90),
               idType: typeof key.id, idValue: String(key.id || '').slice(0, 90),
