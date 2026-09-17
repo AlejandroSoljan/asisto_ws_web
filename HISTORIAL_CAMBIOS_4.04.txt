@@ -96,6 +96,9 @@ v4.04.59 - Evita repetir indefinidamente un documento de API Mensajes cuando
              de la cola procesable. Desactiva la vista previa de enlaces en
              adjuntos. Impacto previsto: RVL y NEA. Los documentos inciertos
              previos requieren conciliación individual antes de reintentar.
+v4.04.60 - Limita a un aviso por documento cada 30 minutos el log de envíos
+             inciertos retenidos, sin desbloquearlos ni reenviarlos. Agrega
+             prueba de no repetición del aviso. Impacto previsto: RVL y NEA.
 
 NOTA DE VERIFICACIÓN
 La publicación del tag y la versión objetivo en Mongo no prueban por sí solas

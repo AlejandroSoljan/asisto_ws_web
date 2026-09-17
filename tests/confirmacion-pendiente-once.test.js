@@ -11,6 +11,7 @@ assert.ok(start >= 0 && end > start);
 let claimed = false;
 let sent = 0;
 let completed = false;
+const logs = [];
 const col = {
   async updateOne(query, update) {
     if (query['pendientes.551_707.envioClaimedAt']) {
@@ -43,7 +44,7 @@ const context = {
   marcarPendienteEnviadoApiMensajes: async () => { completed = true; return true; },
   getInfoContactoApiMensajes: async () => ({}),
   actualizarEstadoUnidadApiMensajes: async () => true,
-  EscribirLog: () => {},
+  EscribirLog: (message) => { logs.push(message); },
   console: { log: () => {} },
   apiMensajesFallosConsecutivos: 0
 };
@@ -70,5 +71,8 @@ Promise.all([context.procesar(doc, 'E', 'ok'), context.procesar(doc, 'E', 'ok')]
     const result = await context.procesar(doc, 'E', 'recovery');
     assert.equal(sent, 1, 'un envío incierto no se debe repetir automáticamente');
     assert.equal(result.errores[0].error, 'envio_incierto_revisar');
+    await context.procesar(doc, 'E', 'recovery');
+    assert.equal(logs.filter((message) => message.includes('resultado incierto')).length, 1,
+      'las revisiones repetidas no deben saturar el log');
   })
   .catch((error) => { console.error(error); process.exitCode = 1; });

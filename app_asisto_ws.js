@@ -1,7 +1,7 @@
 /*script:app_asisto*/
 /*version: 4.04.58 17/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.59 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.60 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -7273,8 +7273,16 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
           if (item.envioClaimedAt) {
             const logIncierto = '[API_MENSAJES] envio pendiente con resultado incierto; no se reenvia nro=' + to +
               ' id_msj_dest=' + String(idDest) + ' id_msj_renglon=' + String(idRenglon);
-            console.log(logIncierto);
-            EscribirLog(logIncierto, 'error');
+            const avisos = procesarPendientesDocConfirmacionApiMensajes._avisosInciertos ||
+              (procesarPendientesDocConfirmacionApiMensajes._avisosInciertos = new Map());
+            const avisoKey = String(doc._id || '') + ':' + pendingKey;
+            const ahoraMs = Date.now();
+            if (ahoraMs - Number(avisos.get(avisoKey) || 0) >= 30 * 60_000) {
+              if (avisos.size > 1000) avisos.clear();
+              avisos.set(avisoKey, ahoraMs);
+              console.log(logIncierto);
+              EscribirLog(logIncierto, 'error');
+            }
             errores.push({ key: pendingKey, error: 'envio_incierto_revisar' });
             continue;
           }
