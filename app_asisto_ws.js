@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.04.64 17/09/2026   */
-const ASISTO_SCRIPT_VERSION = '4.04.64';
+/*version: 4.04.65 17/09/2026   */
+const ASISTO_SCRIPT_VERSION = '4.04.65';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -6546,19 +6546,33 @@ async function handleActionDoc(doc) {
       }
       const mimetype = detectMimeType(String(item.content)) || mime.lookup(item.content_nombre) || '';
       if (mimetype !== 'application/pdf') return JSON.stringify({ status: 'not_pdf', key });
-      const diagnostic = await client.pupPage.evaluate(async (mediaInfo) => {
+      const diagnostic = await client.pupPage.evaluate(async ({ mediaInfo, phase }) => {
         try {
           const file = window.WWebJS.mediaInfoToFile(mediaInfo);
           const OpaqueData = window.require('WAWebMediaOpaqueData');
           const opaqueData = await OpaqueData.createFromData(file, mediaInfo.mimetype);
           const prep = window.require('WAWebPrepRawMedia').prepRawMedia(opaqueData, { asDocument: true });
           const data = await prep.waitForPrep();
+          if (phase === 'media_object') {
+            const storage = window.require('WAWebMediaStorage');
+            const attempts = {};
+            for (const [name, value] of [['raw', data.filehash], ['id_object', { id: data.filehash }]]) {
+              try {
+                const result = storage.getOrCreateMediaObject(value);
+                attempts[name] = { ok: !!result, type: String(result?.type || '') };
+              } catch (e) {
+                attempts[name] = { error: String(e?.message || e).slice(0,300) };
+              }
+            }
+            return { status: 'media_object_checked', filehashType: typeof data.filehash, attempts };
+          }
           return { status: 'prepared', keys: Object.keys(data || {}), filehashType: typeof data?.filehash,
             hasFilehash: !!data?.filehash, type: String(data?.type || ''), mimetype: String(data?.mimetype || '') };
         } catch (e) {
           return { status: 'prep_error', message: String(e?.message || e).slice(0,500) };
         }
-      }, { data: String(item.content), mimetype, filename: String(item.content_nombre || 'archivo.pdf') });
+      }, { mediaInfo: { data: String(item.content), mimetype, filename: String(item.content_nombre || 'archivo.pdf') },
+        phase: String(doc?.phase || '') });
       return JSON.stringify({ key, to, diagnostic });
     }
 
