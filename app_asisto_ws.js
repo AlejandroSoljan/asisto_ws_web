@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.04.69 17/09/2026   */
-const ASISTO_SCRIPT_VERSION = '4.04.69';
+/*version: 4.04.70 17/09/2026   */
+const ASISTO_SCRIPT_VERSION = '4.04.70';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -6560,7 +6560,7 @@ async function handleActionDoc(doc) {
       if (mimetype !== 'application/pdf') return JSON.stringify({ status: 'not_pdf', key });
       const diagnostic = await client.pupPage.evaluate(async ({ mediaInfo, phase }) => {
         try {
-          if (phase === 'message_key') {
+          if (phase === 'message_key' || phase === 'message_key_getter') {
             const chat = await window.WWebJS.getChat(mediaInfo.to + '@c.us', { getAsModel: false });
             const keyClass = window.require('WAWebMsgKey');
             const me = window.require('WAWebUserPrefsMeUser').getMaybeMePnUser();
