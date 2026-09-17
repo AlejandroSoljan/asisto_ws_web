@@ -1,7 +1,7 @@
 /*script:app_asisto*/
-/*version: 4.04.56 16/09/2026   */
+/*version: 4.04.57 17/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.56 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.57 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -8227,7 +8227,8 @@ async function detectarNoValidaConfirmacionApiMensajesEnChat(nroTel, doc) {
 async function estadoConfirmacionApiMensajes(nroTel, descripcion = '', prioridad = null) {
   const to = onlyDigits(nroTel || '');
   if (!to) return { autorizado: false, motivo: 'sin_numero' };
-  if (api_mensajes_confirmacion_habilitada === true && !requiereConfirmacionPrioridadApiMensajes(prioridad)) {
+  const confirmacionDiariaRVL = String(tenantId || '').trim().toUpperCase() === 'RVL';
+  if (api_mensajes_confirmacion_habilitada === true && !confirmacionDiariaRVL && !requiereConfirmacionPrioridadApiMensajes(prioridad)) {
     return { autorizado: true, motivo: 'prioridad_sin_confirmacion', prioridad };
   }
   if (api_mensajes_confirmacion_habilitada !== true) {
@@ -8245,18 +8246,25 @@ async function estadoConfirmacionApiMensajes(nroTel, descripcion = '', prioridad
   const _id = apiMensajesConfirmacionId(to);
   const reenviarMs = Math.max(0, Number(api_mensajes_confirmacion_reenviar_ms) || 0);
   let doc = await col.findOne({ _id });
+  const solicitudHoy = !!doc && doc.solicitudDayKey === arDatePartsForStats(now).dayKey;
 
   if (doc?.exclusionPermanente === true) {
     return { autorizado: false, motivo: doc.exclusionMotivo || 'exclusion_permanente', solicitudEnviada: false, cancelarMensaje: true, doc };
   }
 
-  if (apiMensajesConfirmacionAceptada(doc)) return { autorizado: true, motivo: 'aceptado', doc };
+  if (apiMensajesConfirmacionAceptada(doc) && (!confirmacionDiariaRVL || solicitudHoy)) {
+    return { autorizado: true, motivo: 'aceptado', doc };
+  }
   if (doc && doc.solicitudDayKey === arDatePartsForStats(now).dayKey && doc.estado === 'cancelado') {
     return { autorizado: false, motivo: doc.motivoCancelacion || 'solicitud_ya_realizada_hoy', solicitudEnviada: false, cancelarMensaje: true, doc };
   }
   if (doc && doc.estado === 'cancelado') {
+    // RVL pide una sola confirmación por día por cliente. Una cancelación
+    // temporal de ayer no agrega otra ventana de espera; CANCELAR permanente
+    // ya quedó protegido por exclusionPermanente más arriba.
     const baseCancelMs = new Date(doc.canceladoAt || doc.updatedAt || doc.pedidoAt || 0).getTime();
-    const cancelacionVigente = reenviarMs <= 0 || !Number.isFinite(baseCancelMs) || baseCancelMs <= 0 || (Date.now() - baseCancelMs) < reenviarMs;
+    const cancelacionVigente = !(confirmacionDiariaRVL && !solicitudHoy) &&
+      (reenviarMs <= 0 || !Number.isFinite(baseCancelMs) || baseCancelMs <= 0 || (Date.now() - baseCancelMs) < reenviarMs);
 
     if (cancelacionVigente) {
       try {
@@ -8315,13 +8323,15 @@ async function estadoConfirmacionApiMensajes(nroTel, descripcion = '', prioridad
     if (okDetectado) {
       doc = await col.findOne({ _id });
       await procesarPendientesConfirmacionApiMensajes([to], 'E', 'aceptado_chat_history');
-      return { autorizado: true, motivo: 'aceptado_chat_history', doc };
+      if (!confirmacionDiariaRVL || solicitudHoy) {
+        return { autorizado: true, motivo: 'aceptado_chat_history', doc };
+      }
     }
   }
 
 
  const ultimoPedidoMs = doc?.pedidoAt ? new Date(doc.pedidoAt).getTime() : 0;
-   const expiroVentana = !!doc && doc.estado === 'pendiente' && Number.isFinite(ultimoPedidoMs) && ultimoPedidoMs > 0 && reenviarMs > 0 && (Date.now() - ultimoPedidoMs) >= reenviarMs;
+   const expiroVentana = !!doc && doc.estado === 'pendiente' && !(confirmacionDiariaRVL && !solicitudHoy) && Number.isFinite(ultimoPedidoMs) && ultimoPedidoMs > 0 && reenviarMs > 0 && (Date.now() - ultimoPedidoMs) >= reenviarMs;
 
   if (expiroVentana) {
     const setCancelado = buildSetCanceladoConfirmacionApiMensajes(now, to, '', 'sin_respuesta_timeout');
@@ -8340,7 +8350,7 @@ async function estadoConfirmacionApiMensajes(nroTel, descripcion = '', prioridad
     return { autorizado: false, motivo: 'sin_respuesta_timeout', solicitudEnviada: false, cancelarMensaje: true, doc: { ...(doc || {}), ...setCancelado } };
   }
 
-  const debePedir = !doc || !Number.isFinite(ultimoPedidoMs) || ultimoPedidoMs <= 0;
+  const debePedir = !doc || !Number.isFinite(ultimoPedidoMs) || ultimoPedidoMs <= 0 || (confirmacionDiariaRVL && !solicitudHoy);
  
 
   if (debePedir) {
