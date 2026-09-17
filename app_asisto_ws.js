@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.04.72 17/09/2026   */
-const ASISTO_SCRIPT_VERSION = '4.04.72';
+/*version: 4.04.73 17/09/2026   */
+const ASISTO_SCRIPT_VERSION = '4.04.73';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -93,8 +93,23 @@ let mongoConnectingPromise = null;
 
 let wwebJsRuntimeLoadPromise = null;
 
+function ensureWwebMediaIdCompatPatch() {
+  const packageDir = path.dirname(require.resolve('whatsapp-web.js/package.json'));
+  const utilsPath = path.join(packageDir, 'src', 'util', 'Injected', 'Utils.js');
+  const source = fs.readFileSync(utilsPath, 'utf8');
+  if (source.includes('delete message.__x_id;')) return;
+  const anchor = "        // Bot's won't reply if canonicalUrl is set (linking)";
+  if (!source.includes('...mediaOptions,') || !source.includes(anchor)) {
+    throw new Error('whatsapp_web_js_media_patch_incompatible');
+  }
+  const patched = source.replace(anchor, '        // WA Web media model internal id must not override the outgoing Msg id.\n        delete message.__x_id;\n\n' + anchor);
+  fs.writeFileSync(utilsPath, patched, 'utf8');
+  console.log('[WWEBJS] media id compatibility patch applied');
+}
+
 
 function tryLoadWwebJsRuntimeSync() {
+  ensureWwebMediaIdCompatPatch();
   const wweb = require('whatsapp-web.js');
   if (!wweb || typeof wweb.Client !== 'function') throw new Error('whatsapp_web_js_client_missing');
 
@@ -5846,33 +5861,6 @@ async function safeSend(to, content, opts) {
       }
        const sendOpts = (opts && typeof opts === 'object') ? { ...opts } : {};
       if (typeof sendOpts.sendSeen === 'undefined') sendOpts.sendSeen = false;
-      if (isWwebJsEngine() && client?.pupPage && content?.mimetype) {
-        await client.pupPage.evaluate(() => {
-          const api = window.WWebJS;
-          if (!api?.processMediaData) throw new Error('WWebJS media processor unavailable');
-          if (api.__asistoMediaIdCompat) return;
-          const original = api.processMediaData;
-          api.processMediaData = async (...args) => {
-            const mediaOptions = await original(...args);
-            if (mediaOptions && Object.prototype.hasOwnProperty.call(mediaOptions, '__x_id')) {
-              delete mediaOptions.__x_id;
-            }
-            if (typeof mediaOptions?.toJSON === 'function') {
-              const originalToJSON = mediaOptions.toJSON.bind(mediaOptions);
-              Object.defineProperty(mediaOptions, 'toJSON', {
-                configurable: true,
-                value: () => {
-                  const value = originalToJSON();
-                  if (value && Object.prototype.hasOwnProperty.call(value, '__x_id')) delete value.__x_id;
-                  return value;
-                }
-              });
-            }
-            return mediaOptions;
-          };
-          api.__asistoMediaIdCompat = true;
-        });
-      }
       const sent = await client.sendMessage(to, content, sendOpts);
       try {
         const logPayload = (content && typeof content === 'object')
