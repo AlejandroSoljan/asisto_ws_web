@@ -1,7 +1,8 @@
 /*script:app_asisto*/
-/*version: 4.04.58 17/09/2026   */
+/*version: 4.04.61 17/09/2026   */
+const ASISTO_SCRIPT_VERSION = '4.04.61';
 try {
-  console.log(`[BOOT] app_asisto version=4.04.60 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -3460,13 +3461,7 @@ function getConfiguredTargetTag(conf) {
 }
 
 function getRuntimeScriptVersion() {
-  try {
-    const head = fs.readFileSync(__filename, 'utf8').slice(0, 512);
-    const m = head.match(/\/\*version:([^\n*]+)/i);
-    return m ? String(m[1] || '').trim() : '';
-  } catch {
-    return '';
-  }
+  return ASISTO_SCRIPT_VERSION;
 }
 
 function getCurrentRuntimeInfo() {
