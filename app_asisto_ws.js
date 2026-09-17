@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.04.61 17/09/2026   */
-const ASISTO_SCRIPT_VERSION = '4.04.61';
+/*version: 4.04.62 17/09/2026   */
+const ASISTO_SCRIPT_VERSION = '4.04.62';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -6532,6 +6532,59 @@ async function handleActionDoc(doc) {
   const isPanelRestartButton = reasonLower.includes('phone_web_restart') || reasonLower.includes('panel_restart');
 
   try {
+    if (action === 'audit_uncertain_api_document') {
+      const to = onlyDigits(doc?.to || '');
+      const key = String(doc?.pendingKey || '').trim();
+      if (tenantId !== 'RVL' || !/^\d{10,15}$/.test(to) || !/^\d+_\d+$/.test(key) || !client?.pupPage) {
+        return JSON.stringify({ status: 'invalid_audit_request' });
+      }
+      const col = apiMensajesConfirmacionCollection();
+      const record = col && await col.findOne({ _id: apiMensajesConfirmacionId(to) });
+      const item = record?.pendientes?.[key];
+      if (!item?.envioClaimedAt || item?.envioCompletadoAt) {
+        return JSON.stringify({ status: 'not_uncertain', key });
+      }
+      const filename = String(item.content_nombre || '').trim();
+      const claimedSeconds = Math.floor(new Date(item.envioClaimedAt).getTime() / 1000);
+      if (!filename || !Number.isFinite(claimedSeconds)) {
+        return JSON.stringify({ status: 'missing_audit_data', key });
+      }
+      const audit = await client.pupPage.evaluate(async ({ chatId, filename, claimedSeconds }) => {
+        const chat = await window.WWebJS.getChat(chatId, { getAsModel: false });
+        if (!chat?.msgs) return { status: 'chat_unavailable' };
+        const read = () => chat.msgs.getModelsArray();
+        let messages = read();
+        let pages = 0;
+        const earliest = () => Math.min(...messages.map(m => Number(m.t) || Infinity));
+        while (pages < 30 && messages.length < 2000 && earliest() > claimedSeconds - 180) {
+          const loaded = await window.require('WAWebChatLoadMessages').loadEarlierMsgs({ chat });
+          if (!loaded?.length) break;
+          pages++;
+          messages = read();
+        }
+        const nearby = [];
+        const matches = [];
+        for (const m of messages) {
+          try {
+            if (!m.id?.fromMe) continue;
+            const at = Number(m.t) || 0;
+            if (at < claimedSeconds - 180 || at > claimedSeconds + 900) continue;
+            const name = String(m.filename || m.mediaObject?.filename || m.mediaObject?.fileName || '');
+            const entry = { at, type: String(m.type || ''), filename: name, id: String(m.id?._serialized || '') };
+            if (nearby.length < 25) nearby.push(entry);
+            if (name.toLowerCase() === filename.toLowerCase()) matches.push(entry);
+          } catch {}
+        }
+        return {
+          status: matches.length ? 'found' : 'not_found_in_loaded_history',
+          matches, nearby, loadedCount: messages.length, pages,
+          oldestAt: Number.isFinite(earliest()) ? earliest() : null,
+          newestAt: Math.max(0, ...messages.map(m => Number(m.t) || 0))
+        };
+      }, { chatId: to + '@c.us', filename, claimedSeconds });
+      return JSON.stringify({ key, to, filename, claimedSeconds, audit });
+    }
+
     // El botón Reiniciar del panel debe reiniciar TODO el script Node.
     // Compatibilidad: si el panel todavía envía restart_whatsapp/restart_wweb
     // con reason=phone_web_restart, igual lo tratamos como reinicio completo.
