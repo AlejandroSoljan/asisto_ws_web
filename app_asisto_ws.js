@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.04.65 17/09/2026   */
-const ASISTO_SCRIPT_VERSION = '4.04.65';
+/*version: 4.04.66 17/09/2026   */
+const ASISTO_SCRIPT_VERSION = '4.04.66';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -6565,6 +6565,19 @@ async function handleActionDoc(doc) {
               }
             }
             return { status: 'media_object_checked', filehashType: typeof data.filehash, attempts };
+          }
+          if (phase === 'media_upload') {
+            const mediaObject = window.require('WAWebMediaStorage').getOrCreateMediaObject(data.filehash);
+            const mediaType = window.require('WAWebMmsMediaTypes').msgToMediaType({ type: data.type, isGif: data.isGif, isNewsletter: false });
+            if (!(data.mediaBlob instanceof OpaqueData)) {
+              data.mediaBlob = await OpaqueData.createFromData(data.mediaBlob, data.mediaBlob.type);
+            }
+            data.renderableUrl = data.mediaBlob.url();
+            mediaObject.consolidate(data.toJSON());
+            data.mediaBlob.autorelease();
+            const uploaded = await window.require('WAWebMediaMmsV4Upload').uploadMedia({ mimetype: data.mimetype, mediaObject, mediaType });
+            return { status: 'media_upload_checked', hasMediaEntry: !!uploaded?.mediaEntry,
+              hasDirectPath: !!uploaded?.mediaEntry?.directPath };
           }
           return { status: 'prepared', keys: Object.keys(data || {}), filehashType: typeof data?.filehash,
             hasFilehash: !!data?.filehash, type: String(data?.type || ''), mimetype: String(data?.mimetype || '') };
