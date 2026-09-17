@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.04.66 17/09/2026   */
-const ASISTO_SCRIPT_VERSION = '4.04.66';
+/*version: 4.04.67 17/09/2026   */
+const ASISTO_SCRIPT_VERSION = '4.04.67';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -6548,6 +6548,17 @@ async function handleActionDoc(doc) {
       if (mimetype !== 'application/pdf') return JSON.stringify({ status: 'not_pdf', key });
       const diagnostic = await client.pupPage.evaluate(async ({ mediaInfo, phase }) => {
         try {
+          if (phase === 'message_key') {
+            const chat = await window.WWebJS.getChat(mediaInfo.to + '@c.us', { getAsModel: false });
+            const keyClass = window.require('WAWebMsgKey');
+            const me = window.require('WAWebUserPrefsMeUser').getMaybeMePnUser();
+            const id = await keyClass.newId();
+            const key = new keyClass({ from: me, to: chat.id, id, selfDir: 'out' });
+            return { status: 'message_key_checked', hasChat: !!chat, keys: Object.keys(key || {}),
+              serializedType: typeof key._serialized, serializedValue: String(key._serialized || '').slice(0, 90),
+              idType: typeof key.id, idValue: String(key.id || '').slice(0, 90),
+              stringValue: String(key).slice(0, 90) };
+          }
           const file = window.WWebJS.mediaInfoToFile(mediaInfo);
           const OpaqueData = window.require('WAWebMediaOpaqueData');
           const opaqueData = await OpaqueData.createFromData(file, mediaInfo.mimetype);
@@ -6584,7 +6595,7 @@ async function handleActionDoc(doc) {
         } catch (e) {
           return { status: 'prep_error', message: String(e?.message || e).slice(0,500) };
         }
-      }, { mediaInfo: { data: String(item.content), mimetype, filename: String(item.content_nombre || 'archivo.pdf') },
+      }, { mediaInfo: { data: String(item.content), mimetype, filename: String(item.content_nombre || 'archivo.pdf'), to },
         phase: String(doc?.phase || '') });
       return JSON.stringify({ key, to, diagnostic });
     }
