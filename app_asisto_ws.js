@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.04.73 17/09/2026   */
-const ASISTO_SCRIPT_VERSION = '4.04.73';
+/*version: 4.04.74 17/09/2026   */
+const ASISTO_SCRIPT_VERSION = '4.04.74';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -96,15 +96,23 @@ let wwebJsRuntimeLoadPromise = null;
 function ensureWwebMediaIdCompatPatch() {
   const packageDir = path.dirname(require.resolve('whatsapp-web.js/package.json'));
   const utilsPath = path.join(packageDir, 'src', 'util', 'Injected', 'Utils.js');
-  const source = fs.readFileSync(utilsPath, 'utf8');
-  if (source.includes('delete message.__x_id;')) return;
+  let source = fs.readFileSync(utilsPath, 'utf8');
+  let patched = source;
   const anchor = "        // Bot's won't reply if canonicalUrl is set (linking)";
-  if (!source.includes('...mediaOptions,') || !source.includes(anchor)) {
-    throw new Error('whatsapp_web_js_media_patch_incompatible');
+  if (!patched.includes('delete message.__x_id;')) {
+    if (!patched.includes('...mediaOptions,') || !patched.includes(anchor)) {
+      throw new Error('whatsapp_web_js_media_patch_incompatible');
+    }
+    patched = patched.replace(anchor, '        // WA Web media model internal id must not override the outgoing Msg id.\n        delete message.__x_id;\n\n' + anchor);
   }
-  const patched = source.replace(anchor, '        // WA Web media model internal id must not override the outgoing Msg id.\n        delete message.__x_id;\n\n' + anchor);
-  fs.writeFileSync(utilsPath, patched, 'utf8');
-  console.log('[WWEBJS] media id compatibility patch applied');
+  const oldLookup = '.Msg.get(newMsgKey._serialized);';
+  const newLookup = '.Msg.get(newMsgKey._serialized || newMsgKey.$1 || newMsgKey.toString());';
+  if (patched.includes(oldLookup)) patched = patched.replace(oldLookup, newLookup);
+  if (!patched.includes(newLookup)) throw new Error('whatsapp_web_js_message_key_patch_incompatible');
+  if (patched !== source) {
+    fs.writeFileSync(utilsPath, patched, 'utf8');
+    console.log('[WWEBJS] media/message id compatibility patch applied');
+  }
 }
 
 
@@ -2980,7 +2988,7 @@ function getOutgoingStatMessageId(messageLike) {
   try {
     if (!messageLike) return '';
     if (typeof messageLike === 'string') return String(messageLike || '').trim();
-    const serialized = messageLike?.id?._serialized || messageLike?._data?.id?.id || messageLike?.id?.id || messageLike?.ackId;
+    const serialized = messageLike?.id?._serialized || messageLike?.id?.$1 || messageLike?._data?.id?.$1 || messageLike?._data?.id?.id || messageLike?.id?.id || messageLike?.ackId;
     return String(serialized || '').trim();
   } catch {
     return '';
@@ -5862,6 +5870,9 @@ async function safeSend(to, content, opts) {
        const sendOpts = (opts && typeof opts === 'object') ? { ...opts } : {};
       if (typeof sendOpts.sendSeen === 'undefined') sendOpts.sendSeen = false;
       const sent = await client.sendMessage(to, content, sendOpts);
+      if (isWwebJsEngine() && content?.mimetype && !getOutgoingStatMessageId(sent)) {
+        throw new Error('wwebjs_media_send_unconfirmed_id');
+      }
       try {
         const logPayload = (content && typeof content === 'object')
           ? { body: sendOpts.caption || '', type: content.mimetype ? 'media' : (content.type || 'text'), mimetype: content.mimetype || '', filename: content.filename || '', data: content.data ? '[data]' : '', messageId: getOutgoingStatMessageId(sent), asistoOrigin: 'script' }
