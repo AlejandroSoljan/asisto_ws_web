@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.04.71 17/09/2026   */
-const ASISTO_SCRIPT_VERSION = '4.04.71';
+/*version: 4.04.72 17/09/2026   */
+const ASISTO_SCRIPT_VERSION = '4.04.72';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -5846,22 +5846,32 @@ async function safeSend(to, content, opts) {
       }
        const sendOpts = (opts && typeof opts === 'object') ? { ...opts } : {};
       if (typeof sendOpts.sendSeen === 'undefined') sendOpts.sendSeen = false;
-      if (isWwebJsEngine() && client?.pupPage) {
-        await client.pupPage.evaluate(async (chatId) => {
-          const Key = window.require('WAWebMsgKey');
-          const chat = await window.WWebJS.getChat(chatId, { getAsModel: false });
-          const me = window.require('WAWebUserPrefsMeUser').getMaybeMePnUser();
-          if (!Key || !chat?.id || !me) throw new Error('WAWebMsgKey compatibility unavailable');
-          const sample = new Key({ from: me, to: chat.id, id: 'ASISTO_PROBE', selfDir: 'out' });
-          const actualPrototype = Object.getPrototypeOf(sample);
-          if (sample._serialized == null && actualPrototype) {
-            Object.defineProperty(actualPrototype, '_serialized', {
-              configurable: true,
-              get() { return this.$1 || this.toString(); }
-            });
-          }
-          if (!sample._serialized) throw new Error('WAWebMsgKey serialized id unavailable');
-        }, to);
+      if (isWwebJsEngine() && client?.pupPage && content?.mimetype) {
+        await client.pupPage.evaluate(() => {
+          const api = window.WWebJS;
+          if (!api?.processMediaData) throw new Error('WWebJS media processor unavailable');
+          if (api.__asistoMediaIdCompat) return;
+          const original = api.processMediaData;
+          api.processMediaData = async (...args) => {
+            const mediaOptions = await original(...args);
+            if (mediaOptions && Object.prototype.hasOwnProperty.call(mediaOptions, '__x_id')) {
+              delete mediaOptions.__x_id;
+            }
+            if (typeof mediaOptions?.toJSON === 'function') {
+              const originalToJSON = mediaOptions.toJSON.bind(mediaOptions);
+              Object.defineProperty(mediaOptions, 'toJSON', {
+                configurable: true,
+                value: () => {
+                  const value = originalToJSON();
+                  if (value && Object.prototype.hasOwnProperty.call(value, '__x_id')) delete value.__x_id;
+                  return value;
+                }
+              });
+            }
+            return mediaOptions;
+          };
+          api.__asistoMediaIdCompat = true;
+        });
       }
       const sent = await client.sendMessage(to, content, sendOpts);
       try {
