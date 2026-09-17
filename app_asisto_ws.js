@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.04.67 17/09/2026   */
-const ASISTO_SCRIPT_VERSION = '4.04.67';
+/*version: 4.04.68 17/09/2026   */
+const ASISTO_SCRIPT_VERSION = '4.04.68';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -5846,6 +5846,18 @@ async function safeSend(to, content, opts) {
       }
        const sendOpts = (opts && typeof opts === 'object') ? { ...opts } : {};
       if (typeof sendOpts.sendSeen === 'undefined') sendOpts.sendSeen = false;
+      if (isWwebJsEngine() && client?.pupPage) {
+        await client.pupPage.evaluate(() => {
+          const Key = window.require('WAWebMsgKey');
+          if (!Key?.prototype) throw new Error('WAWebMsgKey unavailable');
+          if (!Object.getOwnPropertyDescriptor(Key.prototype, '_serialized')) {
+            Object.defineProperty(Key.prototype, '_serialized', {
+              configurable: true,
+              get() { return this.toString(); }
+            });
+          }
+        });
+      }
       const sent = await client.sendMessage(to, content, sendOpts);
       try {
         const logPayload = (content && typeof content === 'object')
