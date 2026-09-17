@@ -89,6 +89,13 @@ v4.04.58 - CORRECCIÓN VIGENTE. Se eliminó la excepción diaria de RVL y se usa
              Se agregó una prueba específica para RVL y NEA. En el Mongo
              productivo de AWS, ambos dominios quedaron con 86400000 ms y
              versión objetivo v4.04.58 el 17/09/2026.
+v4.04.59 - Evita repetir indefinidamente un documento de API Mensajes cuando
+             WhatsApp Web devuelve un resultado incierto: reserva el envío
+             antes de llamar a WhatsApp, excluye los documentos inciertos de
+             nuevos lotes sin informar E ni reenviarlos, y mantiene el resto
+             de la cola procesable. Desactiva la vista previa de enlaces en
+             adjuntos. Impacto previsto: RVL y NEA. Los documentos inciertos
+             previos requieren conciliación individual antes de reintentar.
 
 NOTA DE VERIFICACIÓN
 La publicación del tag y la versión objetivo en Mongo no prueban por sí solas

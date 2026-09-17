@@ -1,7 +1,7 @@
 /*script:app_asisto*/
 /*version: 4.04.58 17/09/2026   */
 try {
-  console.log(`[BOOT] app_asisto version=4.04.58 file=${__filename} pid=${process.pid}`);
+  console.log(`[BOOT] app_asisto version=4.04.59 file=${__filename} pid=${process.pid}`);
 } catch {}
 
 // Baileys usa ws. Mantenemos deshabilitados los aceleradores nativos opcionales
@@ -7309,7 +7309,7 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
           const mimeType = detectMimeType(String(contenido)) || mime.lookup(contentNombre) || 'application/octet-stream';
           const media = new MessageMedia(mimeType, String(contenido), contentNombre);
           await io.emit('message', 'Mensaje: ' + nroTelFormat + ': ' + msj);
-          sentApiMensaje = await enviarApiMensajesConPausa(to, () => safeSend(nroTelFormat, media, { caption: msj }));
+          sentApiMensaje = await enviarApiMensajesConPausa(to, () => safeSend(nroTelFormat, media, { caption: msj, linkPreview: false }));
           apiMensajesFallosConsecutivos = 0;
           await recordApiMensajesBillingWindow(to, {
             sentMessage: sentApiMensaje,
@@ -7534,13 +7534,14 @@ function nombreClienteDesdeDescripcionApiMensajes(descripcion = '') {
 
 async function guardarLoteRecibidoApiMensajes(unidades) {
   const lista = Array.isArray(unidades) ? unidades : [];
-  if (!lista.length) return { ok: true, duplicados: new Set(), asumibles: new Set() };
-  if (!await ensureMongo()) return { ok: false, duplicados: new Set(), asumibles: new Set() };
+  if (!lista.length) return { ok: true, duplicados: new Set(), asumibles: new Set(), inciertos: new Set() };
+  if (!await ensureMongo()) return { ok: false, duplicados: new Set(), asumibles: new Set(), inciertos: new Set() };
   const col = apiMensajesConfirmacionCollection();
-  if (!col) return { ok: false, duplicados: new Set(), asumibles: new Set() };
+  if (!col) return { ok: false, duplicados: new Set(), asumibles: new Set(), inciertos: new Set() };
   const porTelefono = new Map();
   const duplicados = new Set();
   const asumibles = new Set();
+  const inciertos = new Set();
   for (const unidad of lista) {
     const dest = unidad?.dest || {};
     const msg = unidad?.msg || {};
@@ -7556,11 +7557,11 @@ async function guardarLoteRecibidoApiMensajes(unidades) {
     try {
       existente = await col.findOne(
         { _id: apiMensajesConfirmacionId(nroTel) },
-        { projection: { pendientes: 1 } }
+        { projection: { pendientes: 1, pedidoAt: 1, estado: 1 } }
       );
     } catch (e) {
       try { EscribirLog('[API_MENSAJES] error leyendo deduplicacion nro=' + nroTel + ': ' + String(e?.message || e), 'error'); } catch {}
-      return { ok: false, duplicados, asumibles };
+      return { ok: false, duplicados, asumibles, inciertos };
     }
     const pendientesExistentes = existente?.pendientes && typeof existente.pendientes === 'object'
       ? existente.pendientes
@@ -7571,6 +7572,10 @@ async function guardarLoteRecibidoApiMensajes(unidades) {
       const k = keyPendienteConfirmacionApiMensajes(idDest, idRenglon);
       if (pendientesExistentes[k]) {
         duplicados.add(k);
+        if (pendientesExistentes[k]?.envioClaimedAt && !pendientesExistentes[k]?.envioCompletadoAt) {
+          inciertos.add(k);
+          continue;
+        }
         // Sólo se puede cerrar el registro del API si sabemos que la solicitud
         // de confirmación ya salió, o que el documento mismo ya fue enviado.
         if (existente?.pedidoAt || existente?.estado === 'aceptado' || pendientesExistentes[k]?.envioCompletadoAt) {
@@ -7611,10 +7616,33 @@ async function guardarLoteRecibidoApiMensajes(unidades) {
       );
     } catch (e) {
       try { EscribirLog('[API_MENSAJES] error persistiendo lote nro=' + nroTel + ': ' + String(e?.message || e), 'error'); } catch {}
-      return { ok: false, duplicados, asumibles };
+      return { ok: false, duplicados, asumibles, inciertos };
     }
   }
-  return { ok: true, duplicados, asumibles };
+  return { ok: true, duplicados, asumibles, inciertos };
+}
+
+async function reservarPendienteEnvioApiMensajes(nroTel, idDest, idRenglon) {
+  if (!await ensureMongo()) return false;
+  const col = apiMensajesConfirmacionCollection();
+  if (!col) return false;
+  const k = keyPendienteConfirmacionApiMensajes(idDest, idRenglon);
+  const now = new Date();
+  const result = await col.updateOne(
+    {
+      _id: apiMensajesConfirmacionId(onlyDigits(nroTel || '')),
+      [`pendientes.${k}`]: { $exists: true },
+      [`pendientes.${k}.envioCompletadoAt`]: { $exists: false },
+      [`pendientes.${k}.envioClaimedAt`]: { $exists: false }
+    },
+    { $set: {
+      [`pendientes.${k}.envioClaimedAt`]: now,
+      [`pendientes.${k}.updatedAt`]: now,
+      pendientesUpdatedAt: now,
+      updatedAt: now
+    } }
+  );
+  return Number(result?.matchedCount || 0) === 1;
 }
 
 async function marcarPendienteEnviadoApiMensajes(nroTel, idDest, idRenglon, sentMessage) {
@@ -8895,7 +8923,7 @@ async function ConsultaApiMensajes(){
         }
 
         const unidadesRecibidas = prepararUnidadesApiMensajes(jsonResp[0].mensajes, jsonResp[0].destinatarios);
-        let persistenciaLote = { ok: false, duplicados: new Set(), asumibles: new Set() };
+        let persistenciaLote = { ok: false, duplicados: new Set(), asumibles: new Set(), inciertos: new Set() };
         while (!persistenciaLote.ok) {
           persistenciaLote = await guardarLoteRecibidoApiMensajes(unidadesRecibidas);
           if (!persistenciaLote.ok) {
@@ -8911,9 +8939,13 @@ async function ConsultaApiMensajes(){
         const clavesAsumibles = persistenciaLote.asumibles instanceof Set
           ? persistenciaLote.asumibles
           : new Set();
+        const clavesInciertas = persistenciaLote.inciertos instanceof Set
+          ? persistenciaLote.inciertos
+          : new Set();
         const unidades = unidadesRecibidas.filter((unidad) => {
           const dest = unidad?.dest || {};
-          return !clavesAsumibles.has(keyPendienteConfirmacionApiMensajes(dest?.Id_msj_dest, dest?.Id_msj_renglon));
+          const k = keyPendienteConfirmacionApiMensajes(dest?.Id_msj_dest, dest?.Id_msj_renglon);
+          return !clavesAsumibles.has(k) && !clavesInciertas.has(k);
         });
         if (clavesDuplicadas.size) {
           const logDuplicados = '[API_MENSAJES] lote repetido omitido; pendientes existentes=' + String(clavesDuplicadas.size) +
@@ -9121,7 +9153,14 @@ async function ConsultaApiMensajes(){
                 return;
               }
               await io.emit('message', 'Mensaje: ' + Nro_tel_format + ': ' + Msj);
-              sentApiMensaje = await enviarApiMensajesConPausa(Nro_tel, () => safeSend(Nro_tel_format, media, { caption: Msj }));
+              if (!await reservarPendienteEnvioApiMensajes(Nro_tel, Id_msj_dest_local, Id_msj_renglon_local)) {
+                const logReserva = '[API_MENSAJES] envio no iniciado: reserva pendiente no disponible id_msj_dest=' + String(Id_msj_dest_local || '') +
+                  ' id_msj_renglon=' + String(Id_msj_renglon_local || '');
+                console.log(logReserva);
+                EscribirLog(logReserva, 'error');
+                continue;
+              }
+              sentApiMensaje = await enviarApiMensajesConPausa(Nro_tel, () => safeSend(Nro_tel_format, media, { caption: Msj, linkPreview: false }));
               apiMensajesFallosConsecutivos = 0;
               await recordApiMensajesBillingWindow(Nro_tel, {
                 sentMessage: sentApiMensaje,
@@ -9147,6 +9186,13 @@ async function ConsultaApiMensajes(){
                 return;
               }
               await io.emit('message', 'Mensaje: ' + Nro_tel_format + ': ' + Msj);
+              if (!await reservarPendienteEnvioApiMensajes(Nro_tel, Id_msj_dest_local, Id_msj_renglon_local)) {
+                const logReserva = '[API_MENSAJES] envio no iniciado: reserva pendiente no disponible id_msj_dest=' + String(Id_msj_dest_local || '') +
+                  ' id_msj_renglon=' + String(Id_msj_renglon_local || '');
+                console.log(logReserva);
+                EscribirLog(logReserva, 'error');
+                continue;
+              }
               sentApiMensaje = await enviarApiMensajesConPausa(Nro_tel, () => safeSend(Nro_tel_format, Msj));
               apiMensajesFallosConsecutivos = 0;
               await recordApiMensajesBillingWindow(Nro_tel, {
