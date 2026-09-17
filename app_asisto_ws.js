@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.04.70 17/09/2026   */
-const ASISTO_SCRIPT_VERSION = '4.04.70';
+/*version: 4.04.71 17/09/2026   */
+const ASISTO_SCRIPT_VERSION = '4.04.71';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -5847,16 +5847,21 @@ async function safeSend(to, content, opts) {
        const sendOpts = (opts && typeof opts === 'object') ? { ...opts } : {};
       if (typeof sendOpts.sendSeen === 'undefined') sendOpts.sendSeen = false;
       if (isWwebJsEngine() && client?.pupPage) {
-        await client.pupPage.evaluate(() => {
+        await client.pupPage.evaluate(async (chatId) => {
           const Key = window.require('WAWebMsgKey');
-          if (!Key?.prototype) throw new Error('WAWebMsgKey unavailable');
-          if (!Object.getOwnPropertyDescriptor(Key.prototype, '_serialized')) {
-            Object.defineProperty(Key.prototype, '_serialized', {
+          const chat = await window.WWebJS.getChat(chatId, { getAsModel: false });
+          const me = window.require('WAWebUserPrefsMeUser').getMaybeMePnUser();
+          if (!Key || !chat?.id || !me) throw new Error('WAWebMsgKey compatibility unavailable');
+          const sample = new Key({ from: me, to: chat.id, id: 'ASISTO_PROBE', selfDir: 'out' });
+          const actualPrototype = Object.getPrototypeOf(sample);
+          if (sample._serialized == null && actualPrototype) {
+            Object.defineProperty(actualPrototype, '_serialized', {
               configurable: true,
-              get() { return this.toString(); }
+              get() { return this.$1 || this.toString(); }
             });
           }
-        });
+          if (!sample._serialized) throw new Error('WAWebMsgKey serialized id unavailable');
+        }, to);
       }
       const sent = await client.sendMessage(to, content, sendOpts);
       try {
