@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.04.63 17/09/2026   */
-const ASISTO_SCRIPT_VERSION = '4.04.63';
+/*version: 4.04.64 17/09/2026   */
+const ASISTO_SCRIPT_VERSION = '4.04.64';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -6532,6 +6532,36 @@ async function handleActionDoc(doc) {
   const isPanelRestartButton = reasonLower.includes('phone_web_restart') || reasonLower.includes('panel_restart');
 
   try {
+    if (action === 'diagnose_api_pdf_preparation') {
+      const to = onlyDigits(doc?.to || '');
+      const key = String(doc?.pendingKey || '').trim();
+      if (tenantId !== 'RVL' || !/^\d{10,15}$/.test(to) || !/^\d+_\d+$/.test(key) || !client?.pupPage) {
+        return JSON.stringify({ status: 'invalid_diagnostic_request' });
+      }
+      const col = apiMensajesConfirmacionCollection();
+      const record = col && await col.findOne({ _id: apiMensajesConfirmacionId(to) });
+      const item = record?.pendientes?.[key];
+      if (!item?.envioClaimedAt || item?.envioCompletadoAt || !item?.content) {
+        return JSON.stringify({ status: 'not_uncertain_pdf', key });
+      }
+      const mimetype = detectMimeType(String(item.content)) || mime.lookup(item.content_nombre) || '';
+      if (mimetype !== 'application/pdf') return JSON.stringify({ status: 'not_pdf', key });
+      const diagnostic = await client.pupPage.evaluate(async (mediaInfo) => {
+        try {
+          const file = window.WWebJS.mediaInfoToFile(mediaInfo);
+          const OpaqueData = window.require('WAWebMediaOpaqueData');
+          const opaqueData = await OpaqueData.createFromData(file, mediaInfo.mimetype);
+          const prep = window.require('WAWebPrepRawMedia').prepRawMedia(opaqueData, { asDocument: true });
+          const data = await prep.waitForPrep();
+          return { status: 'prepared', keys: Object.keys(data || {}), filehashType: typeof data?.filehash,
+            hasFilehash: !!data?.filehash, type: String(data?.type || ''), mimetype: String(data?.mimetype || '') };
+        } catch (e) {
+          return { status: 'prep_error', message: String(e?.message || e).slice(0,500) };
+        }
+      }, { data: String(item.content), mimetype, filename: String(item.content_nombre || 'archivo.pdf') });
+      return JSON.stringify({ key, to, diagnostic });
+    }
+
     if (action === 'audit_uncertain_api_document') {
       const to = onlyDigits(doc?.to || '');
       const key = String(doc?.pendingKey || '').trim();
