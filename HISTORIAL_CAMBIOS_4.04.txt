@@ -1,0 +1,96 @@
+ASISTO - AGENTE DE WHATSAPP
+Historial de la serie 4.04 (reconstruido del historial Git el 17/09/2026)
+
+Alcance: este archivo describe el repositorio del agente WhatsApp, no la web/API
+de Asisto en AWS. Cada entrada resume el cambio respecto de la versión anterior.
+Para publicar una próxima versión 4.04.xx, agregar su entrada aquí ANTES de crear
+el tag y subir el código. Los tags verificables van de v4.04.00 a v4.04.58,
+salvo v4.04.34: existe el commit con esa versión pero no se creó ese tag.
+
+v4.04.00 - Base inicial de la serie 4.04 en el historial disponible.
+v4.04.01 - Mismo commit que v4.04.00; el tag no introduce cambios de código.
+v4.04.02 - Reparación automática de dependencias incompletas de whatsapp-web.js,
+             coordinada con un bloqueo compartido entre procesos.
+v4.04.03 - Verificación y reparación temprana de dependencias críticas al arrancar.
+v4.04.04 - Coordinación de npm/Git entre sesiones y estabilización de la
+             configuración durante la migración a Control API.
+v4.04.05 - Simplificación del mecanismo de reparación de dependencias y manejo
+             explícito cuando falta Baileys.
+v4.04.06 - Ajustes de conexión ODBC/DSN para consultas a Manager.
+v4.04.07 - Reinicio completo y coordinado de todas las sesiones del proceso.
+v4.04.08 - Supervisión de sesiones WhatsApp mediante procesos aislados.
+v4.04.09 - Límites a cachés de mensajes y carga diferida de Mongo cuando se usa
+             Control API HTTPS, para reducir memoria y conexiones.
+v4.04.10 - Un único dueño del loop de compras/entregas en instalaciones
+             multisesión, configurable por sesión.
+v4.04.11 - Retiro del filtro que ignoraba mensajes entre sesiones locales.
+v4.04.12 - Instalación automática de Baileys cuando falta la dependencia.
+v4.04.13 - Sincronización con Control API de mensajes salientes del operador.
+v4.04.14 - Un error de Git/autoactualización deja continuar el inicio de
+             WhatsApp con el código que ya está instalado.
+v4.04.15 - Diagnóstico y recuperación más detallados de desconexiones Baileys.
+v4.04.16 - Espera a que el QR nuevo quede guardado tras limpiar autenticación;
+             manejo de fallo de autenticación para evitar reinicios inútiles.
+v4.04.17 - Aumento de timeout de una llamada HTTP de 55 a 180 segundos y
+             corrección del número informado en el log de arranque.
+v4.04.18 - Configuración de ventanas de facturación de API Mensajes.
+v4.04.19 - Sólo cambia la cabecera de versión; sin cambio funcional detectado.
+v4.04.20 - Preparación del agente para App Clientes.
+v4.04.21 - Ajustes adicionales de preparación para App Clientes.
+v4.04.22 - Salvaguardas para mensajes salientes de RVL.
+v4.04.23 - Controles adicionales de seguridad para envíos salientes.
+v4.04.24 - Compatibilidad entre motores whatsapp-web.js y Baileys.
+v4.04.25 - Agrupación de mensajes según prioridad.
+v4.04.26 - Serialización y pausas en el envío de API Mensajes.
+v4.04.27 - Prioridades para altas y mensajes de telemarketing.
+v4.04.28 - Solicitud de confirmación según prioridad.
+v4.04.29 - Normalización del remitente en API Alta.
+v4.04.30 - Corrección del número del remitente en API Alta.
+v4.04.31 - Acepta registros de es_mensajes sólo con texto, sin cod_imagen.
+v4.04.32 - Mensajes de confirmación contextualizados, incluido SDG.
+v4.04.33 - Textos de confirmación más amigables.
+v4.04.34 - Evita interpretar una confirmación saliente como respuesta del cliente.
+             Hay commit de esta versión, pero NO existe el tag v4.04.34.
+v4.04.35 - Acepta respuestas del cliente salvo CANCELAR, que implica baja.
+v4.04.36 - Deduplicación de métricas de mensajes realmente enviados por WhatsApp.
+v4.04.37 - Restauración del loop de mensajes y reducción de logs rutinarios.
+v4.04.38 - Registro para facturar mensajes de confirmación.
+v4.04.39 - Persistencia de lotes de API Mensajes y tolerancia a timeouts de
+             Control API.
+v4.04.40 - Protección contra entrega duplicada de mensajes API.
+v4.04.41 - Confirmación del traspaso de un mensaje API después de autorizarlo.
+v4.04.42 - Liberación de la cola API a partir de confirmaciones persistidas.
+v4.04.43 - Prioridad a nuevas solicitudes de confirmación.
+v4.04.44 - Recuperación de todos los documentos aceptados pendientes.
+v4.04.45 - Recuperación de aceptados sin reenvío duplicado.
+v4.04.46 - Recuperación inmediata de colas aceptadas.
+v4.04.47 - Persistencia de errores de entrega pendientes.
+v4.04.48 - Paginación de la recuperación de pendientes por estado.
+v4.04.49 - Recuperación secuencial de la cola aceptada.
+v4.04.50 - Registro del resultado de esa recuperación.
+v4.04.51 - Recuperación limitada a colas aceptadas activas.
+v4.04.52 - Conteo de envíos de campañas realizados por la API de Asisto.
+v4.04.53 - Corrección para entregar siempre documentos API aceptados.
+v4.04.54 - Límite diario de registros en es_mensajes.
+v4.04.55 - Reserva del documento API aceptado antes de enviarlo por WhatsApp,
+             para evitar carreras/duplicados.
+v4.04.56 - Variantes rotativas del texto de confirmación y un instalador
+             genérico más liviano, sin empaquetar node_modules.
+v4.04.57 - CAMBIO INCORRECTO, REEMPLAZADO POR v4.04.58. Se introdujo una
+             excepción sólo para RVL: una confirmación por día calendario,
+             incluso alterando el filtro por prioridad. No respondía al
+             requisito de una ventana móvil de 24 horas.
+v4.04.58 - CORRECCIÓN VIGENTE. Se eliminó la excepción diaria de RVL y se usa
+             api_mensajes_confirmacion_validez_ms desde pedidoAt (momento en
+             que se envió la solicitud), no desde aceptadoAt. Si llega otro
+             mensaje antes de 24 horas, no se repite la confirmación; después
+             de 24 horas se vuelve a pedir aunque el cliente haya respondido
+             o no. CANCELAR permanente continúa bloqueando nuevos pedidos.
+             Se agregó una prueba específica para RVL y NEA. En el Mongo
+             productivo de AWS, ambos dominios quedaron con 86400000 ms y
+             versión objetivo v4.04.58 el 17/09/2026.
+
+NOTA DE VERIFICACIÓN
+La publicación del tag y la versión objetivo en Mongo no prueban por sí solas
+que cada PC cliente ya haya instalado esa versión. Confirmar la versión en
+ejecución y el resultado del auto-update en cada instalación antes de afirmarlo.
