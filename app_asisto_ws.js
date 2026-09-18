@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.04.74 17/09/2026   */
-const ASISTO_SCRIPT_VERSION = '4.04.74';
+/*version: 4.04.75 18/09/2026   */
+const ASISTO_SCRIPT_VERSION = '4.04.75';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -6558,6 +6558,23 @@ async function handleActionDoc(doc) {
   const isPanelRestartButton = reasonLower.includes('phone_web_restart') || reasonLower.includes('panel_restart');
 
   try {
+    if (action === 'diagnose_wweb_media_runtime') {
+      if (tenantId !== 'RVL' || !client?.pupPage) return { status: 'unavailable' };
+      const utilsPath = path.join(path.dirname(require.resolve('whatsapp-web.js/package.json')), 'src', 'util', 'Injected', 'Utils.js');
+      const source = fs.readFileSync(utilsPath, 'utf8');
+      const page = await client.pupPage.evaluate(() => {
+        const send = String(window.WWebJS?.sendMessage || '');
+        return {
+          hasSendFunction: typeof window.WWebJS?.sendMessage === 'function',
+          deleteInternalId: send.includes('delete message.__x_id'),
+          fallbackMessageKey: send.includes('newMsgKey.$1'),
+          sendLength: send.length,
+        };
+      });
+      return { status: 'checked', fileDeleteInternalId: source.includes('delete message.__x_id'),
+        fileFallbackMessageKey: source.includes('newMsgKey.$1'), page };
+    }
+
     if (action === 'diagnose_api_pdf_preparation') {
       const to = onlyDigits(doc?.to || '');
       const key = String(doc?.pendingKey || '').trim();
