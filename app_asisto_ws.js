@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.04.75 18/09/2026   */
-const ASISTO_SCRIPT_VERSION = '4.04.75';
+/*version: 4.04.76 18/09/2026   */
+const ASISTO_SCRIPT_VERSION = '4.04.76';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -104,6 +104,11 @@ function ensureWwebMediaIdCompatPatch() {
       throw new Error('whatsapp_web_js_media_patch_incompatible');
     }
     patched = patched.replace(anchor, '        // WA Web media model internal id must not override the outgoing Msg id.\n        delete message.__x_id;\n\n' + anchor);
+  }
+  if (!patched.includes('message.id = newMsgKey;')) {
+    // MediaData.toJSON() can carry an `id` field that overwrites the freshly generated key.
+    patched = patched.replace('        delete message.__x_id;',
+      '        delete message.__x_id;\n        message.id = newMsgKey;');
   }
   const oldLookup = '.Msg.get(newMsgKey._serialized);';
   const newLookup = '.Msg.get(newMsgKey._serialized || newMsgKey.$1 || newMsgKey.toString());';
@@ -6567,11 +6572,13 @@ async function handleActionDoc(doc) {
         return {
           hasSendFunction: typeof window.WWebJS?.sendMessage === 'function',
           deleteInternalId: send.includes('delete message.__x_id'),
+          restoreMessageId: send.includes('message.id = newMsgKey'),
           fallbackMessageKey: send.includes('newMsgKey.$1'),
           sendLength: send.length,
         };
       });
       return { status: 'checked', fileDeleteInternalId: source.includes('delete message.__x_id'),
+        fileRestoreMessageId: source.includes('message.id = newMsgKey'),
         fileFallbackMessageKey: source.includes('newMsgKey.$1'), page };
     }
 
