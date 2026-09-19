@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.04.76 18/09/2026   */
-const ASISTO_SCRIPT_VERSION = '4.04.76';
+/*version: 4.04.77 19/09/2026   */
+const ASISTO_SCRIPT_VERSION = '4.04.77';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -6563,6 +6563,39 @@ async function handleActionDoc(doc) {
   const isPanelRestartButton = reasonLower.includes('phone_web_restart') || reasonLower.includes('panel_restart');
 
   try {
+    if (action === 'inspect_es_mensajes_pending') {
+      if (tenantId !== 'SDG') return { status: 'unavailable_for_tenant' };
+      const odbcRuntime = getOdbcModule();
+      if (!odbcRuntime) return { status: 'odbc_module_unavailable' };
+      let inspectionConnection = null;
+      try {
+        inspectionConnection = await odbcRuntime.connect('DSN=' + dsn + '; charset=UTF8');
+        const origenLocal = onlyDigits(telefono_qr).slice(-10);
+        const rows = await inspectionConnection.query(
+          "select first 100 * from es_mensajes " +
+          "where estado <> 'S' and tipo = 'WS' " +
+          "and right(cast(origen as varchar(30)), 10) = '" + origenLocal + "' " +
+          "order by id desc"
+        );
+        const sanitized = (Array.isArray(rows) ? rows : []).map((row) => ({
+          id: row.id ?? row.ID ?? null,
+          destino: String(row.destino ?? row.DESTINO ?? ''),
+          asunto: String(row.asunto ?? row.ASUNTO ?? '').slice(0, 200),
+          cuerpo: String(row.cuerpo ?? row.CUERPO ?? '').slice(0, 700),
+          estado: String(row.estado ?? row.ESTADO ?? ''),
+          prioridad: row.prioridad ?? row.PRIORIDAD ?? null,
+          cod_imagen: row.cod_imagen ?? row.COD_IMAGEN ?? null,
+          fecha_alta: row.fecha_alta ?? row.FECHA_ALTA ?? null,
+          fecha_envio: row.fecha_envio ?? row.FECHA_ENVIO ?? null,
+          id_ws: row.id_ws ?? row.ID_WS ?? null,
+          estado_ws: row.estado_ws ?? row.ESTADO_WS ?? null,
+        }));
+        return { status: 'checked', dsn, origen: origenLocal, count: sanitized.length, rows: sanitized };
+      } finally {
+        try { if (inspectionConnection?.close) await inspectionConnection.close(); } catch {}
+      }
+    }
+
     if (action === 'diagnose_wweb_media_runtime') {
       if (tenantId !== 'RVL' || !client?.pupPage) return { status: 'unavailable' };
       const utilsPath = path.join(path.dirname(require.resolve('whatsapp-web.js/package.json')), 'src', 'util', 'Injected', 'Utils.js');
