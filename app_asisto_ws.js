@@ -1,6 +1,6 @@
 /*script:app_asisto*/
 /*version: 4.04.77 19/09/2026   */
-const ASISTO_SCRIPT_VERSION = '4.04.77';
+const ASISTO_SCRIPT_VERSION = '4.04.78';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -1505,6 +1505,22 @@ function configureControlApiFromValues(values = {}) {
   });
 }
 
+async function bootstrapControlApiIfNeeded() {
+  if (!control_api_enabled || control_api_token || !control_api_url || !tenantId) return false;
+  try {
+    const result = await controlApi.bootstrap();
+    control_api_token = String(result?.token || '').trim();
+    if (!control_api_token) return false;
+    controlApi.configure({ baseUrl: control_api_url, token: control_api_token, tenantId, numero });
+    await persistControlApiBootstrap();
+    console.log(`[CONTROL_API] credencial inicial creada y guardada tenant=${tenantId}`);
+    return true;
+  } catch (e) {
+    console.log(`[CONTROL_API] bootstrap inicial no disponible tenant=${tenantId}: ${e?.message || e}`);
+    return false;
+  }
+}
+
 
 function readControlApiTokenFromTenantDoc(doc) {
   try {
@@ -2331,6 +2347,7 @@ async function loadTenantConfigFromDb() {
   if (!mongo_db) mongo_db = "Cluster0";
   configureControlApiFromValues(boot);
   controlApi.configure({ tenantId, numero });
+  await bootstrapControlApiIfNeeded();
 
   if (!tenantId || (!mongo_uri && !isControlApiConfigured())) {
     throw new Error("Falta tenantId y backend de datos en configuracion.json");
@@ -4571,6 +4588,7 @@ function initMongoModelsIfNeeded() {
 // =========================
 async function loadTenantConfigFromDbMinimal() {
   try {
+    await bootstrapControlApiIfNeeded();
     // Necesitamos bootstrap mínimo antes. En modo API ya no hace falta mongo_uri.
     if (!tenantId || (!mongo_uri && !isControlApiConfigured())) return null;
     const startedWithControlApi = isControlApiConfigured();

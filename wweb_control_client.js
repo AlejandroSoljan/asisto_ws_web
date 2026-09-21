@@ -74,6 +74,23 @@ function createControlApiClient(options = {}) {
     return !!(baseUrl && token && tenantId);
   }
 
+  async function bootstrap() {
+    if (!baseUrl || !tenantId) throw new Error('control_api_bootstrap_not_configured');
+    const response = await http.post(`${baseUrl}/bootstrap`, { tenantId }, {
+      headers: { 'content-type': 'application/json', 'x-asisto-tenant': tenantId },
+    });
+    const body = decodeSpecial(response.data);
+    if (response.status < 200 || response.status >= 300 || !body?.ok || !body?.token) {
+      const detail = body?.detail || body?.error || `http_${response.status}`;
+      const error = new Error(`control_api_bootstrap_${detail}`);
+      error.status = response.status;
+      throw error;
+    }
+    token = String(body.token).trim();
+    readyUntil = 0;
+    return { token, tenantId, baseUrl };
+  }
+
   function headers() {
     return {
       'content-type': 'application/json',
@@ -192,6 +209,7 @@ function createControlApiClient(options = {}) {
 
   return {
     configure,
+    bootstrap,
     isConfigured,
     ensureReady,
     request,
