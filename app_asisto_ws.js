@@ -1,6 +1,6 @@
 /*script:app_asisto*/
 /*version: 4.04.77 19/09/2026   */
-const ASISTO_SCRIPT_VERSION = '4.04.78';
+const ASISTO_SCRIPT_VERSION = '4.04.79';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -1508,7 +1508,28 @@ function configureControlApiFromValues(values = {}) {
 async function bootstrapControlApiIfNeeded() {
   if (!control_api_enabled || control_api_token || !control_api_url || !tenantId) return false;
   try {
-    const result = await controlApi.bootstrap();
+    let result;
+    if (typeof controlApi.bootstrap === 'function') {
+      result = await controlApi.bootstrap();
+    } else {
+      // Compatibilidad con instalaciones cuyo auto-update histórico sólo
+      // reemplazó app_asisto_ws.js y dejó wweb_control_client.js anterior.
+      const axios = require('axios');
+      const response = await axios.post(
+        `${String(control_api_url).replace(/\/+$/, '')}/bootstrap`,
+        { tenantId },
+        {
+          headers: { 'content-type': 'application/json', 'x-asisto-tenant': tenantId },
+          timeout: Math.max(3000, Number(process.env.WWEB_CONTROL_API_TIMEOUT_MS || 15000)),
+          validateStatus: () => true,
+        }
+      );
+      if (response.status < 200 || response.status >= 300 || !response.data?.ok || !response.data?.token) {
+        const detail = response.data?.detail || response.data?.error || `http_${response.status}`;
+        throw new Error(`control_api_bootstrap_${detail}`);
+      }
+      result = response.data;
+    }
     control_api_token = String(result?.token || '').trim();
     if (!control_api_token) return false;
     controlApi.configure({ baseUrl: control_api_url, token: control_api_token, tenantId, numero });
