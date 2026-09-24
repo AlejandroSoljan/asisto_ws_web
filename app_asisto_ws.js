@@ -1,6 +1,6 @@
 /*script:app_asisto*/
 /*version: 4.04.77 19/09/2026   */
-const ASISTO_SCRIPT_VERSION = '4.04.79';
+const ASISTO_SCRIPT_VERSION = '4.04.80';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -7448,6 +7448,59 @@ async function pendienteYaRegistradoComoEnviadoApiMensajes(nroTel, idDest, idRen
   }
 }
 
+async function auditarDocumentoSalienteApiMensajes(nroTel, item) {
+  if (!isWwebJsEngine() || !client?.pupPage) return { status: 'unavailable', match: null };
+  const to = onlyDigits(nroTel || '');
+  const filename = String(item?.content_nombre || '').trim();
+  const claimedAt = new Date(item?.envioClaimedAt || item?.lastAttemptAt || 0);
+  const claimedSeconds = Math.floor(claimedAt.getTime() / 1000);
+  if (!to || !filename || !Number.isFinite(claimedSeconds) || claimedSeconds <= 0) {
+    return { status: 'missing_audit_data', match: null };
+  }
+  try {
+    return await client.pupPage.evaluate(async ({ chatId, filename, claimedSeconds }) => {
+      const chat = await window.WWebJS.getChat(chatId, { getAsModel: false });
+      if (!chat?.msgs) return { status: 'chat_unavailable', match: null };
+      const read = () => chat.msgs.getModelsArray();
+      let messages = read();
+      let pages = 0;
+      const earliest = () => Math.min(...messages.map(m => Number(m.t) || Infinity));
+      while (pages < 30 && messages.length < 2000 && earliest() > claimedSeconds - 180) {
+        const loaded = await window.require('WAWebChatLoadMessages').loadEarlierMsgs({ chat });
+        if (!loaded?.length) break;
+        pages++;
+        messages = read();
+      }
+      for (const m of messages) {
+        try {
+          if (!m.id?.fromMe) continue;
+          const at = Number(m.t) || 0;
+          if (at < claimedSeconds - 180) continue;
+          const name = String(m.filename || m.mediaObject?.filename || m.mediaObject?.fileName || '');
+          if (name.toLowerCase() !== filename.toLowerCase()) continue;
+          const id = String(m.id?._serialized || '');
+          return { status: 'found', match: { at, filename: name, id } };
+        } catch {}
+      }
+      return { status: 'not_found_in_loaded_history', match: null, loadedCount: messages.length, pages };
+    }, { chatId: to + '@c.us', filename, claimedSeconds });
+  } catch (e) {
+    return { status: 'audit_error', match: null, error: String(e?.message || e).slice(0, 500) };
+  }
+}
+
+function huellaDocumentoPendienteApiMensajes(nroTel, item) {
+  try {
+    return crypto.createHash('sha256').update(JSON.stringify({
+      to: onlyDigits(nroTel || ''),
+      filename: String(item?.content_nombre || '').trim().toLowerCase(),
+      content: String(item?.content || '')
+    })).digest('hex');
+  } catch {
+    return '';
+  }
+}
+
 async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo) {
   const col = apiMensajesConfirmacionCollection();
   if (!col || !doc) return { total: 0, ok: 0 };
@@ -7459,6 +7512,9 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
   let ultimoNro = '';
   const errores = [];
   let detenidoPor = '';
+  // Un mismo comprobante puede venir repetido con varios IDs del API. Dentro de
+  // una recuperación se envía una sola copia física y se cierran todos los IDs.
+  const documentosEnviadosPorHuella = new Map();
 
   for (const item of pendientes) {
     const to = onlyDigits(item.nroTel || doc.nroTel || '');
@@ -7513,8 +7569,20 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
         const msj = String(item.msj || '');
         const contenido = item.content;
         let sentApiMensaje = null;
+        const huellaDocumento = contenido != null && String(contenido) !== ''
+          ? huellaDocumentoPendienteApiMensajes(to, item)
+          : '';
         let envioYaRegistrado = !!item.envioCompletadoAt ||
           await pendienteYaRegistradoComoEnviadoApiMensajes(to, idDest, idRenglon);
+        if (!envioYaRegistrado && huellaDocumento && documentosEnviadosPorHuella.has(huellaDocumento)) {
+          envioYaRegistrado = true;
+          sentApiMensaje = documentosEnviadosPorHuella.get(huellaDocumento);
+          const logDuplicado = '[API_MENSAJES] comprobante duplicado cerrado sin reenviar nro=' + to +
+            ' id_msj_dest=' + String(idDest) + ' id_msj_renglon=' + String(idRenglon) +
+            ' archivo=' + String(contentNombre || '');
+          console.log(logDuplicado);
+          EscribirLog(logDuplicado, 'event');
+        }
 
         if (!envioYaRegistrado) {
           // Dos eventos de la misma respuesta pueden procesar el mismo documento
@@ -7522,6 +7590,41 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
           // Si el proceso cae después del envío, no liberamos la reserva a ciegas:
           // el resultado es incierto y requiere revisión, no un reenvío automático.
           if (item.envioClaimedAt) {
+            const errorAnterior = String(item.lastError || '');
+            const recuperablePorGetter = errorAnterior.includes('Data passed to getter must include an id property');
+            if (recuperablePorGetter) {
+              const auditoria = await auditarDocumentoSalienteApiMensajes(to, item);
+              if (auditoria?.status === 'found' && auditoria.match?.id) {
+                sentApiMensaje = { id: { _serialized: auditoria.match.id } };
+                envioYaRegistrado = true;
+                await marcarPendienteEnviadoApiMensajes(to, idDest, idRenglon, sentApiMensaje);
+                if (huellaDocumento) documentosEnviadosPorHuella.set(huellaDocumento, sentApiMensaje);
+                const logEncontrado = '[API_MENSAJES] envio incierto encontrado en historial; no se reenvia nro=' + to +
+                  ' id_msj_dest=' + String(idDest) + ' id_msj_renglon=' + String(idRenglon) +
+                  ' ws_id=' + auditoria.match.id;
+                console.log(logEncontrado);
+                EscribirLog(logEncontrado, 'event');
+              } else if (auditoria?.status === 'not_found_in_loaded_history') {
+                // Este error ocurre antes de obtener una confirmación válida del
+                // mensaje. Si tampoco existe el archivo en el historial, liberamos
+                // exclusivamente esta reserva para efectuar un único reintento.
+                await col.updateOne(
+                  { _id: doc._id, [`pendientes.${pendingKey}.envioCompletadoAt`]: { $exists: false } },
+                  { $unset: {
+                    [`pendientes.${pendingKey}.envioClaimedAt`]: '',
+                    [`pendientes.${pendingKey}.lastError`]: '',
+                    [`pendientes.${pendingKey}.lastAttemptAt`]: ''
+                  }, $set: { pendientesUpdatedAt: new Date(), updatedAt: new Date() } }
+                );
+                item.envioClaimedAt = null;
+                const logLiberado = '[API_MENSAJES] envio incierto no encontrado; reserva liberada para reintento unico nro=' + to +
+                  ' id_msj_dest=' + String(idDest) + ' id_msj_renglon=' + String(idRenglon);
+                console.log(logLiberado);
+                EscribirLog(logLiberado, 'event');
+              }
+            }
+          }
+          if (!envioYaRegistrado && item.envioClaimedAt) {
             const logIncierto = '[API_MENSAJES] envio pendiente con resultado incierto; no se reenvia nro=' + to +
               ' id_msj_dest=' + String(idDest) + ' id_msj_renglon=' + String(idRenglon);
             const avisos = procesarPendientesDocConfirmacionApiMensajes._avisosInciertos ||
@@ -7537,6 +7640,7 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
             errores.push({ key: pendingKey, error: 'envio_incierto_revisar' });
             continue;
           }
+          if (!envioYaRegistrado) {
           const claimAt = new Date();
           const claim = await col.updateOne(
             {
@@ -7556,6 +7660,7 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
           // Si otro camino ya registró el envío antes de esta reserva,
           // sólo queda informar E al API, sin volver a mandar WhatsApp.
           envioYaRegistrado = await pendienteYaRegistradoComoEnviadoApiMensajes(to, idDest, idRenglon);
+          }
         }
 
         if (envioYaRegistrado) {
@@ -7610,6 +7715,7 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
 
         if (!envioYaRegistrado) {
           await marcarPendienteEnviadoApiMensajes(to, idDest, idRenglon, sentApiMensaje);
+          if (huellaDocumento) documentosEnviadosPorHuella.set(huellaDocumento, sentApiMensaje);
         }
 
         const info = await getInfoContactoApiMensajes(nroTelFormat);
