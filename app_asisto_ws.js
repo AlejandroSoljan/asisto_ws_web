@@ -1,6 +1,6 @@
 /*script:app_asisto*/
 /*version: 4.04.77 19/09/2026   */
-const ASISTO_SCRIPT_VERSION = '4.04.80';
+const ASISTO_SCRIPT_VERSION = '4.04.81';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -7501,6 +7501,44 @@ function huellaDocumentoPendienteApiMensajes(nroTel, item) {
   }
 }
 
+async function envioDocumentoPorHuellaApiMensajes(docId, huella) {
+  if (!docId || !huella) return null;
+  try {
+    const col = apiMensajesConfirmacionCollection();
+    const record = col && await col.findOne(
+      { _id: docId },
+      { projection: { [`documentosEnviados.${huella}`]: 1 } }
+    );
+    return record?.documentosEnviados?.[huella] || null;
+  } catch {
+    return null;
+  }
+}
+
+async function marcarDocumentoPorHuellaApiMensajes(docId, huella, sentMessage, item) {
+  if (!docId || !huella) return false;
+  try {
+    const col = apiMensajesConfirmacionCollection();
+    if (!col) return false;
+    const now = new Date();
+    const wsId = getOutgoingStatMessageId(sentMessage) || '';
+    const result = await col.updateOne(
+      { _id: docId },
+      { $set: {
+        [`documentosEnviados.${huella}`]: {
+          wsId,
+          filename: String(item?.content_nombre || ''),
+          sentAt: now
+        },
+        updatedAt: now
+      } }
+    );
+    return Number(result?.matchedCount || 0) === 1;
+  } catch {
+    return false;
+  }
+}
+
 async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo) {
   const col = apiMensajesConfirmacionCollection();
   if (!col || !doc) return { total: 0, ok: 0 };
@@ -7574,6 +7612,14 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
           : '';
         let envioYaRegistrado = !!item.envioCompletadoAt ||
           await pendienteYaRegistradoComoEnviadoApiMensajes(to, idDest, idRenglon);
+        if (!envioYaRegistrado && huellaDocumento) {
+          const envioPersistido = await envioDocumentoPorHuellaApiMensajes(doc._id, huellaDocumento);
+          if (envioPersistido?.wsId) {
+            sentApiMensaje = { id: { _serialized: envioPersistido.wsId } };
+            envioYaRegistrado = true;
+            documentosEnviadosPorHuella.set(huellaDocumento, sentApiMensaje);
+          }
+        }
         if (!envioYaRegistrado && huellaDocumento && documentosEnviadosPorHuella.has(huellaDocumento)) {
           envioYaRegistrado = true;
           sentApiMensaje = documentosEnviadosPorHuella.get(huellaDocumento);
@@ -7598,6 +7644,7 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
                 sentApiMensaje = { id: { _serialized: auditoria.match.id } };
                 envioYaRegistrado = true;
                 await marcarPendienteEnviadoApiMensajes(to, idDest, idRenglon, sentApiMensaje);
+                await marcarDocumentoPorHuellaApiMensajes(doc._id, huellaDocumento, sentApiMensaje, item);
                 if (huellaDocumento) documentosEnviadosPorHuella.set(huellaDocumento, sentApiMensaje);
                 const logEncontrado = '[API_MENSAJES] envio incierto encontrado en historial; no se reenvia nro=' + to +
                   ' id_msj_dest=' + String(idDest) + ' id_msj_renglon=' + String(idRenglon) +
@@ -7715,6 +7762,7 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
 
         if (!envioYaRegistrado) {
           await marcarPendienteEnviadoApiMensajes(to, idDest, idRenglon, sentApiMensaje);
+          await marcarDocumentoPorHuellaApiMensajes(doc._id, huellaDocumento, sentApiMensaje, item);
           if (huellaDocumento) documentosEnviadosPorHuella.set(huellaDocumento, sentApiMensaje);
         }
 
