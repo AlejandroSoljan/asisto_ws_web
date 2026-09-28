@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.05.01 28/09/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.01';
+/*version: 4.05.02 28/09/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.02';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -3126,6 +3126,12 @@ async function logOutgoingFromMessageFallback(messageLike) {
 async function logIncomingConversationForAnalysis(messageLike, source = 'message') {
   try {
     if (!messageLike || messageLike.fromMe === true) return false;
+    const historyEnabled = parseBoolLike(
+      tenantConfig?.conversation_history_enabled ??
+      tenantConfig?.conversationHistoryEnabled,
+      true
+    );
+    if (!historyEnabled) return false;
 
     const rawFrom = String(messageLike.from || messageLike?._data?.from || '').trim();
     if (!rawFrom || rawFrom === 'status@broadcast') return false;
