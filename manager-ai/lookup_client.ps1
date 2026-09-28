@@ -130,6 +130,26 @@ ORDER BY codigo
     }
   }
   $reader.Close()
+  # Capacidad genérica: cuando un teléfono corresponde a varios clientes,
+  # adjuntar la fecha de su última compra. La regla de negocio que decide
+  # usar este dato se configura en el comportamiento del dominio.
+  if (-not $ClientQuery -and $rows.Count -gt 1) {
+    foreach ($match in $rows) {
+      $latestPurchase = Invoke-Rows @'
+SELECT TOP 1 fecha
+FROM DBA.ven_remitos_cabecera
+WHERE cliente = ?
+ORDER BY fecha DESC, nrotransaccion DESC
+'@ @([string]$match.client.codigo)
+      $match.client['ultimaCompra'] = if ($latestPurchase.Count) { $latestPurchase[0].fecha } else { $null }
+    }
+    $withPurchase = @($rows | Where-Object { $_.client.ultimaCompra } | Sort-Object { [datetime]$_.client.ultimaCompra } -Descending)
+    if ($withPurchase.Count) {
+      $selected = $withPurchase[0]
+      $rows = @($selected) + @($rows | Where-Object { $_ -ne $selected })
+      $selected.client['seleccion'] = 'ultima_compra_ven_remitos_cabecera'
+    }
+  }
   $ordered = Select-ClientMatches $rows $ClientQuery
   if ($ordered.Count) {
     $clientCode = [string]$ordered[0].client.codigo
@@ -198,4 +218,5 @@ ORDER BY c.fecha DESC, c.nro DESC
 } finally { if ($connection.State -eq 'Open') { $connection.Close() } }
 $ordered = Select-ClientMatches $rows $ClientQuery
 if (-not $ordered.Count) { [pscustomobject]@{ found=$false; matches=0 } | ConvertTo-Json -Compress; exit 0 }
-[pscustomobject]@{ found=$true; ambiguous=($ordered.Count -gt 1); matches=$ordered.Count; client=$ordered[0].client } | ConvertTo-Json -Depth 8 -Compress
+$resolvedByLatestPurchase = (-not $ClientQuery -and [string]$ordered[0].client.seleccion -eq 'ultima_compra_ven_remitos_cabecera')
+[pscustomobject]@{ found=$true; ambiguous=($ordered.Count -gt 1 -and -not $resolvedByLatestPurchase); matches=$ordered.Count; resolvedByLatestPurchase=$resolvedByLatestPurchase; client=$ordered[0].client } | ConvertTo-Json -Depth 8 -Compress
