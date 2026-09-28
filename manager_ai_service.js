@@ -42,6 +42,42 @@ function isStandaloneGreeting(text) {
   return /^(hola|buen dia|buenas tardes|buenas noches|buenas)$/.test(normalized);
 }
 
+function parseOrderQueryIntent(text) {
+  const normalized = String(text || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  if (/\b(hacer|armar|realizar|cargar|crear)\b.{0,20}\bpedido\b/.test(normalized)) return null;
+  const order = /\b(mi|mis|el|los|ultimo|ultimos|estado|detalle|datos?)?\s*(pedido|pedidos|compra|compras|entrega|entregas)\b/.test(normalized);
+  const detail = /\b(producto|productos|detalle|contenia|compre|cantidad|cantidades)\b/.test(normalized);
+  const delivery = /\b(horario|hora|cuando|entrega|direccion|domicilio|llega|llegan|estado)\b/.test(normalized);
+  const history = /\b(ultimo|ultimos|historial|anteriores|pedidos|compras)\b/.test(normalized);
+  if (!order && !detail && !delivery) return null;
+  return { detail, delivery, history, latestOnly: !history || /\b(ultimo pedido|pedido actual|mi pedido)\b/.test(normalized) };
+}
+
+function formatManagerOrders(result, intent) {
+  const orders = Array.isArray(result?.orders) ? result.orders : [];
+  if (!orders.length) return 'No encontré pedidos asociados a este teléfono.';
+  const selected = intent.latestOnly ? orders.slice(0, 1) : orders.slice(0, 10);
+  const money = value => Number(value || 0).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const date = value => String(value || '').replace(/^\/Date\((\d+)\)\/$/, (_, ms) => new Date(Number(ms)).toLocaleDateString('es-AR')).slice(0, 10);
+  return selected.map((order, index) => {
+    const lines = [`${selected.length > 1 ? `${index + 1}. ` : ''}Pedido ${order.ptodeventa || ''}-${order.numero || ''} · ${date(order.fecha)} · $ ${money(order.total)}`];
+    if (intent.delivery) {
+      const delivery = order.entrega || {};
+      if (delivery.estado) lines.push(`Estado: ${delivery.estado}`);
+      if (delivery.direccion) lines.push(`Dirección: ${delivery.direccion}`);
+      if (delivery.horario_fecha || delivery.horario_desde || delivery.horario_hasta) lines.push(`Entrega: ${date(delivery.horario_fecha)} ${delivery.horario_desde || ''}-${delivery.horario_hasta || ''}`.trim());
+      if (delivery.forma_pago) lines.push(`Forma de pago: ${delivery.forma_pago}`);
+      if (delivery.observaciones) lines.push(`Observaciones: ${delivery.observaciones}`);
+    }
+    if (intent.detail) {
+      const products = Array.isArray(order.productos) ? order.productos : [];
+      lines.push('Productos:');
+      for (const product of products.slice(0, 30)) lines.push(`• ${product.codigo}: ${Number(product.cantidad || 0).toLocaleString('es-AR')} × $ ${money(product.precio_final)}`);
+    }
+    return lines.join('\n');
+  }).join('\n\n');
+}
+
 function execPowerShell(script, args, timeoutMs = 30000) {
   return new Promise((resolve, reject) => {
     const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, ...args], {
@@ -126,6 +162,18 @@ async function handleManagerDocumentRequest(options) {
   if (!activePending && configuredGreeting && isStandaloneGreeting(options.text)) {
     await sendManagerText(configuredGreeting);
     return { handled: true, reason: 'configured_greeting' };
+  }
+  const orderIntent = parseOrderQueryIntent(options.text);
+  if (orderIntent && bool(cfg.manager_order_query_enabled, false)) {
+    const bridgeFolder = path.resolve(String(cfg.manager_ai_bridge_folder || path.join(__dirname, 'manager-ai')));
+    const queryScript = path.join(bridgeFolder, 'query_recent_orders.ps1');
+    const dsn = String(cfg.manager_odbc_dsn || cfg.dsn || '').trim();
+    if (!dsn || !fs.existsSync(queryScript)) throw new Error('manager_order_query_configuration_incomplete');
+    const runPowerShell = typeof options.execPowerShell === 'function' ? options.execPowerShell : execPowerShell;
+    const raw = await runPowerShell(queryScript, ['-Phone', String(options.phone), '-DsnName', dsn, '-Limit', '10'], 30000);
+    const result = JSON.parse(raw || '{}');
+    await sendManagerText(formatManagerOrders(result, orderIntent));
+    return { handled: true, reason: 'orders_queried', count: Number(result.count || 0) };
   }
   let intent = parseDocumentIntent(options.text);
   let clientQuery = '';
@@ -217,4 +265,4 @@ async function handleManagerDocumentRequest(options) {
   return { handled: true, reason: 'document_sent', kind: intent.kind, id };
 }
 
-module.exports = { bool, parseDocumentIntent, isStandaloneGreeting, selectDocuments, handleManagerDocumentRequest, pendingDocumentRequests, managerConversationActivity };
+module.exports = { bool, parseDocumentIntent, parseOrderQueryIntent, formatManagerOrders, isStandaloneGreeting, selectDocuments, handleManagerDocumentRequest, pendingDocumentRequests, managerConversationActivity };

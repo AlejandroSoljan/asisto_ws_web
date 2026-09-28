@@ -2,7 +2,7 @@
 
 const assert = require('assert');
 const fs = require('fs');
-const { parseDocumentIntent, selectDocuments, handleManagerDocumentRequest, pendingDocumentRequests } = require('../manager_ai_service');
+const { parseDocumentIntent, parseOrderQueryIntent, formatManagerOrders, selectDocuments, handleManagerDocumentRequest, pendingDocumentRequests } = require('../manager_ai_service');
 
 assert.deepStrictEqual(parseDocumentIntent('Me mandás la última factura?'), {
   kind: 'sale', pointOfSale: '', number: '', latest: true
@@ -17,6 +17,9 @@ assert.deepStrictEqual(parseDocumentIntent('Resumen de cuenta'), {
   kind: 'statement', pointOfSale: '', number: '', latest: false
 });
 assert.strictEqual(parseDocumentIntent('Hola, buen día'), null);
+assert.deepStrictEqual(parseOrderQueryIntent('¿A qué hora llega mi pedido?'), { detail: false, delivery: true, history: false, latestOnly: true });
+assert.strictEqual(parseOrderQueryIntent('Quiero hacer un pedido'), null);
+assert.match(formatManagerOrders({ orders: [{ ptodeventa: '0001', numero: '25', fecha: '28/09/2026', total: 100, entrega: { direccion: 'Mitre 1' }, productos: [] }] }, { latestOnly: true, delivery: true, detail: false }), /Dirección: Mitre 1/);
 
 const lookup = { client: { finanzas: { facturas: [
   { ptodeventa: '0005', nrotransaccion: '00000123' },

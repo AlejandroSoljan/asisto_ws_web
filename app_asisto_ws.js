@@ -1,6 +1,6 @@
 /*script:app_asisto*/
 /*version: 4.04.77 19/09/2026   */
-const ASISTO_SCRIPT_VERSION = '4.04.96';
+const ASISTO_SCRIPT_VERSION = '4.04.97';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -1975,6 +1975,7 @@ function applyTenantConfig(conf) {
     conf.manager_document_lookup_days ?? conf.manager_documentos_dias_consulta,
     manager_document_lookup_days
   )));
+  manager_order_query_enabled = parseBoolLike(conf.manager_order_query_enabled, manager_order_query_enabled);
   seg_msg = asNumber(conf.seg_msg, seg_msg);
   seg_tele = asNumber(conf.seg_tele, seg_tele);
   if (conf.api !== undefined) api = String(conf.api);
@@ -4118,6 +4119,7 @@ var manager_document_send_enabled = parseBoolLike(process.env.MANAGER_DOCUMENT_S
 var manager_folder = String(process.env.MANAGER_FOLDER || '');
 var manager_ai_bridge_folder = String(process.env.MANAGER_AI_BRIDGE_FOLDER || path.join(__dirname, 'manager-ai'));
 var manager_document_lookup_days = Math.max(1, Math.min(1095, Number(process.env.MANAGER_DOCUMENT_LOOKUP_DAYS || 365) || 365));
+var manager_order_query_enabled = parseBoolLike(process.env.MANAGER_ORDER_QUERY_ENABLED, false);
 
 
 var consulta_mensajes_respetar_horarios = parseBoolLike(
@@ -11497,6 +11499,7 @@ telefonoFrom = telefonoFromApi;
           manager_folder,
           manager_ai_bridge_folder,
           manager_document_lookup_days,
+          manager_order_query_enabled,
           dsn
         },
         sendText: text => safeSendMessage(message.from, text),
