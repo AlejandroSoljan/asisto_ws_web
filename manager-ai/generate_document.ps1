@@ -53,7 +53,9 @@ $connection = New-Object System.Data.Odbc.OdbcConnection($builder.ConnectionStri
 $connection.Open()
 try {
   if ($Kind -eq 'statement') {
-    $dataObject = 'd_ven_cons_cuentas_ctes_cpbte_compo'
+    # La ventana usa el compuesto d_ven_cons_cuentas_ctes_cpbte_compo y
+    # recupera su child d_detalle, cuyo DataObject es este reporte.
+    $dataObject = 'd_ven_cons_cuentas_ctes_cpbte_print'
     $parityCommand = $connection.CreateCommand()
     $parityCommand.CommandTimeout = 8
     $parityCommand.CommandText = 'SELECT cod_moneda, paridad FROM DBA.gen_monedas ORDER BY cod_moneda'
