@@ -26,14 +26,16 @@ function parseDocumentIntent(text) {
     : /\b(factura|facturas|comprobante|comprobantes)\b/.test(normalized)
       ? 'sale'
       : '';
-  if ((!asksToSend && kind !== 'statement') || !kind) return null;
+  if (!kind) return null;
   const numberMatch = normalized.match(/\b(?:n(?:ro|umero)?\.?\s*)?(\d{1,5})\s*[-/]\s*(\d{1,10})\b/i);
   const plainNumber = !numberMatch ? normalized.match(/\b(?:n(?:ro|umero)?\.?\s*)(\d{3,10})\b/i) : null;
+  const number = numberMatch ? numberMatch[2] : (plainNumber ? plainNumber[1] : '');
+  if (!asksToSend && kind !== 'statement' && !number) return null;
   return {
     kind,
     pointOfSale: numberMatch ? numberMatch[1] : '',
-    number: numberMatch ? numberMatch[2] : (plainNumber ? plainNumber[1] : ''),
-    latest: /\b(ultima|ultimo|mas reciente|reciente)\b/.test(normalized)
+    number,
+    latest: kind !== 'statement' && ((!number && !/\b(facturas|recibos|comprobantes)\b/.test(normalized)) || /\b(ultima|ultimo|mas reciente|reciente)\b/.test(normalized))
   };
 }
 
@@ -129,7 +131,9 @@ function listMessage(kind, rows) {
   const noun = kind === 'receipt' ? 'recibo' : 'factura';
   const lines = rows.slice(0, 8).map(row => {
     const id = documentId(kind, row);
-    const date = row.fecha ? String(row.fecha).slice(0, 10) : '';
+    const rawDate = String(row.fecha || '');
+    const pbMatch = rawDate.match(/^\/Date\((\d+)\)\/$/);
+    const date = pbMatch ? new Date(Number(pbMatch[1])).toLocaleDateString('es-AR') : rawDate.slice(0, 10);
     const amount = row.importe == null ? '' : ` - $ ${Number(row.importe).toLocaleString('es-AR')}`;
     return `• ${id}${date ? ` del ${date}` : ''}${amount}`;
   });
@@ -180,12 +184,18 @@ async function handleManagerDocumentRequest(options) {
   let intent = parseDocumentIntent(options.text);
   let clientQuery = '';
   if (!intent && activePending) {
-    intent = activePending.intent;
-    clientQuery = String(options.text || '').trim();
-    const optionNumber = Number(clientQuery);
-    if (Number.isInteger(optionNumber) && optionNumber > 0 && Array.isArray(activePending.candidates)) {
-      const selectedCandidate = activePending.candidates[optionNumber - 1];
-      if (selectedCandidate) clientQuery = String(selectedCandidate.razonSocial || selectedCandidate.cuit || selectedCandidate.codigo || clientQuery);
+    const pendingAnswer = String(options.text || '').trim();
+    if (activePending.stage === 'document_selection') {
+      const selectedNumber = pendingAnswer.match(/\b(\d{3,10})\b/)?.[1] || '';
+      if (selectedNumber) intent = { ...activePending.intent, pointOfSale: '', number: selectedNumber, latest: false };
+    } else {
+      intent = activePending.intent;
+      clientQuery = pendingAnswer;
+      const optionNumber = Number(clientQuery);
+      if (Number.isInteger(optionNumber) && optionNumber > 0 && Array.isArray(activePending.candidates)) {
+        const selectedCandidate = activePending.candidates[optionNumber - 1];
+        if (selectedCandidate) clientQuery = String(selectedCandidate.razonSocial || selectedCandidate.cuit || selectedCandidate.codigo || clientQuery);
+      }
     }
   }
   if (!intent) return { handled: false, reason: 'not_document_intent' };
@@ -223,7 +233,7 @@ async function handleManagerDocumentRequest(options) {
     return { handled: true, reason: 'client_not_found' };
   }
   if (lookup.ambiguous) {
-    pendingDocumentRequests.set(pendingKey, { intent, candidates: lookup.candidates || [], createdAt: now });
+    pendingDocumentRequests.set(pendingKey, { stage: 'client_selection', intent, candidates: lookup.candidates || [], createdAt: now });
     const optionsList = Array.isArray(lookup.candidates) ? lookup.candidates
       .map((candidate, index) => `${index + 1}. ${candidate.razonSocial || candidate.codigo}${candidate.cuit ? ` · CUIT ${candidate.cuit}` : ''}`)
       .join('\n') : '';
@@ -239,6 +249,7 @@ async function handleManagerDocumentRequest(options) {
     return { handled: true, reason: 'document_not_found' };
   }
   if (matches.length > 1) {
+    pendingDocumentRequests.set(pendingKey, { stage: 'document_selection', intent, createdAt: now });
     await sendManagerText(listMessage(intent.kind, matches));
     return { handled: true, reason: 'document_selection_required', count: matches.length };
   }

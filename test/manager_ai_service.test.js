@@ -10,6 +10,9 @@ assert.deepStrictEqual(parseDocumentIntent('Me mandás la última factura?'), {
 assert.deepStrictEqual(parseDocumentIntent('Necesito el recibo 0005-12345'), {
   kind: 'receipt', pointOfSale: '0005', number: '12345', latest: false
 });
+assert.deepStrictEqual(parseDocumentIntent('Me pasás el comprobante'), {
+  kind: 'sale', pointOfSale: '', number: '', latest: true
+});
 assert.deepStrictEqual(parseDocumentIntent('Quiero consultar mi saldo'), {
   kind: 'statement', pointOfSale: '', number: '', latest: false
 });
@@ -146,9 +149,34 @@ async function testAccountStatement() {
   assert.strictEqual(sentDocuments[0].filename, 'Resumen_Cuenta_000123.pdf');
 }
 
+async function testDocumentSelectionContinuation() {
+  pendingDocumentRequests.clear();
+  const sentTexts = [];
+  const sentDocuments = [];
+  const base = {
+    tenantId: 'SDG', phone: '5493462000002',
+    config: { manager_ai_enabled: true, manager_document_send_enabled: true, manager_folder: 'C:\\Manager\\Exe', dsn: 'msm_manager', manager_ai_bridge_folder: require('path').join(__dirname, '..', 'manager-ai') },
+    sendText: async text => sentTexts.push(text), sendDocument: async doc => sentDocuments.push(doc),
+    execPowerShell: async (script, args) => {
+      if (/lookup_client\.ps1$/i.test(script)) return JSON.stringify({ found: true, ambiguous: false, client: { finanzas: { facturas: [
+        { ptodeventa: '0001', nrotransaccion: '00012944', fecha: '/Date(1789092465122)/', importe: 56906, transaccion: 'PD', tipocomprobante: 'B' },
+        { ptodeventa: '0001', nrotransaccion: '00012868', fecha: '/Date(1783645134207)/', importe: 55605, transaccion: 'PD', tipocomprobante: 'B' }
+      ] } } });
+      const outputIndex = args.indexOf('-Output'); fs.writeFileSync(args[outputIndex + 1], Buffer.from('pdf')); return '';
+    }
+  };
+  const first = await handleManagerDocumentRequest({ ...base, text: 'Me pasás las facturas' });
+  assert.strictEqual(first.reason, 'document_selection_required');
+  assert.doesNotMatch(sentTexts[0], /\/Date\(/);
+  const second = await handleManagerDocumentRequest({ ...base, text: 'La 12944' });
+  assert.strictEqual(second.reason, 'document_sent');
+  assert.strictEqual(sentDocuments[0].filename, 'Factura_0001-00012944.pdf');
+}
+
 testAmbiguousClientContinuation()
   .then(testConfiguredGreeting)
   .then(testNumberedClientSelection)
   .then(testAccountStatement)
+  .then(testDocumentSelectionContinuation)
   .then(() => console.log('manager_ai_service tests: ok'))
   .catch(error => { console.error(error); process.exitCode = 1; });
