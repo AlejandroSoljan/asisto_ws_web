@@ -10,6 +10,12 @@ assert.deepStrictEqual(parseDocumentIntent('Me mandás la última factura?'), {
 assert.deepStrictEqual(parseDocumentIntent('Necesito el recibo 0005-12345'), {
   kind: 'receipt', pointOfSale: '0005', number: '12345', latest: false
 });
+assert.deepStrictEqual(parseDocumentIntent('Quiero consultar mi saldo'), {
+  kind: 'statement', pointOfSale: '', number: '', latest: false
+});
+assert.deepStrictEqual(parseDocumentIntent('Resumen de cuenta'), {
+  kind: 'statement', pointOfSale: '', number: '', latest: false
+});
 assert.strictEqual(parseDocumentIntent('Hola, buen día'), null);
 
 const lookup = { client: { finanzas: { facturas: [
@@ -99,8 +105,46 @@ async function testConfiguredGreeting() {
   assert.deepStrictEqual(sentTexts, ['¡Hola! Soy Asisto, el asistente de Supermercado Digital. ¿En qué puedo ayudarte?']);
 }
 
+async function testAccountStatement() {
+  pendingDocumentRequests.clear();
+  const sentTexts = [];
+  const sentDocuments = [];
+  let generateArgs;
+  const result = await handleManagerDocumentRequest({
+    tenantId: 'SDG', phone: '5493462000001', text: 'Pasame un resumen de cuenta',
+    config: {
+      manager_ai_enabled: true,
+      manager_document_send_enabled: true,
+      manager_folder: 'C:\\Manager\\Exe',
+      dsn: 'msm_manager',
+      manager_ai_bridge_folder: require('path').join(__dirname, '..', 'manager-ai')
+    },
+    sendText: async text => sentTexts.push(text),
+    sendDocument: async doc => sentDocuments.push(doc),
+    execPowerShell: async (script, args) => {
+      if (/lookup_client\.ps1$/i.test(script)) {
+        return JSON.stringify({ found: true, ambiguous: false, matches: 1, client: { codigo: '000123', razonSocial: 'Cliente Prueba' } });
+      }
+      generateArgs = args;
+      const outputIndex = args.indexOf('-Output');
+      fs.writeFileSync(args[outputIndex + 1], Buffer.from('pdf'));
+      return '';
+    }
+  });
+  assert.strictEqual(result.reason, 'document_sent');
+  assert.ok(generateArgs);
+  assert.strictEqual(generateArgs[generateArgs.indexOf('-Kind') + 1], 'statement');
+  assert.strictEqual(generateArgs[generateArgs.indexOf('-ClientCode') + 1], '000123');
+  assert.ok(generateArgs.includes('-FromDate'));
+  assert.ok(generateArgs.includes('-ToDate'));
+  assert.match(sentTexts[0], /Soy Asisto, el asistente de Supermercado Digital/);
+  assert.match(sentTexts[0], /resumen de cuenta corriente/);
+  assert.strictEqual(sentDocuments[0].filename, 'Resumen_Cuenta_000123.pdf');
+}
+
 testAmbiguousClientContinuation()
   .then(testConfiguredGreeting)
   .then(testNumberedClientSelection)
+  .then(testAccountStatement)
   .then(() => console.log('manager_ai_service tests: ok'))
   .catch(error => { console.error(error); process.exitCode = 1; });

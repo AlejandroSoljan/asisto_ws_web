@@ -19,12 +19,14 @@ function parseDocumentIntent(text) {
   const raw = String(text || '').trim();
   const normalized = raw.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
   const asksToSend = /\b(mand(?:a|as|ame|anos|eme)|envi(?:a|as|ame|anos|eme)|necesito|quiero|comparti(?:me|nos)|pas(?:a|as|ame))\b/.test(normalized);
-  const kind = /\b(recibo|recibos|pago|pagos)\b/.test(normalized)
+  const kind = /\b(saldo|saldos|resumen(?:es)? de cuenta|cuenta corriente|estado de cuenta)\b/.test(normalized)
+    ? 'statement'
+    : /\b(recibo|recibos|pago|pagos)\b/.test(normalized)
     ? 'receipt'
     : /\b(factura|facturas|comprobante|comprobantes)\b/.test(normalized)
       ? 'sale'
       : '';
-  if (!asksToSend || !kind) return null;
+  if ((!asksToSend && kind !== 'statement') || !kind) return null;
   const numberMatch = normalized.match(/\b(?:n(?:ro|umero)?\.?\s*)?(\d{1,5})\s*[-/]\s*(\d{1,10})\b/i);
   const plainNumber = !numberMatch ? normalized.match(/\b(?:n(?:ro|umero)?\.?\s*)(\d{3,10})\b/i) : null;
   return {
@@ -64,11 +66,13 @@ function execPowerShell(script, args, timeoutMs = 30000) {
 }
 
 function documentId(kind, row) {
+  if (kind === 'statement') return String(row.codigo || row.cliente || 'cuenta');
   if (kind === 'receipt') return `${row.ptodeventa || ''}-${row.nro || ''}`;
   return `${row.ptodeventa || ''}-${row.nrotransaccion || ''}`;
 }
 
 function selectDocuments(intent, lookup) {
+  if (intent.kind === 'statement') return lookup?.client ? [lookup.client] : [];
   const finance = lookup?.client?.finanzas || {};
   const rows = intent.kind === 'receipt' ? (finance.recibos || []) : (finance.facturas || []);
   let selected = rows;
@@ -162,7 +166,7 @@ async function handleManagerDocumentRequest(options) {
   if (!lookup.found) {
     if (clientQuery) {
       pendingDocumentRequests.set(pendingKey, { intent, createdAt: now });
-      await sendManagerText('No encontré ese cliente. Podés responder con la razón social, CUIT o documento, y conservaré tu pedido de factura o recibo pendiente.');
+      await sendManagerText('No encontré ese cliente. Podés responder con la razón social, CUIT o documento, y conservaré tu pedido pendiente.');
       return { handled: true, reason: 'client_selection_not_found' };
     }
     await sendManagerText('No encontré tu teléfono asociado a un cliente de Manager. Si querés, indicame tu razón social o CUIT para que lo revise una persona.');
@@ -173,13 +177,15 @@ async function handleManagerDocumentRequest(options) {
     const optionsList = Array.isArray(lookup.candidates) ? lookup.candidates
       .map((candidate, index) => `${index + 1}. ${candidate.razonSocial || candidate.codigo}${candidate.cuit ? ` · CUIT ${candidate.cuit}` : ''}`)
       .join('\n') : '';
-    await sendManagerText(`Encontré más de un cliente asociado a este teléfono. Elegí una opción o indicame razón social, CUIT o documento. Tu solicitud de ${intent.kind === 'receipt' ? 'recibo' : 'factura'} queda pendiente.${optionsList ? `\n${optionsList}` : ''}`);
+    const requestedDocument = intent.kind === 'receipt' ? 'recibo' : (intent.kind === 'statement' ? 'resumen de cuenta' : 'factura');
+    await sendManagerText(`Encontré más de un cliente asociado a este teléfono. Elegí una opción o indicame razón social, CUIT o documento. Tu solicitud de ${requestedDocument} queda pendiente.${optionsList ? `\n${optionsList}` : ''}`);
     return { handled: true, reason: 'ambiguous_client' };
   }
   pendingDocumentRequests.delete(pendingKey);
   const matches = selectDocuments(intent, lookup);
   if (!matches.length) {
-    await sendManagerText(`No encontré ${intent.kind === 'receipt' ? 'ese recibo' : 'esa factura'} en el período consultado.`);
+    const missingLabel = intent.kind === 'receipt' ? 'ese recibo' : (intent.kind === 'statement' ? 'movimientos de cuenta corriente' : 'esa factura');
+    await sendManagerText(`No encontré ${missingLabel} en el período consultado.`);
     return { handled: true, reason: 'document_not_found' };
   }
   if (matches.length > 1) {
@@ -190,15 +196,21 @@ async function handleManagerDocumentRequest(options) {
   const row = matches[0];
   const id = documentId(intent.kind, row);
   const output = path.join(os.tmpdir(), `asisto-${String(options.tenantId || 'tenant')}-${intent.kind}-${id}-${Date.now()}.pdf`);
-  const args = ['-Kind', intent.kind, '-DsnName', dsn, '-ManagerFolder', managerFolder, '-Output', output,
-    '-PointOfSale', String(row.ptodeventa || ''), '-Number', String(intent.kind === 'receipt' ? row.nro : row.nrotransaccion || '')];
+  const args = ['-Kind', intent.kind, '-DsnName', dsn, '-ManagerFolder', managerFolder, '-Output', output];
+  if (intent.kind === 'statement') {
+    args.push('-ClientCode', String(row.codigo || ''), '-FromDate', ymd(since), '-ToDate', ymd(until));
+  } else {
+    args.push('-PointOfSale', String(row.ptodeventa || ''), '-Number', String(intent.kind === 'receipt' ? row.nro : row.nrotransaccion || ''));
+  }
   if (intent.kind === 'sale') args.push('-Transaction', String(row.transaccion || ''), '-VoucherType', String(row.tipocomprobante || ''));
   await runPowerShell(generateScript, args, 90000);
   try {
-    const noun = intent.kind === 'receipt' ? 'recibo' : 'factura';
-    await sendManagerText(`Te envío ${noun === 'factura' ? 'la' : 'el'} ${noun} ${noun === 'factura' ? 'solicitada' : 'solicitado'}.`);
+    const noun = intent.kind === 'receipt' ? 'recibo' : (intent.kind === 'statement' ? 'resumen de cuenta corriente' : 'factura');
+    const article = intent.kind === 'sale' ? 'la' : 'el';
+    await sendManagerText(`Te envío ${article} ${noun} ${intent.kind === 'sale' ? 'solicitada' : 'solicitado'}.`);
     const data = fs.readFileSync(output).toString('base64');
-    await options.sendDocument({ mimetype: 'application/pdf', data, filename: `${intent.kind === 'receipt' ? 'Recibo' : 'Factura'}_${id}.pdf` });
+    const filenamePrefix = intent.kind === 'receipt' ? 'Recibo' : (intent.kind === 'statement' ? 'Resumen_Cuenta' : 'Factura');
+    await options.sendDocument({ mimetype: 'application/pdf', data, filename: `${filenamePrefix}_${id}.pdf` });
   } finally {
     try { fs.unlinkSync(output); } catch {}
   }

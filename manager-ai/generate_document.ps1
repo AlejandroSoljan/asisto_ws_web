@@ -1,12 +1,15 @@
 param(
-  [Parameter(Mandatory=$true)][ValidateSet('sale','receipt')][string]$Kind,
+  [Parameter(Mandatory=$true)][ValidateSet('sale','receipt','statement')][string]$Kind,
   [Parameter(Mandatory=$false)][string]$DsnName,
   [Parameter(Mandatory=$true)][string]$ManagerFolder,
   [Parameter(Mandatory=$true)][string]$Output,
   [string]$Transaction,
   [string]$VoucherType,
-  [Parameter(Mandatory=$true)][string]$PointOfSale,
-  [Parameter(Mandatory=$true)][string]$Number
+  [string]$PointOfSale,
+  [string]$Number,
+  [string]$ClientCode,
+  [string]$FromDate,
+  [string]$ToDate
 )
 $ErrorActionPreference = 'Stop'
 
@@ -14,9 +17,15 @@ function Assert-Plain([string]$Value, [string]$Name, [int]$Maximum = 100) {
   if (-not $Value -or $Value.Length -gt $Maximum -or $Value -match '[\r\n]') { throw "invalid_$Name" }
 }
 if ($DsnName) { Assert-Plain $DsnName 'odbc' 128 }
-Assert-Plain $PointOfSale 'point_of_sale'
-Assert-Plain $Number 'number'
-if ($Kind -eq 'sale') { Assert-Plain $Transaction 'transaction'; Assert-Plain $VoucherType 'voucher_type' }
+if ($Kind -eq 'statement') {
+  Assert-Plain $ClientCode 'client_code'
+  Assert-Plain $FromDate 'from_date'
+  Assert-Plain $ToDate 'to_date'
+} else {
+  Assert-Plain $PointOfSale 'point_of_sale'
+  Assert-Plain $Number 'number'
+  if ($Kind -eq 'sale') { Assert-Plain $Transaction 'transaction'; Assert-Plain $VoucherType 'voucher_type' }
+}
 
 $manager = (Resolve-Path -LiteralPath $ManagerFolder).Path
 if (-not (Test-Path -LiteralPath (Join-Path $manager 'manager_msm.exe'))) { throw 'manager_executable_not_found' }
@@ -43,20 +52,37 @@ $builder['ASTOP'] = $settings.AutoStop; $builder['INT'] = $settings.Integrated
 $connection = New-Object System.Data.Odbc.OdbcConnection($builder.ConnectionString)
 $connection.Open()
 try {
-  $command = $connection.CreateCommand()
-  $command.CommandTimeout = 8
-  $command.CommandText = 'SELECT TOP 1 dataobject_mail, dataobject FROM DBA.ven_numero_cpbtes WHERE transaccion = ? AND prefijo_cpbte = ? AND letra_cpbte = ?'
-  foreach ($value in @($mappingTransaction, $PointOfSale, $mappingLetter)) {
-    $parameter = $command.Parameters.Add('@value', [System.Data.Odbc.OdbcType]::VarChar)
-    $parameter.Value = $value
+  if ($Kind -eq 'statement') {
+    $dataObject = 'd_ven_cons_cuentas_ctes_cpbte_compo'
+    $parityCommand = $connection.CreateCommand()
+    $parityCommand.CommandTimeout = 8
+    $parityCommand.CommandText = 'SELECT cod_moneda, paridad FROM DBA.gen_monedas ORDER BY cod_moneda'
+    $parityReader = $parityCommand.ExecuteReader()
+    $parities = ''
+    try {
+      while ($parityReader.Read()) {
+        $code = [string]$parityReader.GetValue(0)
+        $parity = ([decimal]$parityReader.GetValue(1)).ToString('000.000', [Globalization.CultureInfo]::InvariantCulture)
+        $parities += '*' + $code + ':' + $parity
+      }
+    } finally { $parityReader.Dispose() }
+    if (-not $parities) { throw 'manager_currency_parities_not_found' }
+  } else {
+    $command = $connection.CreateCommand()
+    $command.CommandTimeout = 8
+    $command.CommandText = 'SELECT TOP 1 dataobject_mail, dataobject FROM DBA.ven_numero_cpbtes WHERE transaccion = ? AND prefijo_cpbte = ? AND letra_cpbte = ?'
+    foreach ($value in @($mappingTransaction, $PointOfSale, $mappingLetter)) {
+      $parameter = $command.Parameters.Add('@value', [System.Data.Odbc.OdbcType]::VarChar)
+      $parameter.Value = $value
+    }
+    $reader = $command.ExecuteReader()
+    try {
+      if (-not $reader.Read()) { throw 'manager_print_object_not_configured' }
+      $mailObject = if ($reader.IsDBNull(0)) { '' } else { [string]$reader.GetValue(0) }
+      $printObject = if ($reader.IsDBNull(1)) { '' } else { [string]$reader.GetValue(1) }
+      $dataObject = if ($mailObject.Trim()) { $mailObject.Trim() } else { $printObject.Trim() }
+    } finally { $reader.Dispose() }
   }
-  $reader = $command.ExecuteReader()
-  try {
-    if (-not $reader.Read()) { throw 'manager_print_object_not_configured' }
-    $mailObject = if ($reader.IsDBNull(0)) { '' } else { [string]$reader.GetValue(0) }
-    $printObject = if ($reader.IsDBNull(1)) { '' } else { [string]$reader.GetValue(1) }
-    $dataObject = if ($mailObject.Trim()) { $mailObject.Trim() } else { $printObject.Trim() }
-  } finally { $reader.Dispose() }
 } finally { $connection.Dispose() }
 if (-not $dataObject) { throw 'manager_print_object_not_configured' }
 
@@ -73,6 +99,7 @@ try {
     '[arguments]', "arg1=$Transaction", "arg2=$VoucherType", "arg3=$PointOfSale", "arg4=$Number"
   )
   if ($Kind -eq 'receipt') { $content = @('[document]', "kind=$Kind", "dataobject=$dataObject", "output=$Output", '[manager]', ('folder=' + $manager), ('libraries=' + ($libraries -join ',')), '[database]', ('dsn=' + $dsn.Name), "uid=$uid", "pwd=$pwd", '[arguments]', "arg1=$PointOfSale", "arg2=$Number", 'arg3=', 'arg4=') }
+  if ($Kind -eq 'statement') { $content = @('[document]', "kind=$Kind", "dataobject=$dataObject", "output=$Output", '[manager]', ('folder=' + $manager), ('libraries=' + ($libraries -join ',')), '[database]', ('dsn=' + $dsn.Name), "uid=$uid", "pwd=$pwd", '[arguments]', 'arg1=*', "arg2=$FromDate", "arg3=$ToDate", "arg4=$ClientCode", 'arg5=S', 'arg6=', "arg7=$parities", 'arg8=yes', 'arg9=1') }
   Set-Content -LiteralPath $request -Value $content -Encoding Default
   $env:PATH = $manager + ';' + $env:PATH
   for ($attempt = 1; $attempt -le 2; $attempt++) {
