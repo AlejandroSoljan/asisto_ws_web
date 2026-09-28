@@ -76,7 +76,14 @@ try {
   Set-Content -LiteralPath $request -Value $content -Encoding Default
   $env:PATH = $manager + ';' + $env:PATH
   for ($attempt = 1; $attempt -le 2; $attempt++) {
-    $process = Start-Process -FilePath $helper -ArgumentList $request -WorkingDirectory $PSScriptRoot -WindowStyle Hidden -PassThru -Wait
+    # El auxiliar carga los PBD y runtimes de Manager por nombre. Debe
+    # iniciarse en esa carpeta; desde manager-ai podía quedar esperando una
+    # dependencia o un diálogo invisible hasta agotar el timeout externo.
+    $process = Start-Process -FilePath $helper -ArgumentList $request -WorkingDirectory $manager -WindowStyle Hidden -PassThru
+    if (-not $process.WaitForExit(30000)) {
+      try { $process.Kill() } catch {}
+      throw 'pdf_helper_timeout'
+    }
     $attemptOk = [string](Get-Content -LiteralPath $request | Select-String '^ok=' | ForEach-Object { $_.Line.Substring(3) })
     if ($attemptOk -eq '1' -and (Test-Path -LiteralPath $Output)) { break }
     if ($attempt -lt 2) { Start-Sleep -Milliseconds 500 }
