@@ -140,6 +140,12 @@ function listMessage(kind, rows) {
   return `Encontré varias opciones. Decime el número de ${noun} que necesitás:\n${lines.join('\n')}`;
 }
 
+function pdfPageCount(buffer) {
+  if (!Buffer.isBuffer(buffer) || !buffer.length) return 0;
+  const matches = buffer.toString('latin1').match(/\/Type\s*\/Page\b/g);
+  return matches ? matches.length : 0;
+}
+
 async function handleManagerDocumentRequest(options) {
   const cfg = options.config || {};
   const enabled = bool(cfg.manager_ai_enabled ?? cfg.manager_ia_habilitada ?? cfg.wweb_ai_manager_enabled, false);
@@ -284,10 +290,31 @@ async function handleManagerDocumentRequest(options) {
   }
   if (intent.kind === 'sale') args.push('-Transaction', String(row.transaccion || ''), '-VoucherType', String(row.tipocomprobante || ''));
   await runPowerShell(generateScript, args, 90000);
+  let statementFrom = intent.kind === 'statement' ? ymd(since) : '';
+  if (intent.kind === 'statement') {
+    const configuredDays = Math.max(1, Math.min(1095, days));
+    const candidateDays = [...new Set([
+      configuredDays,
+      180, 120, 90, 60, 45, 30, 21, 15, 10, 7, 3, 1
+    ].filter(value => value > 0 && value < configuredDays))];
+    let pages = pdfPageCount(fs.existsSync(output) ? fs.readFileSync(output) : Buffer.alloc(0));
+    for (const rangeDays of candidateDays.slice(1)) {
+      if (pages <= 1) break;
+      const adjustedSince = new Date(until.getTime() - rangeDays * 86400000);
+      statementFrom = ymd(adjustedSince);
+      const fromIndex = args.indexOf('-FromDate');
+      if (fromIndex >= 0) args[fromIndex + 1] = statementFrom;
+      await runPowerShell(generateScript, args, 90000);
+      pages = pdfPageCount(fs.existsSync(output) ? fs.readFileSync(output) : Buffer.alloc(0));
+    }
+  }
   try {
     const noun = intent.kind === 'receipt' ? 'recibo' : (intent.kind === 'statement' ? 'resumen de cuenta corriente' : 'factura');
     const article = intent.kind === 'sale' ? 'la' : 'el';
-    await sendManagerText(`Te envío ${article} ${noun} ${intent.kind === 'sale' ? 'solicitada' : 'solicitado'}.`);
+    const statementPeriod = intent.kind === 'statement' && statementFrom
+      ? ` Período: ${statementFrom.split('-').reverse().join('/')} al ${ymd(until).split('-').reverse().join('/')}.`
+      : '';
+    await sendManagerText(`Te envío ${article} ${noun} ${intent.kind === 'sale' ? 'solicitada' : 'solicitado'}.${statementPeriod}`);
     const data = fs.readFileSync(output).toString('base64');
     const filenamePrefix = intent.kind === 'receipt' ? 'Recibo' : (intent.kind === 'statement' ? 'Resumen_Cuenta' : 'Factura');
     await options.sendDocument({ mimetype: 'application/pdf', data, filename: `${filenamePrefix}_${id}.pdf` });
@@ -297,4 +324,4 @@ async function handleManagerDocumentRequest(options) {
   return { handled: true, reason: 'document_sent', kind: intent.kind, id };
 }
 
-module.exports = { bool, parseDocumentIntent, parseOrderQueryIntent, formatManagerOrders, isStandaloneGreeting, selectDocuments, handleManagerDocumentRequest, pendingDocumentRequests, managerConversationActivity };
+module.exports = { bool, parseDocumentIntent, parseOrderQueryIntent, formatManagerOrders, isStandaloneGreeting, selectDocuments, pdfPageCount, handleManagerDocumentRequest, pendingDocumentRequests, managerConversationActivity };

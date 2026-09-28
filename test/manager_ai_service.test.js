@@ -2,7 +2,7 @@
 
 const assert = require('assert');
 const fs = require('fs');
-const { parseDocumentIntent, parseOrderQueryIntent, formatManagerOrders, selectDocuments, handleManagerDocumentRequest, pendingDocumentRequests } = require('../manager_ai_service');
+const { parseDocumentIntent, parseOrderQueryIntent, formatManagerOrders, selectDocuments, pdfPageCount, handleManagerDocumentRequest, pendingDocumentRequests } = require('../manager_ai_service');
 
 assert.deepStrictEqual(parseDocumentIntent('Me mandás la última factura?'), {
   kind: 'sale', pointOfSale: '', number: '', latest: true
@@ -23,6 +23,7 @@ assert.strictEqual(parseDocumentIntent('Hola, buen día'), null);
 assert.deepStrictEqual(parseOrderQueryIntent('¿A qué hora llega mi pedido?'), { detail: false, delivery: true, history: false, latestOnly: true });
 assert.strictEqual(parseOrderQueryIntent('Quiero hacer un pedido'), null);
 assert.strictEqual(parseOrderQueryIntent('¿Cuál es la dirección del supermercado?'), null);
+assert.strictEqual(pdfPageCount(Buffer.from('%PDF /Type /Page /Type /Pages /Type /Page', 'latin1')), 2);
 assert.match(formatManagerOrders({ orders: [{ ptodeventa: '0001', numero: '25', fecha: '28/09/2026', total: 100, entrega: { direccion: 'Mitre 1' }, productos: [] }] }, { latestOnly: true, delivery: true, detail: false }), /Dirección: Mitre 1/);
 
 const lookup = { client: { finanzas: { facturas: [
@@ -117,6 +118,7 @@ async function testAccountStatement() {
   const sentTexts = [];
   const sentDocuments = [];
   let generateArgs;
+  let generateCount = 0;
   const result = await handleManagerDocumentRequest({
     tenantId: 'SDG', phone: '5493462000001', text: 'Pasame un resumen de cuenta',
     config: {
@@ -133,8 +135,11 @@ async function testAccountStatement() {
         return JSON.stringify({ found: true, ambiguous: false, matches: 1, client: { codigo: '000123', razonSocial: 'Cliente Prueba' } });
       }
       generateArgs = args;
+      generateCount += 1;
       const outputIndex = args.indexOf('-Output');
-      fs.writeFileSync(args[outputIndex + 1], Buffer.from('pdf'));
+      fs.writeFileSync(args[outputIndex + 1], Buffer.from(generateCount === 1
+        ? '%PDF /Type /Page /Type /Page'
+        : '%PDF /Type /Page', 'latin1'));
       return '';
     }
   });
@@ -144,8 +149,10 @@ async function testAccountStatement() {
   assert.strictEqual(generateArgs[generateArgs.indexOf('-ClientCode') + 1], '000123');
   assert.ok(generateArgs.includes('-FromDate'));
   assert.ok(generateArgs.includes('-ToDate'));
+  assert.strictEqual(generateCount, 2);
   assert.match(sentTexts[0], /Soy Asisto, el asistente de Supermercado Digital/);
   assert.match(sentTexts[0], /resumen de cuenta corriente/);
+  assert.match(sentTexts[0], /Período:/);
   assert.strictEqual(sentDocuments[0].filename, 'Resumen_Cuenta_000123.pdf');
 }
 
