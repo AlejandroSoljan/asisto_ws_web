@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.05.04 28/09/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.04';
+/*version: 4.05.05 28/09/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.05';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -11566,6 +11566,23 @@ telefonoFrom = telefonoFromApi;
           manager_document_lookup_days,
           manager_order_query_enabled,
           dsn
+        },
+        classifyIntent: async text => {
+          const intentResponse = await axios.post('https://asistobot.com.ar/api/ext/wweb/manager/intent', {
+            TenantId: String(tenantId || '').trim(),
+            Tel_Origen: String(telefonoFrom || '').replace(/\D/g, ''),
+            Tel_Destino: String(telefonoTo || '').replace(/\D/g, ''),
+            Mensaje: String(text || '')
+          }, {
+            timeout: 30000,
+            maxRedirects: 0,
+            validateStatus: () => true,
+            headers: { 'Content-Type': 'application/json; charset=UTF-8', 'X-Tenant-Id': String(tenantId || '').trim() }
+          });
+          if (intentResponse.status < 200 || intentResponse.status >= 300 || intentResponse.data?.ok !== true) {
+            throw new Error('manager_intent_http_' + String(intentResponse.status));
+          }
+          return intentResponse.data.intent || { action: 'none' };
         },
         sendText: text => safeSendMessage(message.from, text),
         sendDocument: media => safeSend(message.from, new MessageMedia(media.mimetype, media.data, media.filename))

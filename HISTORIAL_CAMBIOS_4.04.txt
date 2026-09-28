@@ -112,6 +112,10 @@ NOTA DE VERIFICACIÓN
 La publicación del tag y la versión objetivo en Mongo no prueban por sí solas
 que cada PC cliente ya haya instalado esa versión. Confirmar la versión en
 ejecución y el resultado del auto-update en cada instalación antes de afirmarlo.
+v4.05.05 - Reemplaza la detección local por frases de v4.05.04: el comportamiento
+             y el contexto del asistente clasifican semánticamente la solicitud;
+             el cliente sólo ejecuta la acción Manager estructurada resultante.
+
 v4.05.04 - Manager IA reconoce continuaciones abreviadas como "y la última factura"
              o "la última factura" y las resuelve localmente, sin derivarlas al
              modelo conversacional. Conserva el rango configurable de documentos.

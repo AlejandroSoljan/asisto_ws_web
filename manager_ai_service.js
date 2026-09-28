@@ -30,11 +30,7 @@ function parseDocumentIntent(text) {
   const numberMatch = normalized.match(/\b(?:n(?:ro|umero)?\.?\s*)?(\d{1,5})\s*[-/]\s*(\d{1,10})\b/i);
   const plainNumber = !numberMatch ? normalized.match(/\b(?:n(?:ro|umero)?\.?\s*)(\d{3,10})\b/i) : null;
   const number = numberMatch ? numberMatch[2] : (plainNumber ? plainNumber[1] : '');
-  // En una conversación es habitual continuar con "y la última factura" o
-  // simplemente "la última factura". Es una solicitud inequívoca aunque no
-  // repita el verbo usado en el mensaje anterior.
-  const asksForLatest = /\b(?:la|el|mi)?\s*(?:ultima|ultimo|mas reciente|reciente)\s+(?:factura|recibo|comprobante)\b/.test(normalized);
-  if (!asksToSend && kind !== 'statement' && !number && !asksForLatest) return null;
+  if (!asksToSend && kind !== 'statement' && !number) return null;
   return {
     kind,
     pointOfSale: numberMatch ? numberMatch[1] : '',
@@ -173,7 +169,20 @@ async function handleManagerDocumentRequest(options) {
     await sendManagerText(configuredGreeting);
     return { handled: true, reason: 'configured_greeting' };
   }
-  const orderIntent = parseOrderQueryIntent(options.text);
+  let classifiedIntent = null;
+  if (!activePending && typeof options.classifyIntent === 'function') {
+    try { classifiedIntent = await options.classifyIntent(String(options.text || '')); } catch (e) {
+      console.warn('[MANAGER_AI] no se pudo clasificar por comportamiento:', e?.message || e);
+      classifiedIntent = { action: 'none' };
+    }
+  }
+  const classifiedAction = String(classifiedIntent?.action || '').trim().toLowerCase();
+  const orderIntent = classifiedAction === 'orders' ? {
+    detail: bool(classifiedIntent.detail, false),
+    delivery: bool(classifiedIntent.delivery, false),
+    history: bool(classifiedIntent.history, false),
+    latestOnly: bool(classifiedIntent.latestOnly, true),
+  } : (!classifiedIntent ? parseOrderQueryIntent(options.text) : null);
   if (orderIntent && bool(cfg.manager_order_query_enabled, false)) {
     const bridgeFolder = path.resolve(String(cfg.manager_ai_bridge_folder || path.join(__dirname, 'manager-ai')));
     const queryScript = path.join(bridgeFolder, 'query_recent_orders.ps1');
@@ -185,7 +194,13 @@ async function handleManagerDocumentRequest(options) {
     await sendManagerText(formatManagerOrders(result, orderIntent));
     return { handled: true, reason: 'orders_queried', count: Number(result.count || 0) };
   }
-  let intent = parseDocumentIntent(options.text);
+  let intent = classifiedAction === 'document' ? {
+    kind: ['sale', 'receipt', 'statement'].includes(String(classifiedIntent.documentKind || '').toLowerCase())
+      ? String(classifiedIntent.documentKind).toLowerCase() : 'sale',
+    pointOfSale: String(classifiedIntent.pointOfSale || '').replace(/\D/g, ''),
+    number: String(classifiedIntent.number || '').replace(/\D/g, ''),
+    latest: bool(classifiedIntent.latest, false),
+  } : (!classifiedIntent ? parseDocumentIntent(options.text) : null);
   let clientQuery = '';
   if (!intent && activePending) {
     const pendingAnswer = String(options.text || '').trim();

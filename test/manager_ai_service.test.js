@@ -7,12 +7,6 @@ const { parseDocumentIntent, parseOrderQueryIntent, formatManagerOrders, selectD
 assert.deepStrictEqual(parseDocumentIntent('Me mandás la última factura?'), {
   kind: 'sale', pointOfSale: '', number: '', latest: true
 });
-assert.deepStrictEqual(parseDocumentIntent('Y la última factura'), {
-  kind: 'sale', pointOfSale: '', number: '', latest: true
-});
-assert.deepStrictEqual(parseDocumentIntent('La última factura'), {
-  kind: 'sale', pointOfSale: '', number: '', latest: true
-});
 assert.deepStrictEqual(parseDocumentIntent('Necesito el recibo 0005-12345'), {
   kind: 'receipt', pointOfSale: '0005', number: '12345', latest: false
 });
@@ -179,10 +173,29 @@ async function testDocumentSelectionContinuation() {
   assert.strictEqual(sentDocuments[0].filename, 'Factura_0001-00012944.pdf');
 }
 
+async function testBehaviorClassifiesFreeLanguage() {
+  pendingDocumentRequests.clear();
+  const sentDocuments = [];
+  const result = await handleManagerDocumentRequest({
+    tenantId: 'SDG', phone: '5493462000009', text: '¿Me alcanzás lo último que me facturaron?',
+    config: { manager_ai_enabled: true, manager_document_send_enabled: true, manager_folder: 'C:\\Manager\\Exe', dsn: 'msm_manager', manager_ai_bridge_folder: require('path').join(__dirname, '..', 'manager-ai') },
+    classifyIntent: async () => ({ action: 'document', documentKind: 'sale', latest: true }),
+    sendText: async () => {}, sendDocument: async doc => sentDocuments.push(doc),
+    execPowerShell: async (script, args) => {
+      if (/lookup_client\.ps1$/i.test(script)) return JSON.stringify({ found: true, ambiguous: false, client: { finanzas: { facturas: [{ ptodeventa: '0001', nrotransaccion: '00012944', transaccion: 'PD', tipocomprobante: 'B' }] } } });
+      fs.writeFileSync(args[args.indexOf('-Output') + 1], Buffer.from('pdf'));
+      return '';
+    }
+  });
+  assert.strictEqual(result.reason, 'document_sent');
+  assert.strictEqual(sentDocuments[0].filename, 'Factura_0001-00012944.pdf');
+}
+
 testAmbiguousClientContinuation()
   .then(testConfiguredGreeting)
   .then(testNumberedClientSelection)
   .then(testAccountStatement)
   .then(testDocumentSelectionContinuation)
+  .then(testBehaviorClassifiesFreeLanguage)
   .then(() => console.log('manager_ai_service tests: ok'))
   .catch(error => { console.error(error); process.exitCode = 1; });
