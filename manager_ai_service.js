@@ -3,6 +3,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const zlib = require('zlib');
 const { spawn } = require('child_process');
 
 const pendingDocumentRequests = new Map();
@@ -142,8 +143,42 @@ function listMessage(kind, rows) {
 
 function pdfPageCount(buffer) {
   if (!Buffer.isBuffer(buffer) || !buffer.length) return 0;
-  const matches = buffer.toString('latin1').match(/\/Type\s*\/Page\b/g);
-  return matches ? matches.length : 0;
+  const chunks = [buffer.toString('latin1')];
+  const source = chunks[0];
+  const streamPattern = /<<(?:.|\r|\n)*?\/FlateDecode(?:.|\r|\n)*?>>\s*stream\r?\n([\s\S]*?)\r?\nendstream/g;
+  for (const match of source.matchAll(streamPattern)) {
+    try { chunks.push(zlib.inflateSync(Buffer.from(match[1], 'latin1')).toString('latin1')); } catch {}
+  }
+  let pageObjects = 0;
+  let pageTreeCount = 0;
+  for (const text of chunks) {
+    pageObjects += (text.match(/\/Type\s*\/Page\b/g) || []).length;
+    for (const match of text.matchAll(/\/Type\s*\/Pages\b[\s\S]{0,800}?\/Count\s+(\d+)/g)) {
+      pageTreeCount = Math.max(pageTreeCount, Number(match[1]) || 0);
+    }
+  }
+  return Math.max(pageObjects, pageTreeCount);
+}
+
+function statementPeriod(intent, now, configuredDays) {
+  const until = new Date(now);
+  const requestedTo = /^\d{4}-\d{2}-\d{2}$/.test(String(intent.toDate || ''))
+    ? new Date(`${intent.toDate}T23:59:59`) : null;
+  if (requestedTo && !Number.isNaN(requestedTo.getTime()) && requestedTo < until) until.setTime(requestedTo.getTime());
+  let since = new Date(until.getTime() - configuredDays * 86400000);
+  if (intent.periodMode === 'relative_months') {
+    const months = Math.max(1, Math.min(36, Number(intent.relativeMonths) || 1));
+    since = new Date(until);
+    since.setMonth(since.getMonth() - months);
+  } else if (intent.periodMode === 'relative_days') {
+    const days = Math.max(1, Math.min(1095, Number(intent.relativeDays) || configuredDays));
+    since = new Date(until.getTime() - days * 86400000);
+  } else if (intent.periodMode === 'date_range' && /^\d{4}-\d{2}-\d{2}$/.test(String(intent.fromDate || ''))) {
+    const requestedFrom = new Date(`${intent.fromDate}T00:00:00`);
+    if (!Number.isNaN(requestedFrom.getTime()) && requestedFrom < until) since = requestedFrom;
+  }
+  if (since >= until) since = new Date(until.getTime() - 86400000);
+  return { since, until };
 }
 
 async function handleManagerDocumentRequest(options) {
@@ -206,6 +241,12 @@ async function handleManagerDocumentRequest(options) {
     pointOfSale: String(classifiedIntent.pointOfSale || '').replace(/\D/g, ''),
     number: String(classifiedIntent.number || '').replace(/\D/g, ''),
     latest: bool(classifiedIntent.latest, false),
+    periodMode: ['relative_months', 'relative_days', 'date_range'].includes(String(classifiedIntent.periodMode || '').toLowerCase())
+      ? String(classifiedIntent.periodMode).toLowerCase() : 'default',
+    relativeMonths: Number(classifiedIntent.relativeMonths || 0),
+    relativeDays: Number(classifiedIntent.relativeDays || 0),
+    fromDate: String(classifiedIntent.fromDate || ''),
+    toDate: String(classifiedIntent.toDate || ''),
   } : (!classifiedIntent ? parseDocumentIntent(options.text) : null);
   let clientQuery = '';
   if (!intent && activePending) {
@@ -240,8 +281,10 @@ async function handleManagerDocumentRequest(options) {
   }
 
   const days = Math.max(1, Math.min(1095, Number(cfg.manager_document_lookup_days || 365) || 365));
-  const until = new Date();
-  const since = new Date(until.getTime() - days * 86400000);
+  const requestedPeriod = intent.kind === 'statement'
+    ? statementPeriod(intent, now, days)
+    : { until: new Date(now), since: new Date(now - days * 86400000) };
+  const { since, until } = requestedPeriod;
   const ymd = value => value.toISOString().slice(0, 10);
   const runPowerShell = typeof options.execPowerShell === 'function' ? options.execPowerShell : execPowerShell;
   const lookupArgs = ['-Phone', String(options.phone), '-FromDate', ymd(since), '-ToDate', ymd(until), '-DsnName', dsn];
@@ -292,14 +335,14 @@ async function handleManagerDocumentRequest(options) {
   await runPowerShell(generateScript, args, 90000);
   let statementFrom = intent.kind === 'statement' ? ymd(since) : '';
   if (intent.kind === 'statement') {
-    const configuredDays = Math.max(1, Math.min(1095, days));
+    const configuredDays = Math.max(1, Math.ceil((until.getTime() - since.getTime()) / 86400000));
     const candidateDays = [...new Set([
       configuredDays,
       180, 120, 90, 60, 45, 30, 21, 15, 10, 7, 3, 1
-    ].filter(value => value > 0 && value < configuredDays))];
+    ].filter(value => value > 0 && value <= configuredDays))];
     let pages = pdfPageCount(fs.existsSync(output) ? fs.readFileSync(output) : Buffer.alloc(0));
     for (const rangeDays of candidateDays.slice(1)) {
-      if (pages <= 1) break;
+      if (pages === 1) break;
       const adjustedSince = new Date(until.getTime() - rangeDays * 86400000);
       statementFrom = ymd(adjustedSince);
       const fromIndex = args.indexOf('-FromDate');

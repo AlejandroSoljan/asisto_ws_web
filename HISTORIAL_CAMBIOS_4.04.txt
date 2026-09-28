@@ -112,6 +112,11 @@ NOTA DE VERIFICACIÓN
 La publicación del tag y la versión objetivo en Mongo no prueban por sí solas
 que cada PC cliente ya haya instalado esa versión. Confirmar la versión en
 ejecución y el resultado del auto-update en cada instalación antes de afirmarlo.
+v4.05.07 - Los resúmenes respetan períodos solicitados semánticamente (meses, días
+             o fechas) y reconocen el árbol /Count y streams comprimidos de los PDF
+             de PowerBuilder. Un conteo desconocido ya no se confunde con una hoja;
+             reduce el rango hasta obtener una sola página e informa el período real.
+
 v4.05.06 - El resumen de cuenta conserva inicialmente el período configurado y,
              si el PDF ocupa más de una hoja, acorta progresivamente las fechas
              manteniendo los movimientos más recientes. Informa el período enviado.

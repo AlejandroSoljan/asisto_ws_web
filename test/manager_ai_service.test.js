@@ -24,6 +24,7 @@ assert.deepStrictEqual(parseOrderQueryIntent('¿A qué hora llega mi pedido?'), 
 assert.strictEqual(parseOrderQueryIntent('Quiero hacer un pedido'), null);
 assert.strictEqual(parseOrderQueryIntent('¿Cuál es la dirección del supermercado?'), null);
 assert.strictEqual(pdfPageCount(Buffer.from('%PDF /Type /Page /Type /Pages /Type /Page', 'latin1')), 2);
+assert.strictEqual(pdfPageCount(Buffer.from('%PDF << /Type /Pages /Kids [1 0 R 2 0 R] /Count 2 >>', 'latin1')), 2);
 assert.match(formatManagerOrders({ orders: [{ ptodeventa: '0001', numero: '25', fecha: '28/09/2026', total: 100, entrega: { direccion: 'Mitre 1' }, productos: [] }] }, { latestOnly: true, delivery: true, detail: false }), /Dirección: Mitre 1/);
 
 const lookup = { client: { finanzas: { facturas: [
@@ -198,11 +199,40 @@ async function testBehaviorClassifiesFreeLanguage() {
   assert.strictEqual(sentDocuments[0].filename, 'Factura_0001-00012944.pdf');
 }
 
+async function testRequestedStatementPeriod() {
+  pendingDocumentRequests.clear();
+  let lookupArgs;
+  let generateArgs;
+  const sentTexts = [];
+  const result = await handleManagerDocumentRequest({
+    tenantId: 'SDG', phone: '5493462000010', text: 'Mandame solamente los últimos dos meses',
+    now: new Date('2026-09-28T12:00:00-03:00').getTime(),
+    config: { manager_ai_enabled: true, manager_document_send_enabled: true, manager_folder: 'C:\\Manager\\Exe', dsn: 'msm_manager', manager_ai_bridge_folder: require('path').join(__dirname, '..', 'manager-ai') },
+    classifyIntent: async () => ({ action: 'document', documentKind: 'statement', latest: true, periodMode: 'relative_months', relativeMonths: 2 }),
+    sendText: async text => sentTexts.push(text), sendDocument: async () => {},
+    execPowerShell: async (script, args) => {
+      if (/lookup_client\.ps1$/i.test(script)) {
+        lookupArgs = [...args];
+        return JSON.stringify({ found: true, ambiguous: false, client: { codigo: '000123' } });
+      }
+      generateArgs = [...args];
+      fs.writeFileSync(args[args.indexOf('-Output') + 1], Buffer.from('%PDF << /Type /Pages /Count 1 >>', 'latin1'));
+      return '';
+    }
+  });
+  assert.strictEqual(result.reason, 'document_sent');
+  assert.strictEqual(lookupArgs[lookupArgs.indexOf('-FromDate') + 1], '2026-07-28');
+  assert.strictEqual(lookupArgs[lookupArgs.indexOf('-ToDate') + 1], '2026-09-28');
+  assert.strictEqual(generateArgs[generateArgs.indexOf('-FromDate') + 1], '2026-07-28');
+  assert.match(sentTexts[0], /28\/07\/2026 al 28\/09\/2026/);
+}
+
 testAmbiguousClientContinuation()
   .then(testConfiguredGreeting)
   .then(testNumberedClientSelection)
   .then(testAccountStatement)
   .then(testDocumentSelectionContinuation)
   .then(testBehaviorClassifiesFreeLanguage)
+  .then(testRequestedStatementPeriod)
   .then(() => console.log('manager_ai_service tests: ok'))
   .catch(error => { console.error(error); process.exitCode = 1; });
