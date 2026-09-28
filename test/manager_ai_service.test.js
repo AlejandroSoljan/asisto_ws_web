@@ -59,7 +59,9 @@ async function testAmbiguousClientContinuation() {
   const second = await handleManagerDocumentRequest({ ...base, text: 'Alejandro Soljan' });
   assert.strictEqual(second.reason, 'document_sent');
   assert.strictEqual(sentDocuments.length, 1);
-  assert.strictEqual(sentTexts.length, 1);
+  assert.strictEqual(sentTexts.length, 2);
+  assert.match(sentTexts[0], /Soy Asisto, el asistente de Supermercado Digital/);
+  assert.match(sentTexts[1], /Te envío la factura solicitada/);
   assert.strictEqual(pendingDocumentRequests.size, 0);
 }
 

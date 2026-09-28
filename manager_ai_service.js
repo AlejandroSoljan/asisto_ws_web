@@ -6,6 +6,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 
 const pendingDocumentRequests = new Map();
+const managerConversationActivity = new Map();
 const PENDING_DOCUMENT_TTL_MS = 10 * 60 * 1000;
 
 function bool(value, fallback = false) {
@@ -99,14 +100,27 @@ async function handleManagerDocumentRequest(options) {
   if (!enabled) return { handled: false, reason: 'disabled' };
   const pendingKey = `${String(options.tenantId || '').trim()}:${String(options.phone || '').replace(/\D/g, '')}`;
   const now = Number(options.now || Date.now());
+  const conversationTtlMs = Math.max(1, Number(cfg.manager_conversation_inactivity_minutes || 20) || 20) * 60 * 1000;
+  const previousActivity = Number(managerConversationActivity.get(pendingKey) || 0);
+  const isFirstConversationMessage = !previousActivity || (now - previousActivity) >= conversationTtlMs;
+  managerConversationActivity.set(pendingKey, now);
+  const configuredGreeting = String(cfg.manager_ai_greeting || '¡Hola! Soy Asisto, el asistente de Supermercado Digital.').trim();
+  let introPending = isFirstConversationMessage;
+  const sendManagerText = async text => {
+    let outgoing = String(text || '').trim();
+    if (introPending) {
+      introPending = false;
+      if (configuredGreeting && !outgoing.includes(configuredGreeting)) outgoing = `${configuredGreeting}\n${outgoing}`.trim();
+    }
+    await options.sendText(outgoing);
+  };
   const savedPending = pendingDocumentRequests.get(pendingKey);
   if (savedPending && now - savedPending.createdAt > PENDING_DOCUMENT_TTL_MS) {
     pendingDocumentRequests.delete(pendingKey);
   }
   const activePending = pendingDocumentRequests.get(pendingKey);
-  const configuredGreeting = String(cfg.manager_ai_greeting || '').trim();
   if (!activePending && configuredGreeting && isStandaloneGreeting(options.text)) {
-    await options.sendText(configuredGreeting);
+    await sendManagerText(configuredGreeting);
     return { handled: true, reason: 'configured_greeting' };
   }
   let intent = parseDocumentIntent(options.text);
@@ -123,7 +137,7 @@ async function handleManagerDocumentRequest(options) {
   if (!intent) return { handled: false, reason: 'not_document_intent' };
   if (!clientQuery) pendingDocumentRequests.delete(pendingKey);
   if (!bool(cfg.manager_document_send_enabled ?? cfg.manager_envio_documentos_habilitado, false)) {
-    await options.sendText('Entendí que necesitás un documento, pero el envío automático todavía no está habilitado.');
+    await sendManagerText('Entendí que necesitás un documento, pero el envío automático todavía no está habilitado.');
     return { handled: true, reason: 'send_disabled' };
   }
 
@@ -148,10 +162,10 @@ async function handleManagerDocumentRequest(options) {
   if (!lookup.found) {
     if (clientQuery) {
       pendingDocumentRequests.set(pendingKey, { intent, createdAt: now });
-      await options.sendText('No encontré ese cliente. Podés responder con la razón social, CUIT o documento, y conservaré tu pedido de factura o recibo pendiente.');
+      await sendManagerText('No encontré ese cliente. Podés responder con la razón social, CUIT o documento, y conservaré tu pedido de factura o recibo pendiente.');
       return { handled: true, reason: 'client_selection_not_found' };
     }
-    await options.sendText('No encontré tu teléfono asociado a un cliente de Manager. Si querés, indicame tu razón social o CUIT para que lo revise una persona.');
+    await sendManagerText('No encontré tu teléfono asociado a un cliente de Manager. Si querés, indicame tu razón social o CUIT para que lo revise una persona.');
     return { handled: true, reason: 'client_not_found' };
   }
   if (lookup.ambiguous) {
@@ -159,17 +173,17 @@ async function handleManagerDocumentRequest(options) {
     const optionsList = Array.isArray(lookup.candidates) ? lookup.candidates
       .map((candidate, index) => `${index + 1}. ${candidate.razonSocial || candidate.codigo}${candidate.cuit ? ` · CUIT ${candidate.cuit}` : ''}`)
       .join('\n') : '';
-    await options.sendText(`Encontré más de un cliente asociado a este teléfono. Elegí una opción o indicame razón social, CUIT o documento. Tu solicitud de ${intent.kind === 'receipt' ? 'recibo' : 'factura'} queda pendiente.${optionsList ? `\n${optionsList}` : ''}`);
+    await sendManagerText(`Encontré más de un cliente asociado a este teléfono. Elegí una opción o indicame razón social, CUIT o documento. Tu solicitud de ${intent.kind === 'receipt' ? 'recibo' : 'factura'} queda pendiente.${optionsList ? `\n${optionsList}` : ''}`);
     return { handled: true, reason: 'ambiguous_client' };
   }
   pendingDocumentRequests.delete(pendingKey);
   const matches = selectDocuments(intent, lookup);
   if (!matches.length) {
-    await options.sendText(`No encontré ${intent.kind === 'receipt' ? 'ese recibo' : 'esa factura'} en el período consultado.`);
+    await sendManagerText(`No encontré ${intent.kind === 'receipt' ? 'ese recibo' : 'esa factura'} en el período consultado.`);
     return { handled: true, reason: 'document_not_found' };
   }
   if (matches.length > 1) {
-    await options.sendText(listMessage(intent.kind, matches));
+    await sendManagerText(listMessage(intent.kind, matches));
     return { handled: true, reason: 'document_selection_required', count: matches.length };
   }
 
@@ -181,6 +195,8 @@ async function handleManagerDocumentRequest(options) {
   if (intent.kind === 'sale') args.push('-Transaction', String(row.transaccion || ''), '-VoucherType', String(row.tipocomprobante || ''));
   await runPowerShell(generateScript, args, 90000);
   try {
+    const noun = intent.kind === 'receipt' ? 'recibo' : 'factura';
+    await sendManagerText(`Te envío ${noun === 'factura' ? 'la' : 'el'} ${noun} ${noun === 'factura' ? 'solicitada' : 'solicitado'}.`);
     const data = fs.readFileSync(output).toString('base64');
     await options.sendDocument({ mimetype: 'application/pdf', data, filename: `${intent.kind === 'receipt' ? 'Recibo' : 'Factura'}_${id}.pdf` });
   } finally {
@@ -189,4 +205,4 @@ async function handleManagerDocumentRequest(options) {
   return { handled: true, reason: 'document_sent', kind: intent.kind, id };
 }
 
-module.exports = { bool, parseDocumentIntent, isStandaloneGreeting, selectDocuments, handleManagerDocumentRequest, pendingDocumentRequests };
+module.exports = { bool, parseDocumentIntent, isStandaloneGreeting, selectDocuments, handleManagerDocumentRequest, pendingDocumentRequests, managerConversationActivity };
