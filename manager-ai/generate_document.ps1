@@ -76,10 +76,12 @@ try {
   Set-Content -LiteralPath $request -Value $content -Encoding Default
   $env:PATH = $manager + ';' + $env:PATH
   for ($attempt = 1; $attempt -le 2; $attempt++) {
-    # El auxiliar carga los PBD y runtimes de Manager por nombre. Debe
-    # iniciarse en esa carpeta; desde manager-ai podía quedar esperando una
-    # dependencia o un diálogo invisible hasta agotar el timeout externo.
-    $process = Start-Process -FilePath $helper -ArgumentList $request -WorkingDirectory $manager -WindowStyle Hidden -PassThru
+    # La aplicación compilada necesita encontrar su propio
+    # app_asisto_manager_pdf.pbd junto al EXE. Los PBD de Manager se cargan
+    # luego desde la carpeta informada en el pedido; sus runtimes ya están en
+    # PATH. Si se inicia con Manager como directorio actual, el host queda vivo
+    # pero el evento Open de la aplicación nunca llega a ejecutarse.
+    $process = Start-Process -FilePath $helper -ArgumentList $request -WorkingDirectory $PSScriptRoot -WindowStyle Hidden -PassThru
     if (-not $process.WaitForExit(30000)) {
       try { $process.Kill() } catch {}
       throw 'pdf_helper_timeout'
