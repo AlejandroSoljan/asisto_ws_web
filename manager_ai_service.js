@@ -58,14 +58,16 @@ function formatManagerOrders(result, intent) {
   if (!orders.length) return 'No encontré pedidos asociados a este teléfono.';
   const selected = intent.latestOnly ? orders.slice(0, 1) : orders.slice(0, 10);
   const money = value => Number(value || 0).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  const date = value => String(value || '').replace(/^\/Date\((\d+)\)\/$/, (_, ms) => new Date(Number(ms)).toLocaleDateString('es-AR')).slice(0, 10);
+  const pbDate = value => { const m = String(value || '').match(/^\/Date\((\d+)\)\/$/); return m ? new Date(Number(m[1])) : null; };
+  const date = value => pbDate(value)?.toLocaleDateString('es-AR') || String(value || '').slice(0, 10);
+  const time = value => pbDate(value)?.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' }) || String(value || '').slice(0, 5);
   return selected.map((order, index) => {
     const lines = [`${selected.length > 1 ? `${index + 1}. ` : ''}Pedido ${order.ptodeventa || ''}-${order.numero || ''} · ${date(order.fecha)} · $ ${money(order.total)}`];
     if (intent.delivery) {
       const delivery = order.entrega || {};
-      if (delivery.estado) lines.push(`Estado: ${delivery.estado}`);
+      if (delivery.estado) lines.push(`Estado: ${{ P: 'Pendiente', F: 'Finalizado', C: 'Cancelado' }[delivery.estado] || delivery.estado}`);
       if (delivery.direccion) lines.push(`Dirección: ${delivery.direccion}`);
-      if (delivery.horario_fecha || delivery.horario_desde || delivery.horario_hasta) lines.push(`Entrega: ${date(delivery.horario_fecha)} ${delivery.horario_desde || ''}-${delivery.horario_hasta || ''}`.trim());
+      if (delivery.horario_fecha || delivery.horario_desde || delivery.horario_hasta) lines.push(`Entrega: ${date(delivery.horario_fecha)} ${time(delivery.horario_desde)}-${time(delivery.horario_hasta)}`.trim());
       if (delivery.forma_pago) lines.push(`Forma de pago: ${delivery.forma_pago}`);
       if (delivery.observaciones) lines.push(`Observaciones: ${delivery.observaciones}`);
     }
