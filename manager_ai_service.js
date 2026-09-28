@@ -72,7 +72,7 @@ function formatManagerOrders(result, intent) {
     if (intent.detail) {
       const products = Array.isArray(order.productos) ? order.productos : [];
       lines.push('Productos:');
-      for (const product of products.slice(0, 30)) lines.push(`• ${product.codigo}: ${Number(product.cantidad || 0).toLocaleString('es-AR')} × $ ${money(product.precio_final)}`);
+      for (const product of products.slice(0, 30)) lines.push(`• ${product.descripcion || product.codigo}: ${Number(product.cantidad || 0).toLocaleString('es-AR')} × $ ${money(product.precio_final)}`);
     }
     return lines.join('\n');
   }).join('\n\n');

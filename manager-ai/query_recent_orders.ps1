@@ -26,15 +26,16 @@ try {
   $command.CommandText = @'
 SELECT
   rm_transaccion, rm_letra, rm_ptodeventa, rm_nrotransaccion, rm_fecha,
-  rm_activo, rm_total, rm_observaciones, rm_renglon, producto, cantidad, precio_final,
+  q.rm_activo, q.rm_total, q.rm_observaciones, q.rm_renglon, q.producto, a.descripcion AS producto_descripcion, q.cantidad, q.precio_final,
   cliente_codigo, cliente_razon_social, cliente_tel_celular,
   venta_transaccion, venta_tipocomprobante, venta_ptodeventa, venta_nrotransaccion, venta_fecha,
   entrega_cod_horario, entrega_forma_pago, entrega_direccion, entrega_telefono,
   entrega_email, entrega_observaciones, entrega_fecha_calificacion,
   entrega_observacion_cliente, entrega_calificacion, entrega_estado,
   horario_fecha, horario_desde, horario_hasta, horario_disponible
-FROM DBA.v_ven_remitos_clientes_ventas
-WHERE cliente_tel_celular LIKE ?
+FROM DBA.v_ven_remitos_clientes_ventas q
+LEFT JOIN DBA.articulos a ON a.producto = q.producto
+WHERE q.cliente_tel_celular LIKE ?
 ORDER BY rm_fecha DESC, rm_transaccion DESC, rm_letra DESC, rm_ptodeventa DESC, rm_nrotransaccion DESC, rm_renglon
 '@
   $parameter = $command.Parameters.Add('@phone', [System.Data.Odbc.OdbcType]::VarChar)
@@ -55,7 +56,7 @@ ORDER BY rm_fecha DESC, rm_transaccion DESC, rm_letra DESC, rm_ptodeventa DESC, 
           productos=New-Object System.Collections.ArrayList
         }
       }
-      [void]$orders[$key].productos.Add([ordered]@{ renglon=$reader['rm_renglon']; codigo=[string]$reader['producto']; cantidad=$reader['cantidad']; precio_final=$reader['precio_final'] })
+      [void]$orders[$key].productos.Add([ordered]@{ renglon=$reader['rm_renglon']; codigo=[string]$reader['producto']; descripcion=[string]$reader['producto_descripcion']; cantidad=$reader['cantidad']; precio_final=$reader['precio_final'] })
     }
   } finally { $reader.Dispose() }
   [pscustomobject]@{ ok=$true; phone=$last10; count=$orders.Count; orders=@($orders.Values) } | ConvertTo-Json -Depth 8 -Compress
