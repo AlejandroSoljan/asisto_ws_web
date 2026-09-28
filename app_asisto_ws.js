@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.04.77 19/09/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.00';
+/*version: 4.05.01 28/09/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.01';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -2861,7 +2861,12 @@ async function logMessageStat(direction, contact, payload) {
     const dir = String(direction || '').trim().toLowerCase();
     if (dir !== 'in' && dir !== 'out') return;
 
-    const now = new Date();
+    const payloadAt = payload && typeof payload === 'object'
+      ? new Date(payload.at || payload.timestamp || payload.messageTimestamp || 0)
+      : null;
+    const now = payloadAt && Number.isFinite(payloadAt.getTime()) && payloadAt.getTime() > 0
+      ? payloadAt
+      : new Date();
     const parts = arDatePartsForStats(now);
 
     let messageType = 'text';
@@ -2899,6 +2904,7 @@ async function logMessageStat(direction, contact, payload) {
       dayKey: parts.dayKey
     };
     if (payload?.asistoOrigin) logDoc.asistoOrigin = String(payload.asistoOrigin).slice(0, 40);
+    if (payload?.eventSource) logDoc.eventSource = String(payload.eventSource).slice(0, 60);
     if (messageId) logDoc.messageId = messageId;
     if (messageId) {
       await MessageLogModel.updateOne(
@@ -3109,6 +3115,55 @@ async function logOutgoingFromMessageFallback(messageLike) {
     return true;
   } catch (e) {
     try { EscribirLog('logOutgoingFromMessageFallback error: ' + String(e?.message || e), 'error'); } catch {}
+    return false;
+  }
+}
+
+// Auditoría universal de conversaciones entrantes. Se ejecuta antes de cualquier
+// salida temprana del bot (pausa, filtro de clientes, confirmaciones o bot apagado),
+// para que todos los dominios conserven las consultas reales de sus clientes.
+// Sólo persiste texto/caption y metadatos; nunca guarda el binario del adjunto.
+async function logIncomingConversationForAnalysis(messageLike, source = 'message') {
+  try {
+    if (!messageLike || messageLike.fromMe === true) return false;
+
+    const rawFrom = String(messageLike.from || messageLike?._data?.from || '').trim();
+    if (!rawFrom || rawFrom === 'status@broadcast') return false;
+    if (/@g\.us$|@broadcast$|@newsletter$/i.test(rawFrom)) return false;
+
+    const resolved = String(messageLike.__asistoResolvedClientPhone || '').trim() ||
+      await resolvePhoneFromIncomingMessage(messageLike);
+    const contact = validPhoneCandidateForRaw(rawFrom, resolved);
+    if (!contact) return false;
+
+    try { messageLike.__asistoResolvedClientPhone = contact; } catch {}
+
+    const rawTimestamp = Number(messageLike.timestamp || messageLike?._data?.t || 0);
+    const at = Number.isFinite(rawTimestamp) && rawTimestamp > 0
+      ? new Date(rawTimestamp > 1e12 ? rawTimestamp : rawTimestamp * 1000)
+      : new Date();
+    const body = String(messageLike.body || messageLike?._data?.body || '').trim();
+    const caption = String(messageLike.caption || messageLike?._data?.caption || '').trim();
+    const type = String(messageLike.type || messageLike?._data?.type || 'chat').trim() || 'chat';
+    const hasMedia = !!(
+      messageLike.hasMedia || messageLike?._data?.mediaKey ||
+      messageLike?._data?.directPath || messageLike?._data?.isViewOnce ||
+      !['chat', 'text', 'buttons_response', 'list_response'].includes(type.toLowerCase())
+    );
+
+    await logMessageStat('in', contact, {
+      body,
+      caption,
+      type,
+      hasMedia,
+      messageId: getMessageStableId(messageLike),
+      at,
+      asistoOrigin: 'customer',
+      eventSource: String(source || 'message')
+    });
+    return true;
+  } catch (e) {
+    try { EscribirLog('logIncomingConversationForAnalysis error: ' + String(e?.message || e), 'error'); } catch {}
     return false;
   }
 }
@@ -11280,6 +11335,10 @@ async function processIncomingAsistoMessage(message, source) {
   try { await refreshTenantConfigFromDbPerMessage(); } catch {}
   try { RecuperarJsonConfMensajes(); } catch {}
 
+  // Registrar antes de cualquier regla operativa. El ID estable vuelve idempotente
+  // la captura cuando WhatsApp emite tanto message como message_create.
+  try { await logIncomingConversationForAnalysis(message, source || 'message'); } catch {}
+
   if (isAdminDeliveryCommandMessage(message)) {
    // Comando interno de entrega: NUNCA debe llegar al API principal ProcesarMensajePost.
     // Si no es admin, también se corta acá para que /e no se procese como chat del bot.
@@ -11520,13 +11579,6 @@ telefonoFrom = telefonoFromApi;
       await safeSendMessage(message.from, 'No pude recuperar el documento en este momento. Ya dejé registrado el inconveniente para revisarlo.');
       return;
     }
-    try {
-      await logMessageStat('in', telefonoFrom, {
-        body: incomingBotPayload.mensaje || '',
-        type: incomingBotPayload.type || message.type || 'chat',
-        hasMedia: !!incomingBotPayload.hasMedia
-      });
-    } catch {}
     console.log("mensaje");
    
       //////////////////////////////////////////////////////////

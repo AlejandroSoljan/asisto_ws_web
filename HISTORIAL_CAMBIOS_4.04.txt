@@ -99,6 +99,12 @@ v4.04.59 - Evita repetir indefinidamente un documento de API Mensajes cuando
 v4.04.60 - Limita a un aviso por documento cada 30 minutos el log de envíos
              inciertos retenidos, sin desbloquearlos ni reenviarlos. Agrega
              prueba de no repetición del aviso. Impacto previsto: RVL y NEA.
+v4.05.01 - Registra por defecto las consultas entrantes de clientes antes de
+             cualquier salida temprana del flujo (bot apagado, sesión pausada,
+             filtro de clientes o confirmación). Deduplica message/message_create
+             por ID estable de WhatsApp, conserva texto y metadatos de adjuntos
+             sin guardar binarios, y excluye estados, grupos y newsletters.
+             Impacto: todos los dominios con agente WhatsApp actualizado.
 
 NOTA DE VERIFICACIÓN
 La publicación del tag y la versión objetivo en Mongo no prueban por sí solas
