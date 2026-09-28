@@ -1,6 +1,6 @@
 /*script:app_asisto*/
 /*version: 4.04.77 19/09/2026   */
-const ASISTO_SCRIPT_VERSION = '4.04.86';
+const ASISTO_SCRIPT_VERSION = '4.04.87';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -1964,6 +1964,7 @@ function applyTenantConfig(conf) {
     conf.manager_ai_enabled ?? conf.manager_ia_habilitada ?? conf.wweb_ai_manager_enabled,
     manager_ai_enabled
   );
+  manager_ai_greeting = asString(conf.manager_ai_greeting, manager_ai_greeting);
   manager_document_send_enabled = parseBoolLike(
     conf.manager_document_send_enabled ?? conf.manager_envio_documentos_habilitado,
     manager_document_send_enabled
@@ -4112,6 +4113,7 @@ var habilitar_odbc_manager = parseBoolLike(
 // Herramientas IA de Manager para mensajes entrantes. Permanecen apagadas salvo
 // habilitación expresa por dominio; no modifican el circuito saliente existente.
 var manager_ai_enabled = parseBoolLike(process.env.MANAGER_AI_ENABLED, false);
+var manager_ai_greeting = String(process.env.MANAGER_AI_GREETING || '');
 var manager_document_send_enabled = parseBoolLike(process.env.MANAGER_DOCUMENT_SEND_ENABLED, false);
 var manager_folder = String(process.env.MANAGER_FOLDER || '');
 var manager_ai_bridge_folder = String(process.env.MANAGER_AI_BRIDGE_FOLDER || path.join(__dirname, 'manager-ai'));
@@ -11490,6 +11492,7 @@ telefonoFrom = telefonoFromApi;
         text: incomingBotPayload?.mensaje || message?.body || '',
         config: {
           manager_ai_enabled,
+          manager_ai_greeting,
           manager_document_send_enabled,
           manager_folder,
           manager_ai_bridge_folder,

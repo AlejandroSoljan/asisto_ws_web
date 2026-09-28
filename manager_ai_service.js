@@ -34,6 +34,11 @@ function parseDocumentIntent(text) {
   };
 }
 
+function isStandaloneGreeting(text) {
+  const normalized = String(text || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').trim();
+  return /^(hola|buen dia|buenas tardes|buenas noches|buenas)$/.test(normalized);
+}
+
 function execPowerShell(script, args, timeoutMs = 30000) {
   return new Promise((resolve, reject) => {
     const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, ...args], {
@@ -99,6 +104,11 @@ async function handleManagerDocumentRequest(options) {
     pendingDocumentRequests.delete(pendingKey);
   }
   const activePending = pendingDocumentRequests.get(pendingKey);
+  const configuredGreeting = String(cfg.manager_ai_greeting || '').trim();
+  if (!activePending && configuredGreeting && isStandaloneGreeting(options.text)) {
+    await options.sendText(configuredGreeting);
+    return { handled: true, reason: 'configured_greeting' };
+  }
   let intent = parseDocumentIntent(options.text);
   let clientQuery = '';
   if (!intent && activePending) {
@@ -171,4 +181,4 @@ async function handleManagerDocumentRequest(options) {
   return { handled: true, reason: 'document_sent', kind: intent.kind, id };
 }
 
-module.exports = { bool, parseDocumentIntent, selectDocuments, handleManagerDocumentRequest, pendingDocumentRequests };
+module.exports = { bool, parseDocumentIntent, isStandaloneGreeting, selectDocuments, handleManagerDocumentRequest, pendingDocumentRequests };

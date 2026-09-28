@@ -218,5 +218,12 @@ ORDER BY c.fecha DESC, c.nro DESC
 } finally { if ($connection.State -eq 'Open') { $connection.Close() } }
 $ordered = Select-ClientMatches $rows $ClientQuery
 if (-not $ordered.Count) { [pscustomobject]@{ found=$false; matches=0 } | ConvertTo-Json -Compress; exit 0 }
+if (-not $ClientQuery) {
+  $selectedByPurchase = @($ordered | Where-Object { [string]$_.client.seleccion -eq 'ultima_compra_ven_remitos_cabecera' } | Select-Object -First 1)
+  if ($selectedByPurchase.Count) {
+    $selected = $selectedByPurchase[0]
+    $ordered = @($selected) + @($ordered | Where-Object { $_ -ne $selected })
+  }
+}
 $resolvedByLatestPurchase = (-not $ClientQuery -and [string]$ordered[0].client.seleccion -eq 'ultima_compra_ven_remitos_cabecera')
 [pscustomobject]@{ found=$true; ambiguous=($ordered.Count -gt 1 -and -not $resolvedByLatestPurchase); matches=$ordered.Count; resolvedByLatestPurchase=$resolvedByLatestPurchase; client=$ordered[0].client } | ConvertTo-Json -Depth 8 -Compress

@@ -63,6 +63,18 @@ async function testAmbiguousClientContinuation() {
   assert.strictEqual(pendingDocumentRequests.size, 0);
 }
 
-testAmbiguousClientContinuation()
+async function testConfiguredGreeting() {
+  pendingDocumentRequests.clear();
+  const sentTexts = [];
+  const result = await handleManagerDocumentRequest({
+    tenantId: 'SDG', phone: '5493462674128', text: 'Hola',
+    config: { manager_ai_enabled: true, manager_ai_greeting: '¡Hola! Soy Asisto, el asistente de Supermercado Digital. ¿En qué puedo ayudarte?' },
+    sendText: async text => sentTexts.push(text)
+  });
+  assert.strictEqual(result.reason, 'configured_greeting');
+  assert.deepStrictEqual(sentTexts, ['¡Hola! Soy Asisto, el asistente de Supermercado Digital. ¿En qué puedo ayudarte?']);
+}
+
+Promise.all([testAmbiguousClientContinuation(), testConfiguredGreeting()])
   .then(() => console.log('manager_ai_service tests: ok'))
   .catch(error => { console.error(error); process.exitCode = 1; });
