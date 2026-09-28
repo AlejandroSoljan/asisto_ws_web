@@ -3,6 +3,7 @@ npm-debug.log*
 logs/
 auth/
 browser-cache/
+.wwebjs_cache/
 runtime/
 *.log
 *.bat
