@@ -19,6 +19,7 @@ assert.deepStrictEqual(parseDocumentIntent('Resumen de cuenta'), {
 assert.strictEqual(parseDocumentIntent('Hola, buen día'), null);
 assert.deepStrictEqual(parseOrderQueryIntent('¿A qué hora llega mi pedido?'), { detail: false, delivery: true, history: false, latestOnly: true });
 assert.strictEqual(parseOrderQueryIntent('Quiero hacer un pedido'), null);
+assert.strictEqual(parseOrderQueryIntent('¿Cuál es la dirección del supermercado?'), null);
 assert.match(formatManagerOrders({ orders: [{ ptodeventa: '0001', numero: '25', fecha: '28/09/2026', total: 100, entrega: { direccion: 'Mitre 1' }, productos: [] }] }, { latestOnly: true, delivery: true, detail: false }), /Dirección: Mitre 1/);
 
 const lookup = { client: { finanzas: { facturas: [

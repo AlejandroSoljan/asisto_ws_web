@@ -49,7 +49,7 @@ function parseOrderQueryIntent(text) {
   const detail = /\b(producto|productos|detalle|contenia|compre|cantidad|cantidades)\b/.test(normalized);
   const delivery = /\b(horario|hora|cuando|entrega|direccion|domicilio|llega|llegan|estado)\b/.test(normalized);
   const history = /\b(ultimo|ultimos|historial|anteriores|pedidos|compras)\b/.test(normalized);
-  if (!order && !detail && !delivery) return null;
+  if (!order) return null;
   return { detail, delivery, history, latestOnly: !history || /\b(ultimo pedido|pedido actual|mi pedido)\b/.test(normalized) };
 }
 
