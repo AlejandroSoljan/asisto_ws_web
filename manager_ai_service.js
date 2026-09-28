@@ -30,7 +30,11 @@ function parseDocumentIntent(text) {
   const numberMatch = normalized.match(/\b(?:n(?:ro|umero)?\.?\s*)?(\d{1,5})\s*[-/]\s*(\d{1,10})\b/i);
   const plainNumber = !numberMatch ? normalized.match(/\b(?:n(?:ro|umero)?\.?\s*)(\d{3,10})\b/i) : null;
   const number = numberMatch ? numberMatch[2] : (plainNumber ? plainNumber[1] : '');
-  if (!asksToSend && kind !== 'statement' && !number) return null;
+  // En una conversación es habitual continuar con "y la última factura" o
+  // simplemente "la última factura". Es una solicitud inequívoca aunque no
+  // repita el verbo usado en el mensaje anterior.
+  const asksForLatest = /\b(?:la|el|mi)?\s*(?:ultima|ultimo|mas reciente|reciente)\s+(?:factura|recibo|comprobante)\b/.test(normalized);
+  if (!asksToSend && kind !== 'statement' && !number && !asksForLatest) return null;
   return {
     kind,
     pointOfSale: numberMatch ? numberMatch[1] : '',

@@ -7,6 +7,12 @@ const { parseDocumentIntent, parseOrderQueryIntent, formatManagerOrders, selectD
 assert.deepStrictEqual(parseDocumentIntent('Me mandás la última factura?'), {
   kind: 'sale', pointOfSale: '', number: '', latest: true
 });
+assert.deepStrictEqual(parseDocumentIntent('Y la última factura'), {
+  kind: 'sale', pointOfSale: '', number: '', latest: true
+});
+assert.deepStrictEqual(parseDocumentIntent('La última factura'), {
+  kind: 'sale', pointOfSale: '', number: '', latest: true
+});
 assert.deepStrictEqual(parseDocumentIntent('Necesito el recibo 0005-12345'), {
   kind: 'receipt', pointOfSale: '0005', number: '12345', latest: false
 });
