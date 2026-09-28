@@ -1,6 +1,6 @@
 /*script:app_asisto*/
 /*version: 4.04.77 19/09/2026   */
-const ASISTO_SCRIPT_VERSION = '4.04.81';
+const ASISTO_SCRIPT_VERSION = '4.04.82';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -84,6 +84,7 @@ const mime = require('mime-types');
 const fs = require('fs');
 const path = require('path');
 const { spawn, fork } = require('child_process');
+const { handleManagerDocumentRequest } = require('./manager_ai_service');
 // Multi-sesión se ejecuta con procesos Node hijos, no Worker Threads.
 // Mantener estos valores evita tocar el resto de la lógica que distingue supervisor/hijo.
 const isMainThread = true;
@@ -1959,6 +1960,20 @@ function applyTenantConfig(conf) {
     seg_hasta2
   );
   if (conf.dsn !== undefined) dsn = String(conf.dsn);
+  manager_ai_enabled = parseBoolLike(
+    conf.manager_ai_enabled ?? conf.manager_ia_habilitada ?? conf.wweb_ai_manager_enabled,
+    manager_ai_enabled
+  );
+  manager_document_send_enabled = parseBoolLike(
+    conf.manager_document_send_enabled ?? conf.manager_envio_documentos_habilitado,
+    manager_document_send_enabled
+  );
+  manager_folder = asString(conf.manager_folder ?? conf.carpeta_manager, manager_folder);
+  manager_ai_bridge_folder = asString(conf.manager_ai_bridge_folder ?? conf.manager_herramientas_carpeta, manager_ai_bridge_folder);
+  manager_document_lookup_days = Math.max(1, Math.min(1095, asNumber(
+    conf.manager_document_lookup_days ?? conf.manager_documentos_dias_consulta,
+    manager_document_lookup_days
+  )));
   seg_msg = asNumber(conf.seg_msg, seg_msg);
   seg_tele = asNumber(conf.seg_tele, seg_tele);
   if (conf.api !== undefined) api = String(conf.api);
@@ -4093,6 +4108,14 @@ var habilitar_odbc_manager = parseBoolLike(
   process.env.HABILITAR_ODBC_MANAGER ?? process.env.ODBC_MANAGER_HABILITADO ?? process.env.HABILITAR_MANAGER_LOCAL,
   true
 );
+
+// Herramientas IA de Manager para mensajes entrantes. Permanecen apagadas salvo
+// habilitación expresa por dominio; no modifican el circuito saliente existente.
+var manager_ai_enabled = parseBoolLike(process.env.MANAGER_AI_ENABLED, false);
+var manager_document_send_enabled = parseBoolLike(process.env.MANAGER_DOCUMENT_SEND_ENABLED, false);
+var manager_folder = String(process.env.MANAGER_FOLDER || '');
+var manager_ai_bridge_folder = String(process.env.MANAGER_AI_BRIDGE_FOLDER || path.join(__dirname, 'manager-ai'));
+var manager_document_lookup_days = Math.max(1, Math.min(1095, Number(process.env.MANAGER_DOCUMENT_LOOKUP_DAYS || 365) || 365));
 
 
 var consulta_mensajes_respetar_horarios = parseBoolLike(
@@ -9741,6 +9764,9 @@ function getRuntimeConfigSnapshot() {
     habilitar_mensajes_info: habilitar_mensajes_info === true,
     es_mensajes_limite_diario: Number(es_mensajes_limite_diario) || 0,
     habilitar_odbc_manager: habilitar_odbc_manager === true,
+    manager_ai_enabled: manager_ai_enabled === true,
+    manager_document_send_enabled: manager_document_send_enabled === true,
+    manager_folder_configurada: !!String(manager_folder || '').trim(),
     api2: String(api2 || ''),
     api3: String(api3 || ''),
     key_configurada: !!key,
@@ -11454,6 +11480,40 @@ EscribirLog(message.from +' '+message.to+' '+message.type+' '+message.body ,"eve
       return
     }
 telefonoFrom = telefonoFromApi;
+
+    // Herramienta local de documentos Manager. Si reconoce un pedido, lo
+    // resuelve por ODBC y no lo duplica enviándolo además al bot general.
+    try {
+      const managerResult = await handleManagerDocumentRequest({
+        tenantId,
+        phone: telefonoFrom,
+        text: incomingBotPayload?.mensaje || message?.body || '',
+        config: {
+          manager_ai_enabled,
+          manager_document_send_enabled,
+          manager_folder,
+          manager_ai_bridge_folder,
+          manager_document_lookup_days,
+          dsn
+        },
+        sendText: text => safeSendMessage(message.from, text),
+        sendDocument: media => safeSend(message.from, new MessageMedia(media.mimetype, media.data, media.filename))
+      });
+      if (managerResult?.handled) {
+        const managerLog = '[MANAGER_AI] procesado tenant=' + String(tenantId || '') +
+          ' from=' + String(telefonoFrom || '') + ' result=' + String(managerResult.reason || 'handled');
+        try { console.log(managerLog); } catch {}
+        try { EscribirLog(managerLog, 'event'); } catch {}
+        return;
+      }
+    } catch (managerError) {
+      const managerLog = '[MANAGER_AI] error tenant=' + String(tenantId || '') +
+        ' from=' + String(telefonoFrom || '') + ' error=' + String(managerError?.message || managerError);
+      try { console.log(managerLog); } catch {}
+      try { EscribirLog(managerLog, 'error'); } catch {}
+      await safeSendMessage(message.from, 'No pude recuperar el documento en este momento. Ya dejé registrado el inconveniente para revisarlo.');
+      return;
+    }
     try {
       await logMessageStat('in', telefonoFrom, {
         body: incomingBotPayload.mensaje || '',
