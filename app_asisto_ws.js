@@ -1,6 +1,6 @@
 /*script:app_asisto*/
 /*version: 4.04.77 19/09/2026   */
-const ASISTO_SCRIPT_VERSION = '4.04.83';
+const ASISTO_SCRIPT_VERSION = '4.04.84';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -11564,6 +11564,13 @@ telefonoFrom = telefonoFromApi;
       const botLogicMode = await getWwebBotLogicModeForPhone(telefonoTo);
       let url = getIncomingApiUrlForLogicMode(botLogicMode);
 
+      // El dominio explícito pertenece solamente al gateway interno de Asisto.
+      // Los clientes que usan la API externa (Fleming, Chiarotto, etc.) conservan
+      // exactamente el mismo payload histórico.
+      if (botLogicMode === 'chatgpt' && tenantId) {
+        jsonTexto.TenantId = String(tenantId).trim();
+      }
+
       console.log('[BOT] logic_mode=' + botLogicMode + ' url=' + url);
       try { EscribirLog('[BOT] logic_mode=' + botLogicMode + ' url=' + url, 'event'); } catch {}
 
@@ -11580,7 +11587,12 @@ telefonoFrom = telefonoFromApi;
            maxContentLength: 20 * 1024 * 1024,
            maxBodyLength: 20 * 1024 * 1024,
            validateStatus: () => true,
-           headers: { "Content-Type": "application/json; charset=UTF-8" }
+           headers: {
+             "Content-Type": "application/json; charset=UTF-8",
+             ...(botLogicMode === 'chatgpt' && tenantId
+               ? { "X-Tenant-Id": String(tenantId).trim() }
+               : {})
+           }
          });
 
          const raw = typeof resp.data === 'string' ? resp.data : '';
