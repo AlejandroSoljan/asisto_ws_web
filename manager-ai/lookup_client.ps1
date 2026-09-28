@@ -2,7 +2,8 @@ param(
   [Parameter(Mandatory=$true)][string]$Phone,
   [Parameter(Mandatory=$false)][string]$FromDate,
   [Parameter(Mandatory=$false)][string]$ToDate,
-  [Parameter(Mandatory=$false)][string]$DsnName
+  [Parameter(Mandatory=$false)][string]$DsnName,
+  [Parameter(Mandatory=$false)][string]$ClientQuery
 )
 $ErrorActionPreference = 'Stop'
 
@@ -15,6 +16,26 @@ catch { throw 'invalid_date_range' }
 if ($fromValue -gt $toValue -or ($toValue - $fromValue).TotalDays -gt 1095) { throw 'invalid_date_range' }
 
 function Get-Digits([string]$Value) { return ($Value -replace '[^0-9]', '') }
+function Get-NormalizedText([string]$Value) {
+  if (-not $Value) { return '' }
+  $formD = $Value.Normalize([Text.NormalizationForm]::FormD)
+  $chars = $formD.ToCharArray() | Where-Object { [Globalization.CharUnicodeInfo]::GetUnicodeCategory($_) -ne [Globalization.UnicodeCategory]::NonSpacingMark }
+  return (-join $chars).ToLowerInvariant().Trim()
+}
+function Select-ClientMatches([object[]]$Matches, [string]$Query) {
+  $ordered = @($Matches | Sort-Object score -Descending)
+  if (-not $Query) { return $ordered }
+  $queryText = Get-NormalizedText $Query
+  $queryDigits = Get-Digits $Query
+  return @($ordered | Where-Object {
+    $client = $_.client
+    $reason = Get-NormalizedText ([string]$client.razonSocial)
+    $cuit = Get-Digits ([string]$client.cuit)
+    $code = Get-NormalizedText ([string]$client.codigo)
+    ($queryText -and ($reason.Contains($queryText) -or $queryText.Contains($reason) -or $code -eq $queryText)) -or
+      ($queryDigits -and $queryDigits.Length -ge 6 -and $cuit -eq $queryDigits)
+  })
+}
 function Get-Variants([string]$Value) {
   $raw = Get-Digits $Value
   $items = New-Object 'System.Collections.Generic.HashSet[string]'
@@ -109,7 +130,7 @@ ORDER BY codigo
     }
   }
   $reader.Close()
-  $ordered = @($rows | Sort-Object score -Descending)
+  $ordered = Select-ClientMatches $rows $ClientQuery
   if ($ordered.Count) {
     $clientCode = [string]$ordered[0].client.codigo
     $facturas = Invoke-Rows @'
@@ -175,6 +196,6 @@ ORDER BY c.fecha DESC, c.nro DESC
     }
   }
 } finally { if ($connection.State -eq 'Open') { $connection.Close() } }
-$ordered = @($rows | Sort-Object score -Descending)
+$ordered = Select-ClientMatches $rows $ClientQuery
 if (-not $ordered.Count) { [pscustomobject]@{ found=$false; matches=0 } | ConvertTo-Json -Compress; exit 0 }
 [pscustomobject]@{ found=$true; ambiguous=($ordered.Count -gt 1); matches=$ordered.Count; client=$ordered[0].client } | ConvertTo-Json -Depth 8 -Compress

@@ -5,6 +5,9 @@ const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 
+const pendingDocumentRequests = new Map();
+const PENDING_DOCUMENT_TTL_MS = 10 * 60 * 1000;
+
 function bool(value, fallback = false) {
   if (value === undefined || value === null || value === '') return fallback;
   if (typeof value === 'boolean') return value;
@@ -89,8 +92,21 @@ async function handleManagerDocumentRequest(options) {
   const cfg = options.config || {};
   const enabled = bool(cfg.manager_ai_enabled ?? cfg.manager_ia_habilitada ?? cfg.wweb_ai_manager_enabled, false);
   if (!enabled) return { handled: false, reason: 'disabled' };
-  const intent = parseDocumentIntent(options.text);
+  const pendingKey = `${String(options.tenantId || '').trim()}:${String(options.phone || '').replace(/\D/g, '')}`;
+  const now = Number(options.now || Date.now());
+  const savedPending = pendingDocumentRequests.get(pendingKey);
+  if (savedPending && now - savedPending.createdAt > PENDING_DOCUMENT_TTL_MS) {
+    pendingDocumentRequests.delete(pendingKey);
+  }
+  const activePending = pendingDocumentRequests.get(pendingKey);
+  let intent = parseDocumentIntent(options.text);
+  let clientQuery = '';
+  if (!intent && activePending) {
+    intent = activePending.intent;
+    clientQuery = String(options.text || '').trim();
+  }
   if (!intent) return { handled: false, reason: 'not_document_intent' };
+  if (!clientQuery) pendingDocumentRequests.delete(pendingKey);
   if (!bool(cfg.manager_document_send_enabled ?? cfg.manager_envio_documentos_habilitado, false)) {
     await options.sendText('Entendí que necesitás un documento, pero el envío automático todavía no está habilitado.');
     return { handled: true, reason: 'send_disabled' };
@@ -109,16 +125,26 @@ async function handleManagerDocumentRequest(options) {
   const until = new Date();
   const since = new Date(until.getTime() - days * 86400000);
   const ymd = value => value.toISOString().slice(0, 10);
-  const rawLookup = await execPowerShell(lookupScript, ['-Phone', String(options.phone), '-FromDate', ymd(since), '-ToDate', ymd(until), '-DsnName', dsn], 30000);
+  const runPowerShell = typeof options.execPowerShell === 'function' ? options.execPowerShell : execPowerShell;
+  const lookupArgs = ['-Phone', String(options.phone), '-FromDate', ymd(since), '-ToDate', ymd(until), '-DsnName', dsn];
+  if (clientQuery) lookupArgs.push('-ClientQuery', clientQuery);
+  const rawLookup = await runPowerShell(lookupScript, lookupArgs, 30000);
   const lookup = JSON.parse(rawLookup || '{}');
   if (!lookup.found) {
+    if (clientQuery) {
+      pendingDocumentRequests.set(pendingKey, { intent, createdAt: now });
+      await options.sendText('No encontré esa razón social o CUIT entre los clientes asociados a tu teléfono. Revisá el dato e intentá nuevamente.');
+      return { handled: true, reason: 'client_selection_not_found' };
+    }
     await options.sendText('No encontré tu teléfono asociado a un cliente de Manager. Si querés, indicame tu razón social o CUIT para que lo revise una persona.');
     return { handled: true, reason: 'client_not_found' };
   }
   if (lookup.ambiguous) {
+    pendingDocumentRequests.set(pendingKey, { intent, createdAt: now });
     await options.sendText('Encontré más de un cliente asociado a este teléfono. Para evitar enviarte un documento incorrecto, indicame tu razón social o CUIT.');
     return { handled: true, reason: 'ambiguous_client' };
   }
+  pendingDocumentRequests.delete(pendingKey);
   const matches = selectDocuments(intent, lookup);
   if (!matches.length) {
     await options.sendText(`No encontré ${intent.kind === 'receipt' ? 'ese recibo' : 'esa factura'} en el período consultado.`);
@@ -135,7 +161,7 @@ async function handleManagerDocumentRequest(options) {
   const args = ['-Kind', intent.kind, '-DsnName', dsn, '-ManagerFolder', managerFolder, '-Output', output,
     '-PointOfSale', String(row.ptodeventa || ''), '-Number', String(intent.kind === 'receipt' ? row.nro : row.nrotransaccion || '')];
   if (intent.kind === 'sale') args.push('-Transaction', String(row.transaccion || ''), '-VoucherType', String(row.tipocomprobante || ''));
-  await execPowerShell(generateScript, args, 90000);
+  await runPowerShell(generateScript, args, 90000);
   try {
     const data = fs.readFileSync(output).toString('base64');
     await options.sendDocument({ mimetype: 'application/pdf', data, filename: `${intent.kind === 'receipt' ? 'Recibo' : 'Factura'}_${id}.pdf` });
@@ -145,4 +171,4 @@ async function handleManagerDocumentRequest(options) {
   return { handled: true, reason: 'document_sent', kind: intent.kind, id };
 }
 
-module.exports = { bool, parseDocumentIntent, selectDocuments, handleManagerDocumentRequest };
+module.exports = { bool, parseDocumentIntent, selectDocuments, handleManagerDocumentRequest, pendingDocumentRequests };
