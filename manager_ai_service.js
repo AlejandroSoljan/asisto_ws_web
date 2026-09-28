@@ -114,6 +114,11 @@ async function handleManagerDocumentRequest(options) {
   if (!intent && activePending) {
     intent = activePending.intent;
     clientQuery = String(options.text || '').trim();
+    const optionNumber = Number(clientQuery);
+    if (Number.isInteger(optionNumber) && optionNumber > 0 && Array.isArray(activePending.candidates)) {
+      const selectedCandidate = activePending.candidates[optionNumber - 1];
+      if (selectedCandidate) clientQuery = String(selectedCandidate.razonSocial || selectedCandidate.cuit || selectedCandidate.codigo || clientQuery);
+    }
   }
   if (!intent) return { handled: false, reason: 'not_document_intent' };
   if (!clientQuery) pendingDocumentRequests.delete(pendingKey);
@@ -143,15 +148,18 @@ async function handleManagerDocumentRequest(options) {
   if (!lookup.found) {
     if (clientQuery) {
       pendingDocumentRequests.set(pendingKey, { intent, createdAt: now });
-      await options.sendText('No encontré esa razón social o CUIT entre los clientes asociados a tu teléfono. Revisá el dato e intentá nuevamente.');
+      await options.sendText('No encontré ese cliente. Podés responder con la razón social, CUIT o documento, y conservaré tu pedido de factura o recibo pendiente.');
       return { handled: true, reason: 'client_selection_not_found' };
     }
     await options.sendText('No encontré tu teléfono asociado a un cliente de Manager. Si querés, indicame tu razón social o CUIT para que lo revise una persona.');
     return { handled: true, reason: 'client_not_found' };
   }
   if (lookup.ambiguous) {
-    pendingDocumentRequests.set(pendingKey, { intent, createdAt: now });
-    await options.sendText('Encontré más de un cliente asociado a este teléfono. Para evitar enviarte un documento incorrecto, indicame tu razón social o CUIT.');
+    pendingDocumentRequests.set(pendingKey, { intent, candidates: lookup.candidates || [], createdAt: now });
+    const optionsList = Array.isArray(lookup.candidates) ? lookup.candidates
+      .map((candidate, index) => `${index + 1}. ${candidate.razonSocial || candidate.codigo}${candidate.cuit ? ` · CUIT ${candidate.cuit}` : ''}`)
+      .join('\n') : '';
+    await options.sendText(`Encontré más de un cliente asociado a este teléfono. Elegí una opción o indicame razón social, CUIT o documento. Tu solicitud de ${intent.kind === 'receipt' ? 'recibo' : 'factura'} queda pendiente.${optionsList ? `\n${optionsList}` : ''}`);
     return { handled: true, reason: 'ambiguous_client' };
   }
   pendingDocumentRequests.delete(pendingKey);

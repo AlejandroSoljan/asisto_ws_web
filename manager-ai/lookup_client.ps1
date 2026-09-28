@@ -107,7 +107,6 @@ SELECT codigo, razon_social, nombre, apellido, cuit, direccion,
        telefono, tel_celular, tel_particular, email, saldo_cc,
        limite_credito, activo_sn, observacion
 FROM DBA.clientes
-WHERE tel_celular IS NOT NULL AND LENGTH(TRIM(tel_celular)) > 0
 ORDER BY codigo
 '@
   $reader = $command.ExecuteReader()
@@ -117,10 +116,21 @@ ORDER BY codigo
     $stored = Get-Variants $cell
     $score = 0
     foreach ($left in $wanted) { foreach ($right in $stored) { if ($left -eq $right -and $left.Length -gt $score) { $score = $left.Length } } }
-    if ($score -gt 0) {
-      $value = { param($index) if ($reader.IsDBNull($index)) { return $null }; return $reader.GetValue($index) }
-      $reason = & $value 1
-      if (-not $reason) { $reason = ((& $value 3), (& $value 2) -join ' ').Trim() }
+    $value = { param($index) if ($reader.IsDBNull($index)) { return $null }; return $reader.GetValue($index) }
+    $reason = & $value 1
+    if (-not $reason) { $reason = ((& $value 3), (& $value 2) -join ' ').Trim() }
+    $queryText = Get-NormalizedText $ClientQuery
+    $queryDigits = Get-Digits $ClientQuery
+    $reasonText = Get-NormalizedText ([string]$reason)
+    $clientCuit = Get-Digits ([string](& $value 4))
+    $clientCode = Get-NormalizedText ([string](& $value 0))
+    $matchesExplicitQuery = $ClientQuery -and (
+      ($queryText -and ($reasonText.Contains($queryText) -or $queryText.Contains($reasonText) -or $clientCode -eq $queryText)) -or
+      ($queryDigits -and $queryDigits.Length -ge 6 -and $clientCuit -eq $queryDigits)
+    )
+    # Una aclaración explícita puede identificar un cliente existente aunque
+    # el teléfono no esté guardado en esa misma ficha.
+    if ($score -gt 0 -or $matchesExplicitQuery) {
       $rows += [pscustomobject]@{ score=$score; client=[ordered]@{
         codigo=& $value 0; razonSocial=$reason; cuit=& $value 4; direccion=& $value 5
         telefono=& $value 6; telCelular=$cell; telParticular=& $value 8; email=& $value 9
@@ -134,14 +144,13 @@ ORDER BY codigo
   # adjuntar la fecha de su última compra. La regla de negocio que decide
   # usar este dato se configura en el comportamiento del dominio.
   if (-not $ClientQuery -and $rows.Count -gt 1) {
+    $placeholders = (@($rows | ForEach-Object { '?' }) -join ',')
+    $codes = @($rows | ForEach-Object { [string]$_.client.codigo })
+    $latestPurchases = Invoke-Rows ("SELECT cliente, MAX(fecha) AS ultimaCompra FROM DBA.ven_remitos_cabecera WHERE cliente IN ($placeholders) GROUP BY cliente") $codes
     foreach ($match in $rows) {
-      $latestPurchase = Invoke-Rows @'
-SELECT TOP 1 fecha
-FROM DBA.ven_remitos_cabecera
-WHERE cliente = ?
-ORDER BY fecha DESC, nrotransaccion DESC
-'@ @([string]$match.client.codigo)
-      $match.client['ultimaCompra'] = if ($latestPurchase.Count) { $latestPurchase[0].fecha } else { $null }
+      $code = ([string]$match.client.codigo).Trim()
+      $purchase = @($latestPurchases | Where-Object { ([string]$_.cliente).Trim() -eq $code } | Select-Object -First 1)
+      $match.client['ultimaCompra'] = if ($purchase.Count) { $purchase[0].ultimaCompra } else { $null }
     }
     $withPurchase = @($rows | Where-Object { $_.client.ultimaCompra } | Sort-Object { [datetime]$_.client.ultimaCompra } -Descending)
     if ($withPurchase.Count) {
@@ -226,4 +235,5 @@ if (-not $ClientQuery) {
   }
 }
 $resolvedByLatestPurchase = (-not $ClientQuery -and [string]$ordered[0].client.seleccion -eq 'ultima_compra_ven_remitos_cabecera')
-[pscustomobject]@{ found=$true; ambiguous=($ordered.Count -gt 1 -and -not $resolvedByLatestPurchase); matches=$ordered.Count; resolvedByLatestPurchase=$resolvedByLatestPurchase; client=$ordered[0].client } | ConvertTo-Json -Depth 8 -Compress
+$candidates = @($ordered | Select-Object -First 8 | ForEach-Object { [ordered]@{ codigo=$_.client.codigo; razonSocial=$_.client.razonSocial; cuit=$_.client.cuit; ultimaCompra=$_.client.ultimaCompra } })
+[pscustomobject]@{ found=$true; ambiguous=($ordered.Count -gt 1 -and -not $resolvedByLatestPurchase); matches=$ordered.Count; resolvedByLatestPurchase=$resolvedByLatestPurchase; candidates=$candidates; client=$ordered[0].client } | ConvertTo-Json -Depth 8 -Compress

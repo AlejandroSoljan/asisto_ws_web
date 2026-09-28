@@ -39,7 +39,7 @@ async function testAmbiguousClientContinuation() {
     execPowerShell: async (script, args) => {
       if (/lookup_client\.ps1$/i.test(script)) {
         lookupCount += 1;
-        if (lookupCount === 1) return JSON.stringify({ found: true, ambiguous: true, matches: 2, client: {} });
+        if (lookupCount === 1) return JSON.stringify({ found: true, ambiguous: true, matches: 2, candidates: [{ razonSocial: 'Alejandro Soljan' }], client: {} });
         assert.deepStrictEqual(args.slice(-2), ['-ClientQuery', 'Alejandro Soljan']);
         return JSON.stringify({
           found: true,
@@ -63,6 +63,28 @@ async function testAmbiguousClientContinuation() {
   assert.strictEqual(pendingDocumentRequests.size, 0);
 }
 
+async function testNumberedClientSelection() {
+  pendingDocumentRequests.clear();
+  let lookupCount = 0;
+  const base = {
+    tenantId: 'SDG', phone: '5493462674128',
+    config: { manager_ai_enabled: true, manager_document_send_enabled: true, manager_folder: 'C:\\Manager\\Exe', dsn: 'msm_manager', manager_ai_bridge_folder: require('path').join(__dirname, '..', 'manager-ai') },
+    sendText: async () => {}, sendDocument: async () => {},
+    execPowerShell: async (script, args) => {
+      if (/lookup_client\.ps1$/i.test(script)) {
+        lookupCount += 1;
+        if (lookupCount === 1) return JSON.stringify({ found: true, ambiguous: true, matches: 2, candidates: [{ razonSocial: 'Alejandro Soljan' }], client: {} });
+        assert.deepStrictEqual(args.slice(-2), ['-ClientQuery', 'Alejandro Soljan']);
+        return JSON.stringify({ found: true, ambiguous: false, matches: 1, client: { finanzas: { facturas: [] } } });
+      }
+      return '';
+    }
+  };
+  await handleManagerDocumentRequest({ ...base, text: 'Pasame la última factura' });
+  const result = await handleManagerDocumentRequest({ ...base, text: '1' });
+  assert.strictEqual(result.reason, 'document_not_found');
+}
+
 async function testConfiguredGreeting() {
   pendingDocumentRequests.clear();
   const sentTexts = [];
@@ -75,6 +97,8 @@ async function testConfiguredGreeting() {
   assert.deepStrictEqual(sentTexts, ['¡Hola! Soy Asisto, el asistente de Supermercado Digital. ¿En qué puedo ayudarte?']);
 }
 
-Promise.all([testAmbiguousClientContinuation(), testConfiguredGreeting()])
+testAmbiguousClientContinuation()
+  .then(testConfiguredGreeting)
+  .then(testNumberedClientSelection)
   .then(() => console.log('manager_ai_service tests: ok'))
   .catch(error => { console.error(error); process.exitCode = 1; });
