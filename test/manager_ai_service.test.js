@@ -181,6 +181,38 @@ async function testDocumentSelectionContinuation() {
   assert.strictEqual(sentDocuments[0].filename, 'Factura_0001-00012944.pdf');
 }
 
+async function testMissingPhoneKeepsDocumentRequest() {
+  pendingDocumentRequests.clear();
+  const sentTexts = [];
+  const sentDocuments = [];
+  let lookupCount = 0;
+  const base = {
+    tenantId: 'SDG', phone: '5493462688075',
+    config: { manager_ai_enabled: true, manager_document_send_enabled: true, manager_folder: 'C:\\Manager\\Exe', dsn: 'msm_manager', manager_ai_bridge_folder: require('path').join(__dirname, '..', 'manager-ai') },
+    sendText: async text => sentTexts.push(text), sendDocument: async doc => sentDocuments.push(doc),
+    execPowerShell: async (script, args) => {
+      if (/lookup_client\.ps1$/i.test(script)) {
+        lookupCount += 1;
+        if (lookupCount === 1) return JSON.stringify({ found: false, matches: 0 });
+        assert.deepStrictEqual(args.slice(-2), ['-ClientQuery', 'Norali brutto']);
+        return JSON.stringify({ found: true, ambiguous: false, matches: 1, client: { finanzas: { facturas: [{ ptodeventa: '0001', nrotransaccion: '12944', transaccion: 'PD', tipocomprobante: 'B' }] } } });
+      }
+      fs.writeFileSync(args[args.indexOf('-Output') + 1], Buffer.from('pdf'));
+      return '';
+    }
+  };
+
+  const first = await handleManagerDocumentRequest({ ...base, text: 'Hola, me pasás la última factura o el alias?' });
+  assert.strictEqual(first.reason, 'client_not_found');
+  assert.strictEqual(pendingDocumentRequests.size, 1);
+
+  const second = await handleManagerDocumentRequest({ ...base, text: 'Norali brutto' });
+  assert.strictEqual(second.reason, 'document_sent');
+  assert.strictEqual(sentDocuments.length, 1);
+  assert.strictEqual(sentDocuments[0].filename, 'Factura_0001-12944.pdf');
+  assert.strictEqual(pendingDocumentRequests.size, 0);
+}
+
 async function testBehaviorClassifiesFreeLanguage() {
   pendingDocumentRequests.clear();
   const sentDocuments = [];
@@ -230,6 +262,7 @@ async function testRequestedStatementPeriod() {
 testAmbiguousClientContinuation()
   .then(testConfiguredGreeting)
   .then(testNumberedClientSelection)
+  .then(testMissingPhoneKeepsDocumentRequest)
   .then(testAccountStatement)
   .then(testDocumentSelectionContinuation)
   .then(testBehaviorClassifiesFreeLanguage)

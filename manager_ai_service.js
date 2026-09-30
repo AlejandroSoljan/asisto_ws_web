@@ -297,6 +297,7 @@ async function handleManagerDocumentRequest(options) {
       await sendManagerText('No encontré ese cliente. Podés responder con la razón social, CUIT o documento, y conservaré tu pedido pendiente.');
       return { handled: true, reason: 'client_selection_not_found' };
     }
+    pendingDocumentRequests.set(pendingKey, { stage: 'client_selection', intent, createdAt: now });
     await sendManagerText('No encontré tu teléfono asociado a un cliente de Manager. Si querés, indicame tu razón social o CUIT para que lo revise una persona.');
     return { handled: true, reason: 'client_not_found' };
   }
