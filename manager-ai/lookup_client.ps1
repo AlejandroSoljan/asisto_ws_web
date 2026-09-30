@@ -113,9 +113,9 @@ try {
   $wanted = @(Get-Variants $Phone)
   if (-not $wanted.Count) { throw 'invalid_phone' }
   if ($Diagnostics) {
-    $databaseRows = Invoke-Rows "SELECT DB_NAME() AS databaseName FROM dummy" @()
-    $clientCountRows = Invoke-Rows "SELECT COUNT(*) AS clientCount FROM DBA.clientes" @()
-    $exactRows = Invoke-Rows "SELECT codigo, razon_social, tel_celular FROM DBA.clientes WHERE TRIM(tel_celular) = ?" @((Get-Digits $Phone))
+    $databaseRows = @(Invoke-Rows "SELECT DB_NAME() AS databaseName FROM dummy" @())
+    $clientCountRows = @(Invoke-Rows "SELECT COUNT(*) AS clientCount FROM DBA.clientes" @())
+    $exactRows = @(Invoke-Rows "SELECT codigo, razon_social, tel_celular FROM DBA.clientes WHERE TRIM(tel_celular) = ?" @((Get-Digits $Phone)))
     $diagnosticInfo = [ordered]@{
       dsn = $dsn.Name
       platform = $dsn.Platform
@@ -194,7 +194,7 @@ ORDER BY codigo
       $selected.client['seleccion'] = 'ultima_compra_ven_remitos_cabecera'
     }
   }
-  $ordered = Select-ClientMatches $rows $ClientQuery
+  $ordered = @(Select-ClientMatches $rows $ClientQuery)
   if ($ordered.Count) {
     $clientCode = [string]$ordered[0].client.codigo
     $facturas = Invoke-Rows @'
@@ -260,7 +260,7 @@ ORDER BY c.fecha DESC, c.nro DESC
     }
   }
 } finally { if ($connection.State -eq 'Open') { $connection.Close() } }
-$ordered = Select-ClientMatches $rows $ClientQuery
+$ordered = @(Select-ClientMatches $rows $ClientQuery)
 if (-not $ordered.Count) {
   $response = [ordered]@{ found=$false; matches=0 }
   if ($Diagnostics) { $response['diagnostics'] = $diagnosticInfo }
