@@ -3,7 +3,8 @@ param(
   [Parameter(Mandatory=$false)][string]$FromDate,
   [Parameter(Mandatory=$false)][string]$ToDate,
   [Parameter(Mandatory=$false)][string]$DsnName,
-  [Parameter(Mandatory=$false)][string]$ClientQuery
+  [Parameter(Mandatory=$false)][string]$ClientQuery,
+  [Parameter(Mandatory=$false)][switch]$Diagnostics
 )
 $ErrorActionPreference = 'Stop'
 
@@ -83,6 +84,7 @@ if ($settings.DatabaseName) {
 }
 $connection = New-Object System.Data.Odbc.OdbcConnection($builder.ConnectionString)
 $rows = @()
+$diagnosticInfo = $null
 
 function Invoke-Rows([string]$Sql, [object[]]$Parameters) {
   $query = $connection.CreateCommand()
@@ -110,6 +112,22 @@ try {
   $connection.Open()
   $wanted = @(Get-Variants $Phone)
   if (-not $wanted.Count) { throw 'invalid_phone' }
+  if ($Diagnostics) {
+    $databaseRows = Invoke-Rows "SELECT DB_NAME() AS databaseName FROM dummy" @()
+    $clientCountRows = Invoke-Rows "SELECT COUNT(*) AS clientCount FROM DBA.clientes" @()
+    $exactRows = Invoke-Rows "SELECT codigo, razon_social, tel_celular FROM DBA.clientes WHERE TRIM(tel_celular) = ?" @((Get-Digits $Phone))
+    $diagnosticInfo = [ordered]@{
+      dsn = $dsn.Name
+      platform = $dsn.Platform
+      configuredServer = [string]$settings.ServerName
+      configuredDatabase = [string]$settings.DatabaseName
+      connectionDatabase = if ($databaseRows.Count) { $databaseRows[0].databaseName } else { $null }
+      visibleClients = if ($clientCountRows.Count) { $clientCountRows[0].clientCount } else { $null }
+      exactMatches = $exactRows.Count
+      exactRows = @($exactRows)
+      variants = @($wanted)
+    }
+  }
   # Los valores ya contienen solamente dígitos. Filtrar en SQL evita que el
   # driver ODBC transforme el tipo/representación de tel_celular antes de
   # compararlo (la misma consulta directa funciona en ISQL de Manager).
@@ -243,7 +261,12 @@ ORDER BY c.fecha DESC, c.nro DESC
   }
 } finally { if ($connection.State -eq 'Open') { $connection.Close() } }
 $ordered = Select-ClientMatches $rows $ClientQuery
-if (-not $ordered.Count) { [pscustomobject]@{ found=$false; matches=0 } | ConvertTo-Json -Compress; exit 0 }
+if (-not $ordered.Count) {
+  $response = [ordered]@{ found=$false; matches=0 }
+  if ($Diagnostics) { $response['diagnostics'] = $diagnosticInfo }
+  [pscustomobject]$response | ConvertTo-Json -Depth 6 -Compress
+  exit 0
+}
 if (-not $ClientQuery) {
   $selectedByPurchase = @($ordered | Where-Object { [string]$_.client.seleccion -eq 'ultima_compra_ven_remitos_cabecera' } | Select-Object -First 1)
   if ($selectedByPurchase.Count) {
@@ -253,4 +276,6 @@ if (-not $ClientQuery) {
 }
 $resolvedByLatestPurchase = (-not $ClientQuery -and [string]$ordered[0].client.seleccion -eq 'ultima_compra_ven_remitos_cabecera')
 $candidates = @($ordered | Select-Object -First 8 | ForEach-Object { [ordered]@{ codigo=$_.client.codigo; razonSocial=$_.client.razonSocial; cuit=$_.client.cuit; ultimaCompra=$_.client.ultimaCompra } })
-[pscustomobject]@{ found=$true; ambiguous=($ordered.Count -gt 1 -and -not $resolvedByLatestPurchase); matches=$ordered.Count; resolvedByLatestPurchase=$resolvedByLatestPurchase; candidates=$candidates; client=$ordered[0].client } | ConvertTo-Json -Depth 8 -Compress
+$response = [ordered]@{ found=$true; ambiguous=($ordered.Count -gt 1 -and -not $resolvedByLatestPurchase); matches=$ordered.Count; resolvedByLatestPurchase=$resolvedByLatestPurchase; candidates=$candidates; client=$ordered[0].client }
+if ($Diagnostics) { $response['diagnostics'] = $diagnosticInfo }
+[pscustomobject]$response | ConvertTo-Json -Depth 8 -Compress
