@@ -108,19 +108,28 @@ function Invoke-Rows([string]$Sql, [object[]]$Parameters) {
 
 try {
   $connection.Open()
+  $wanted = @(Get-Variants $Phone)
+  if (-not $wanted.Count) { throw 'invalid_phone' }
+  # Los valores ya contienen solamente dígitos. Filtrar en SQL evita que el
+  # driver ODBC transforme el tipo/representación de tel_celular antes de
+  # compararlo (la misma consulta directa funciona en ISQL de Manager).
+  $phoneFilter = if ($ClientQuery) { '' } else {
+    $phoneLiterals = @($wanted | ForEach-Object { "'$_'" }) -join ','
+    "WHERE REPLACE(REPLACE(REPLACE(REPLACE(TRIM(tel_celular), ' ', ''), '-', ''), '(', ''), ')', '') IN ($phoneLiterals)"
+  }
   $command = $connection.CreateCommand()
   $command.CommandTimeout = 8
-  $command.CommandText = @'
+  $command.CommandText = @"
 SELECT codigo, razon_social, nombre, apellido, cuit, direccion,
        telefono, tel_celular, tel_particular, email, saldo_cc,
        limite_credito, activo_sn, observacion
 FROM DBA.clientes
+$phoneFilter
 ORDER BY codigo
-'@
+"@
   $reader = $command.ExecuteReader()
   while ($reader.Read()) {
     $cell = if ($reader.IsDBNull(7)) { '' } else { $reader.GetValue(7).ToString() }
-    $wanted = Get-Variants $Phone
     $stored = Get-Variants $cell
     $score = 0
     foreach ($left in $wanted) { foreach ($right in $stored) { if ($left -eq $right -and $left.Length -gt $score) { $score = $left.Length } } }

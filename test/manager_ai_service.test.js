@@ -33,6 +33,9 @@ for (const script of ['lookup_client.ps1', 'query_recent_orders.ps1', 'generate_
   assert.match(source, /\$builder\['LINKS'\]\s*=\s*\$settings\.CommLinks/);
   assert.match(source, /if \(\$settings\.DatabaseName\)/);
 }
+const lookupScriptSource = fs.readFileSync(require('path').join(__dirname, '..', 'manager-ai', 'lookup_client.ps1'), 'utf8');
+assert.match(lookupScriptSource, /WHERE REPLACE\(REPLACE\(REPLACE\(REPLACE\(TRIM\(tel_celular\)/);
+assert.match(lookupScriptSource, /IN \(\$phoneLiterals\)/);
 
 const lookup = { client: { finanzas: { facturas: [
   { ptodeventa: '0005', nrotransaccion: '00000123' },
