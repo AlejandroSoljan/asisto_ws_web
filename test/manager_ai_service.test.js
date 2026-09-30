@@ -27,6 +27,13 @@ assert.strictEqual(pdfPageCount(Buffer.from('%PDF /Type /Page /Type /Pages /Type
 assert.strictEqual(pdfPageCount(Buffer.from('%PDF << /Type /Pages /Kids [1 0 R 2 0 R] /Count 2 >>', 'latin1')), 2);
 assert.match(formatManagerOrders({ orders: [{ ptodeventa: '0001', numero: '25', fecha: '28/09/2026', total: 100, entrega: { direccion: 'Mitre 1' }, productos: [] }] }, { latestOnly: true, delivery: true, detail: false }), /Dirección: Mitre 1/);
 
+for (const script of ['lookup_client.ps1', 'query_recent_orders.ps1', 'generate_document.ps1']) {
+  const source = fs.readFileSync(require('path').join(__dirname, '..', 'manager-ai', script), 'utf8');
+  assert.match(source, /\$builder\['DBN'\]\s*=\s*\$settings\.DatabaseName/);
+  assert.match(source, /\$builder\['LINKS'\]\s*=\s*\$settings\.CommLinks/);
+  assert.match(source, /if \(\$settings\.DatabaseName\)/);
+}
+
 const lookup = { client: { finanzas: { facturas: [
   { ptodeventa: '0005', nrotransaccion: '00000123' },
   { ptodeventa: '0005', nrotransaccion: '00000456' }

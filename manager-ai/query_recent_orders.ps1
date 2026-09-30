@@ -16,8 +16,16 @@ $settings = Get-ItemProperty ('HKCU:\Software\ODBC\ODBC.INI\' + $dsn.Name)
 $builder = New-Object System.Data.Odbc.OdbcConnectionStringBuilder
 $builder.Driver = 'SQL Anywhere 11'
 $builder['UID'] = $settings.UserID; $builder['PWD'] = $settings.Password
-$builder['DBF'] = $settings.DatabaseFile; $builder['ENG'] = $settings.ServerName
-$builder['ASTOP'] = $settings.AutoStop; $builder['INT'] = $settings.Integrated
+$builder['ENG'] = $settings.ServerName
+$builder['INT'] = $settings.Integrated
+if ($settings.DatabaseName) {
+  $builder['DBN'] = $settings.DatabaseName
+  if ($settings.CommLinks) { $builder['LINKS'] = $settings.CommLinks }
+  $builder['ASTOP'] = 'NO'
+} else {
+  $builder['DBF'] = $settings.DatabaseFile
+  $builder['ASTOP'] = $settings.AutoStop
+}
 $connection = New-Object System.Data.Odbc.OdbcConnection($builder.ConnectionString)
 $connection.Open()
 try {
