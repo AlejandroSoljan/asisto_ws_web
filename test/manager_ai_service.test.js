@@ -101,8 +101,8 @@ async function testNumberedClientSelection() {
     execPowerShell: async (script, args) => {
       if (/lookup_client\.ps1$/i.test(script)) {
         lookupCount += 1;
-        if (lookupCount === 1) return JSON.stringify({ found: true, ambiguous: true, matches: 2, candidates: [{ razonSocial: 'Alejandro Soljan' }], client: {} });
-        assert.deepStrictEqual(args.slice(-2), ['-ClientQuery', 'Alejandro Soljan']);
+        if (lookupCount === 1) return JSON.stringify({ found: true, ambiguous: true, matches: 2, candidates: [{ codigo: '506', razonSocial: 'Alejandro Soljan' }], client: {} });
+        assert.deepStrictEqual(args.slice(-2), ['-ClientQuery', '506']);
         return JSON.stringify({ found: true, ambiguous: false, matches: 1, client: { finanzas: { facturas: [] } } });
       }
       return '';

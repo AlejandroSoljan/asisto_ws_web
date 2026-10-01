@@ -260,7 +260,10 @@ async function handleManagerDocumentRequest(options) {
       const optionNumber = Number(clientQuery);
       if (Number.isInteger(optionNumber) && optionNumber > 0 && Array.isArray(activePending.candidates)) {
         const selectedCandidate = activePending.candidates[optionNumber - 1];
-        if (selectedCandidate) clientQuery = String(selectedCandidate.razonSocial || selectedCandidate.cuit || selectedCandidate.codigo || clientQuery);
+        // Una opción numérica debe resolver por la clave única del cliente.
+        // Volver a buscar por razón social puede producir otra coincidencia
+        // parcial (por ejemplo "ale soljan" también coincide con "Sol").
+        if (selectedCandidate) clientQuery = String(selectedCandidate.codigo || selectedCandidate.cuit || selectedCandidate.razonSocial || clientQuery);
       }
     }
   }
