@@ -237,7 +237,10 @@ async function testBehaviorClassifiesFreeLanguage() {
     classifyIntent: async () => ({ action: 'document', documentKind: 'sale', latest: true }),
     sendText: async () => {}, sendDocument: async doc => sentDocuments.push(doc),
     execPowerShell: async (script, args) => {
-      if (/lookup_client\.ps1$/i.test(script)) return JSON.stringify({ found: true, ambiguous: false, client: { finanzas: { facturas: [{ ptodeventa: '0001', nrotransaccion: '00012944', transaccion: 'PD', tipocomprobante: 'B' }] } } });
+      if (/lookup_client\.ps1$/i.test(script)) {
+        assert.ok(args.includes('-AllDocumentDates'), 'Latest invoice must not be restricted to statement dates');
+        return JSON.stringify({ found: true, ambiguous: false, client: { finanzas: { facturas: [{ ptodeventa: '0001', nrotransaccion: '00012944', transaccion: 'PD', tipocomprobante: 'B' }] } } });
+      }
       fs.writeFileSync(args[args.indexOf('-Output') + 1], Buffer.from('pdf'));
       return '';
     }

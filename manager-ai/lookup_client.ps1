@@ -4,7 +4,8 @@ param(
   [Parameter(Mandatory=$false)][string]$ToDate,
   [Parameter(Mandatory=$false)][string]$DsnName,
   [Parameter(Mandatory=$false)][string]$ClientQuery,
-  [Parameter(Mandatory=$false)][switch]$Diagnostics
+  [Parameter(Mandatory=$false)][switch]$Diagnostics,
+  [Parameter(Mandatory=$false)][switch]$AllDocumentDates
 )
 $ErrorActionPreference = 'Stop'
 
@@ -195,8 +196,18 @@ ORDER BY codigo
     }
   }
   $ordered = @(Select-ClientMatches $rows $ClientQuery)
+  # Attach finances to the same customer returned below, even when sorting
+  # by phone score puts another candidate before the latest purchase.
+  if (-not $ClientQuery) {
+    $preferred = @($ordered | Where-Object { $_.client.seleccion -eq 'ultima_compra_ven_remitos_cabecera' })
+    if ($preferred.Count -eq 1) {
+      $ordered = @($preferred[0]) + @($ordered | Where-Object { $_ -ne $preferred[0] })
+    }
+  }
   if ($ordered.Count) {
     $clientCode = [string]$ordered[0].client.codigo
+    $documentFrom = if ($AllDocumentDates) { '1900-01-01' } else { $FromDate }
+    $documentTo = if ($AllDocumentDates) { '9999-12-30' } else { $ToDate }
     $facturas = Invoke-Rows @'
 SELECT TOP 200 v.transaccion, v.tipocomprobante, v.ptodeventa,
        v.nrotransaccion, v.fecha,
@@ -205,7 +216,7 @@ SELECT TOP 200 v.transaccion, v.tipocomprobante, v.ptodeventa,
        SUM(p.montoapagar - p.montopagado) AS pendiente,
        MAX(p.fechavencimiento) AS vencimiento
 FROM DBA.ven_ventas v
-JOIN DBA.ven_pagos p ON p.transaccion = v.transaccion
+LEFT JOIN DBA.ven_pagos p ON p.transaccion = v.transaccion
  AND p.tipocomprobante = v.tipocomprobante
  AND p.ptodeventa = v.ptodeventa
  AND p.nrotransaccion = v.nrotransaccion
@@ -213,7 +224,7 @@ WHERE v.cliente = ? AND v.activo = 'S'
   AND v.fecha >= ? AND v.fecha < DATEADD(day, 1, ?)
 GROUP BY v.transaccion, v.tipocomprobante, v.ptodeventa, v.nrotransaccion, v.fecha
 ORDER BY v.fecha DESC, v.nrotransaccion DESC
-'@ @($clientCode, $FromDate, $ToDate)
+'@ @($clientCode, $documentFrom, $documentTo)
 
     $recibos = Invoke-Rows @'
 SELECT TOP 200 r.nro, r.ptodeventa, r.tipo_recibo AS tipoRecibo,
@@ -223,7 +234,7 @@ FROM DBA.ven_recibos r
 WHERE r.cliente = ? AND r.activo = 'S'
   AND r.fecha >= ? AND r.fecha < DATEADD(day, 1, ?)
 ORDER BY r.fecha DESC, r.nro DESC
-'@ @($clientCode, $FromDate, $ToDate)
+'@ @($clientCode, $documentFrom, $documentTo)
     $receiptApplications = Invoke-Rows @'
 SELECT d.nrorecibo, d.ptodeventa_recibo AS puntoRecibo, d.tipo_recibo AS tipoRecibo,
        d.transaccion, d.tipocomprobante, d.ptodeventa,

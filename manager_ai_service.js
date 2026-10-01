@@ -323,6 +323,7 @@ async function handleManagerDocumentRequest(options) {
   const ymd = value => value.toISOString().slice(0, 10);
   const runPowerShell = typeof options.execPowerShell === 'function' ? options.execPowerShell : execPowerShell;
   const lookupArgs = ['-Phone', String(options.phone), '-FromDate', ymd(since), '-ToDate', ymd(until), '-DsnName', dsn];
+  if (intent.kind !== 'statement') lookupArgs.push('-AllDocumentDates');
   if (clientQuery) lookupArgs.push('-ClientQuery', clientQuery);
   const rawLookup = await runPowerShell(lookupScript, lookupArgs, 30000);
   const lookup = JSON.parse(rawLookup || '{}');
@@ -349,7 +350,9 @@ async function handleManagerDocumentRequest(options) {
   const matches = selectDocuments(intent, lookup);
   if (!matches.length) {
     const missingLabel = intent.kind === 'receipt' ? 'ese recibo' : (intent.kind === 'statement' ? 'movimientos de cuenta corriente' : 'esa factura');
-    await sendManagerText(`No encontré ${missingLabel} en el período consultado.`);
+    await sendManagerText(intent.kind === 'statement'
+      ? `No encontré ${missingLabel} en el período consultado.`
+      : `No pude recuperar ${missingLabel} para el cliente seleccionado. Voy a derivar tu consulta a un operador para que pueda ayudarte.`);
     return { handled: true, reason: 'document_not_found' };
   }
   if (matches.length > 1) {
