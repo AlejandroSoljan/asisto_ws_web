@@ -2,7 +2,7 @@
 
 const assert = require('assert');
 const fs = require('fs');
-const { parseDocumentIntent, parseOrderQueryIntent, formatManagerOrders, selectDocuments, pdfPageCount, handleManagerDocumentRequest, pendingDocumentRequests } = require('../manager_ai_service');
+const { parseDocumentIntent, parseOrderQueryIntent, formatManagerOrders, parseCandidateChoice, selectDocuments, pdfPageCount, handleManagerDocumentRequest, pendingDocumentRequests } = require('../manager_ai_service');
 
 assert.deepStrictEqual(parseDocumentIntent('Me mandás la última factura?'), {
   kind: 'sale', pointOfSale: '', number: '', latest: true
@@ -26,6 +26,10 @@ assert.strictEqual(parseOrderQueryIntent('¿Cuál es la dirección del supermerc
 assert.strictEqual(pdfPageCount(Buffer.from('%PDF /Type /Page /Type /Pages /Type /Page', 'latin1')), 2);
 assert.strictEqual(pdfPageCount(Buffer.from('%PDF << /Type /Pages /Kids [1 0 R 2 0 R] /Count 2 >>', 'latin1')), 2);
 assert.match(formatManagerOrders({ orders: [{ ptodeventa: '0001', numero: '25', fecha: '28/09/2026', total: 100, entrega: { direccion: 'Mitre 1' }, productos: [] }] }, { latestOnly: true, delivery: true, detail: false }), /Dirección: Mitre 1/);
+const choiceCandidates = [{ codigo: '10', razonSocial: 'CENTENARIO' }, { codigo: '20', razonSocial: 'Ale Soljan' }];
+assert.strictEqual(parseCandidateChoice('Del 2', choiceCandidates), 1);
+assert.strictEqual(parseCandidateChoice('el segundo', choiceCandidates), 1);
+assert.strictEqual(parseCandidateChoice('el de Alejandro Soljan', choiceCandidates), 1);
 
 for (const script of ['lookup_client.ps1', 'query_recent_orders.ps1', 'generate_document.ps1']) {
   const source = fs.readFileSync(require('path').join(__dirname, '..', 'manager-ai', script), 'utf8');

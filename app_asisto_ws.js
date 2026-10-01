@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.05.13 30/09/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.13';
+/*version: 4.05.14 30/09/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.14';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -11583,6 +11583,32 @@ telefonoFrom = telefonoFromApi;
             throw new Error('manager_intent_http_' + String(intentResponse.status));
           }
           return intentResponse.data.intent || { action: 'none' };
+        },
+        classifySelection: async (text, candidates) => {
+          const optionText = (Array.isArray(candidates) ? candidates : []).map((candidate, index) =>
+            `${index + 1}. codigo=${String(candidate.codigo || '')}; razon_social=${String(candidate.razonSocial || '')}; cuit=${String(candidate.cuit || '')}`
+          ).join('\n');
+          const selectionPrompt = [
+            '[SELECCION PENDIENTE DE CLIENTE]',
+            'Interpretá conversacionalmente cuál de estas opciones eligió el cliente.',
+            optionText,
+            `Respuesta textual del cliente: ${String(text || '')}`,
+            'Si la elección es inequívoca, respondé action=document y colocá solamente el número de opción en number. Si no es inequívoca, action=none.'
+          ].join('\n');
+          const intentResponse = await axios.post('https://asistobot.com.ar/api/ext/wweb/manager/intent', {
+            TenantId: String(tenantId || '').trim(),
+            Tel_Origen: String(telefonoFrom || '').replace(/\D/g, ''),
+            Tel_Destino: String(telefonoTo || '').replace(/\D/g, ''),
+            Mensaje: selectionPrompt
+          }, {
+            timeout: 30000,
+            maxRedirects: 0,
+            validateStatus: () => true,
+            headers: { 'Content-Type': 'application/json; charset=UTF-8', 'X-Tenant-Id': String(tenantId || '').trim() }
+          });
+          if (intentResponse.status < 200 || intentResponse.status >= 300 || intentResponse.data?.ok !== true) return 0;
+          const selection = intentResponse.data.intent || {};
+          return String(selection.action || '').toLowerCase() === 'document' ? Number(selection.number || 0) : 0;
         },
         sendText: text => safeSendMessage(message.from, text),
         sendDocument: media => safeSend(message.from, new MessageMedia(media.mimetype, media.data, media.filename))

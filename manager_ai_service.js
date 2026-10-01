@@ -141,6 +141,32 @@ function listMessage(kind, rows) {
   return `Encontré varias opciones. Decime el número de ${noun} que necesitás:\n${lines.join('\n')}`;
 }
 
+function normalizeChoiceText(value) {
+  return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function parseCandidateChoice(text, candidates) {
+  const options = Array.isArray(candidates) ? candidates : [];
+  const normalized = normalizeChoiceText(text);
+  const numeric = normalized.match(/(?:^|\b)(?:opcion\s+|numero\s+|nro\s+|del\s+|el\s+|la\s+)?(\d{1,2})(?:\b|$)/)?.[1];
+  let index = numeric ? Number(numeric) - 1 : -1;
+  const ordinals = [['primero', 'primera'], ['segundo', 'segunda'], ['tercero', 'tercera'], ['cuarto', 'cuarta'], ['quinto', 'quinta']];
+  if (index < 0) index = ordinals.findIndex(words => words.some(word => new RegExp(`\\b${word}\\b`).test(normalized)));
+  if (index >= 0 && index < options.length) return index;
+  const digits = String(text || '').replace(/\D/g, '');
+  const matches = options.map((candidate, candidateIndex) => {
+    const fields = [candidate.codigo, candidate.cuit, candidate.documento, candidate.razonSocial]
+      .map(normalizeChoiceText).filter(Boolean);
+    const digitFields = [candidate.codigo, candidate.cuit, candidate.documento].map(value => String(value || '').replace(/\D/g, '')).filter(Boolean);
+    const exactDigits = digits.length >= 3 && digitFields.some(value => value === digits);
+    const words = normalized.split(' ').filter(word => word.length >= 3);
+    const nameScore = Math.max(0, ...fields.map(field => words.filter(word => field.includes(word)).length));
+    return { candidateIndex, score: exactDigits ? 100 : nameScore };
+  }).filter(item => item.score > 0).sort((a, b) => b.score - a.score);
+  return matches.length && (matches.length === 1 || matches[0].score > matches[1].score) ? matches[0].candidateIndex : -1;
+}
+
 function pdfPageCount(buffer) {
   if (!Buffer.isBuffer(buffer) || !buffer.length) return 0;
   const chunks = [buffer.toString('latin1')];
@@ -257,9 +283,15 @@ async function handleManagerDocumentRequest(options) {
     } else {
       intent = activePending.intent;
       clientQuery = pendingAnswer;
-      const optionNumber = Number(clientQuery);
-      if (Number.isInteger(optionNumber) && optionNumber > 0 && Array.isArray(activePending.candidates)) {
-        const selectedCandidate = activePending.candidates[optionNumber - 1];
+      let selectedIndex = parseCandidateChoice(pendingAnswer, activePending.candidates);
+      if (selectedIndex < 0 && typeof options.classifySelection === 'function' && Array.isArray(activePending.candidates)) {
+        try {
+          const aiIndex = Number(await options.classifySelection(pendingAnswer, activePending.candidates)) - 1;
+          if (Number.isInteger(aiIndex) && aiIndex >= 0 && aiIndex < activePending.candidates.length) selectedIndex = aiIndex;
+        } catch (e) { console.warn('[MANAGER_AI] no se pudo interpretar selección por IA:', e?.message || e); }
+      }
+      if (selectedIndex >= 0 && Array.isArray(activePending.candidates)) {
+        const selectedCandidate = activePending.candidates[selectedIndex];
         // Una opción numérica debe resolver por la clave única del cliente.
         // Volver a buscar por razón social puede producir otra coincidencia
         // parcial (por ejemplo "ale soljan" también coincide con "Sol").
@@ -371,4 +403,4 @@ async function handleManagerDocumentRequest(options) {
   return { handled: true, reason: 'document_sent', kind: intent.kind, id };
 }
 
-module.exports = { bool, parseDocumentIntent, parseOrderQueryIntent, formatManagerOrders, isStandaloneGreeting, selectDocuments, pdfPageCount, handleManagerDocumentRequest, pendingDocumentRequests, managerConversationActivity };
+module.exports = { bool, parseDocumentIntent, parseOrderQueryIntent, formatManagerOrders, isStandaloneGreeting, parseCandidateChoice, selectDocuments, pdfPageCount, handleManagerDocumentRequest, pendingDocumentRequests, managerConversationActivity };
