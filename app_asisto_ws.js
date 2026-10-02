@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.05.15 30/09/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.15';
+/*version: 4.05.16 02/10/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.16';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -6684,6 +6684,9 @@ async function restartScriptFromPanel(reason = 'panel_restart_script') {
 
 
 async function handleActionDoc(doc) {
+  if (doc?.action === 'read_message_media') {
+    return require('./message_media_reader').readMessageMedia(doc.payload, client, normalizeContactForStats);
+  }
   const action = String(doc?.action || '').toLowerCase();
   const reason = String(doc?.reason || '');
   const reasonLower = reason.toLowerCase();

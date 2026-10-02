@@ -1,4 +1,11 @@
 ASISTO - AGENTE DE WHATSAPP
+v4.05.16 - 02/10/2026. Recuperación bajo demanda de audio/PTT e imágenes para
+             Control de Tokens superadmin. Acción read_message_media verifica
+             contacto y dirección; excluye vista única, limita entrega a 5 MiB y
+             espera a 20 s. No envía ni transcribe mensajes. Backend elimina la
+             copia temporal a los 15 minutos. Requiere instalar esta versión;
+             publicar el código no demuestra actualización de las PCs.
+             Pruebas: test/message_media_reader.test.js y suite Manager existente.
 Historial de la serie 4.04 (reconstruido del historial Git el 17/09/2026)
 
 Alcance: este archivo describe el repositorio del agente WhatsApp, no la web/API
