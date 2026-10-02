@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.05.16 02/10/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.16';
+/*version: 4.05.17 02/10/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.17';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -7686,7 +7686,7 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
         // respondió y el documento quedó aceptado, hay que completar ese envío:
         // bloquearlo aquí deja un OK válido retenido indefinidamente.
         if (doc?.estado !== 'aceptado') {
-          const cupo = await estadoLimiteDiarioApiMensajes();
+          const cupo = await estadoLimiteDiarioApiMensajes(to);
           if (!cupo.permitido) {
             logLimiteDiarioApiMensajes(cupo);
             detenidoPor = 'limite_diario';
@@ -8430,8 +8430,9 @@ function esTextoSolicitudConfirmacionApiMensajes(body) {
     .some(texto => b === normalizarRespuestaConfirmacionApiMensajes(texto));
 }
 
-async function estadoLimiteDiarioApiMensajes() {
+async function estadoLimiteDiarioApiMensajes(destinatario = '') {
   const limite = Math.max(0, Math.floor(Number(api_mensajes_limite_diario) || 0));
+  const porClientes = tenantConfig?.api_mensajes_limite_unidad === 'clientes';
   try {
     if (limite <= 0) return { permitido: true, limite: 0, enviados: 0, restantes: null };
     if (!await ensureMongo()) return { permitido: true, limite, enviados: 0, restantes: null, degradado: true, motivo: 'mongo_no_disponible' };
@@ -8448,8 +8449,8 @@ async function estadoLimiteDiarioApiMensajes() {
       tenantId: String(tenantId || ''),
       numeroFrom: String(getApiMensajesNroTelFrom() || numero || ''),
       channelType: 'api_messages',
-      windowStartedAt: { $gte: desde, $lt: hasta }
-    }).limit(Math.max(200, limite * 3)).toArray();
+      'messages.at': { $gte: desde, $lt: hasta }
+    }).project({ contact: 1, messages: 1, windowStartedAt: 1 }).toArray();
     const reales = new Set();
     for (const doc of (Array.isArray(docs) ? docs : [])) {
       const entries = Array.isArray(doc?.messages) ? doc.messages : [];
@@ -8457,15 +8458,16 @@ async function estadoLimiteDiarioApiMensajes() {
         const entry = entries[index] || {};
         const atMs = new Date(entry.at || doc.windowStartedAt || 0).getTime();
         if (!Number.isFinite(atMs) || atMs < desde.getTime() || atMs >= hasta.getTime()) continue;
-        const messageId = String(entry.waMessageId || '').trim();
-        const legacyKey = [doc?._id || '', entry.id_msj_dest || '', entry.id_msj_renglon || '', entry.type || '', Math.floor(atMs / 1000), index].join(':');
-        reales.add(messageId ? 'id:' + messageId : 'legacy:' + legacyKey);
-        if (reales.size >= limite) break;
+        if (porClientes) {
+          const contact = onlyDigits(doc.contact || '');
+          if (contact) reales.add(contact);
+          break;
+        }
+        reales.add(String(entry.waMessageId || [doc._id, index, atMs].join(':')));
       }
-      if (reales.size >= limite) break;
     }
     const enviados = reales.size;
-    return { permitido: enviados < limite, limite, enviados, restantes: Math.max(0, limite - enviados), dayKey };
+    return { permitido: enviados < limite || (porClientes && reales.has(onlyDigits(destinatario))), limite, enviados, restantes: Math.max(0, limite - enviados), dayKey, unidad: porClientes ? 'clientes' : 'mensajes' };
   } catch (e) {
     return { permitido: true, limite, enviados: 0, restantes: null, degradado: true, motivo: String(e?.message || e) };
   }
@@ -8889,7 +8891,7 @@ async function estadoConfirmacionApiMensajes(nroTel, descripcion = '', prioridad
  
 
   if (debePedir) {
-    const cupo = await estadoLimiteDiarioApiMensajes();
+    const cupo = await estadoLimiteDiarioApiMensajes(to);
     if (!cupo.permitido) {
       logLimiteDiarioApiMensajes(cupo);
       return { autorizado: false, motivo: 'limite_diario', solicitudEnviada: false, limiteDiario: true };
@@ -9346,12 +9348,7 @@ async function ConsultaApiMensajes(){
         continue;
       }
 
-      const cupoAntesDeConsultar = await estadoLimiteDiarioApiMensajes();
-      if (!cupoAntesDeConsultar.permitido) {
-        logLimiteDiarioApiMensajes(cupoAntesDeConsultar);
-        await sleepConsultaMensajesFueraDeHorario();
-        continue;
-      }
+      // Keep fetching at quota: messages to today's existing contacts are allowed.
       const circuit = await estadoCircuitBreakerApiMensajes();
       if (circuit.abierto) {
         const logCircuit = '[API_MENSAJES_CIRCUIT] lote detenido muestra=' + String(circuit.muestra || 0) +
@@ -9633,10 +9630,10 @@ async function ConsultaApiMensajes(){
               continue;
             }
 
-            const cupoAntesDeEnviar = await estadoLimiteDiarioApiMensajes();
+            const cupoAntesDeEnviar = await estadoLimiteDiarioApiMensajes(Nro_tel);
             if (!cupoAntesDeEnviar.permitido) {
               logLimiteDiarioApiMensajes(cupoAntesDeEnviar);
-              return;
+              continue;
             }
 
             if (Content_nombre == null || Content_nombre === '') Content_nombre = 'archivo';

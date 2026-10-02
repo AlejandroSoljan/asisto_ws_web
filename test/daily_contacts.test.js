@@ -1,0 +1,16 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+test('daily quota counts distinct contacts and permits repeats after 70', async () => {
+  const text=fs.readFileSync(require.resolve('../app_asisto_ws.js'),'utf8');
+  const code=text.slice(text.indexOf('async function estadoLimiteDiarioApiMensajes('),text.indexOf('function logLimiteDiarioApiMensajes('));
+  const docs=Array.from({length:70},(_,i)=>({contact:String(5490000000000+i),messages:[{at:'2026-10-02T12:00:00Z'},{at:'2026-10-02T13:00:00Z'}]}));
+  docs.push(docs[0]);
+  const context={api_mensajes_limite_diario:70,tenantId:'RVL',numero:'1',getApiMensajesNroTelFrom:()=> '1',ensureMongo:async()=>true,onlyDigits:v=>String(v).replace(/\D/g,''),arDatePartsForStats:()=>({dayKey:'2026-10-02'}),getDataCollection:()=>({find:()=>({project:()=>({toArray:async()=>docs})})})};
+  context.tenantConfig={api_mensajes_limite_unidad:'clientes'};
+  vm.createContext(context);vm.runInContext(code,context);
+  const repeat=await context.estadoLimiteDiarioApiMensajes(docs[0].contact);
+  assert.equal(repeat.enviados,70); assert.equal(repeat.permitido,true);
+  assert.equal((await context.estadoLimiteDiarioApiMensajes('5499999999999')).permitido,false);
+});

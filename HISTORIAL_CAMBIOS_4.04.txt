@@ -1,4 +1,10 @@
 ASISTO - AGENTE DE WHATSAPP
+v4.05.17 - 02/10/2026. api_mensajes_limite_unidad=clientes cuenta destinatarios
+             distintos por emisor/día argentino. Repetidos siguen habilitados
+             al alcanzar el cupo; consulta ventanas que cruzan medianoche.
+             Sin opción conserva mensajes. No cambia ventanas ni tarifas.
+             Aplicación dirigida a dominios de envíos a $20, con cupo 70.
+             Pruebas: test/daily_contacts.test.js, sintaxis y suite Manager.
 v4.05.16 - 02/10/2026. Recuperación bajo demanda de audio/PTT e imágenes para
              Control de Tokens superadmin. Acción read_message_media verifica
              contacto y dirección; excluye vista única, limita entrega a 5 MiB y
