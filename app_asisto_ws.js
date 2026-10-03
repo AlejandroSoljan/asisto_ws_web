@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.05.19 02/10/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.19';
+/*version: 4.05.20 03/10/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.20';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -8446,14 +8446,14 @@ async function estadoLimiteDiarioApiMensajes(destinatario = '') {
   const porClientes = tenantConfig?.api_mensajes_limite_unidad === 'clientes';
   try {
     if (limite <= 0) return { permitido: true, limite: 0, enviados: 0, restantes: null };
-    if (!await ensureMongo()) return { permitido: true, limite, enviados: 0, restantes: null, degradado: true, motivo: 'mongo_no_disponible' };
+    if (!await ensureMongo()) return { permitido: false, limite, enviados: null, restantes: null, degradado: true, motivo: 'mongo_no_disponible' };
     const dayKey = arDatePartsForStats(new Date()).dayKey;
     // El cupo corresponde a la campaña/API de Asisto. wa_wweb_message_log también
     // contiene mensajes escritos manualmente desde el teléfono o WhatsApp Web y
     // no debe consumir este límite. Las ventanas API registran exclusivamente los
     // envíos hechos por ConsultaApiMensajes (confirmación y documento).
     const colVentanas = getDataCollection('wa_api_message_windows');
-    if (!colVentanas) return { permitido: true, limite, enviados: 0, restantes: null, degradado: true, motivo: 'coleccion_no_disponible' };
+    if (!colVentanas) return { permitido: false, limite, enviados: null, restantes: null, degradado: true, motivo: 'coleccion_no_disponible' };
     const desde = new Date(dayKey + 'T03:00:00.000Z');
     const hasta = new Date(desde.getTime() + 24 * 60 * 60 * 1000);
     const docs = await colVentanas.find({
@@ -8461,7 +8461,8 @@ async function estadoLimiteDiarioApiMensajes(destinatario = '') {
       numeroFrom: String(getApiMensajesNroTelFrom() || numero || ''),
       channelType: 'api_messages',
       'messages.at': { $gte: desde, $lt: hasta }
-    }).project({ contact: 1, messages: 1, windowStartedAt: 1 }).toArray();
+    }, { projection: { contact: 1, messages: 1, windowStartedAt: 1 } }).toArray();
+    if (!Array.isArray(docs)) throw new Error('contador_respuesta_invalida');
     const reales = new Set();
     for (const doc of (Array.isArray(docs) ? docs : [])) {
       const entries = Array.isArray(doc?.messages) ? doc.messages : [];
@@ -8480,15 +8481,17 @@ async function estadoLimiteDiarioApiMensajes(destinatario = '') {
     const enviados = reales.size;
     return { permitido: enviados < limite || (porClientes && reales.has(onlyDigits(destinatario))), limite, enviados, restantes: Math.max(0, limite - enviados), dayKey, unidad: porClientes ? 'clientes' : 'mensajes' };
   } catch (e) {
-    return { permitido: true, limite, enviados: 0, restantes: null, degradado: true, motivo: String(e?.message || e) };
+    return { permitido: false, limite, enviados: null, restantes: null, degradado: true, motivo: String(e?.message || e) };
   }
 }
 
 function logLimiteDiarioApiMensajes(estado) {
-  const key = String(estado?.dayKey || arDatePartsForStats(new Date()).dayKey);
+  const key = String(estado?.dayKey || arDatePartsForStats(new Date()).dayKey) + ':' + String(estado?.motivo || 'cupo');
   if (apiMensajesLimiteLogDayKey === key) return;
   apiMensajesLimiteLogDayKey = key;
-  const log = '[API_MENSAJES] limite diario alcanzado: ' + String(estado?.enviados || 0) + '/' + String(estado?.limite || 0) + ' fecha=' + key;
+  const log = estado?.degradado
+    ? '[API_MENSAJES] envíos detenidos: no se pudo verificar el cupo; motivo=' + String(estado.motivo || 'desconocido')
+    : '[API_MENSAJES] limite diario alcanzado: ' + String(estado?.enviados || 0) + '/' + String(estado?.limite || 0) + ' fecha=' + key;
   console.log(log);
   EscribirLog(log, 'event');
 }

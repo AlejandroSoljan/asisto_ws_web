@@ -1,4 +1,11 @@
 ASISTO - AGENTE DE WHATSAPP
+v4.05.20 - 03/10/2026. Corrige cupo diario en Control API: projection va en las
+             opciones de find, sin depender de cursor.project inexistente.
+             Ante fallo de consulta se detienen envíos con cupo configurado;
+             registra error de verificación, no un falso contador cero.
+             RVL conserva 70 clientes/día y permite repetir destinatarios ya
+             contabilizados sólo cuando la consulta es exitosa. Sin cambios
+             a claves, tarifas ni límites. Regresión: test/daily_contacts.test.js.
 v4.05.19 - 02/10/2026. Corrige prefiltro tel_celular de Manager: admite etiquetas
              como '(ale)' sin excluir la ficha con compras y facturas. Validado
              en SDG, cliente 506, factura 0001-00012944. Respuestas de documentos
