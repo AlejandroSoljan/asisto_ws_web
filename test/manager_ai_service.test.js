@@ -277,7 +277,20 @@ async function testRequestedStatementPeriod() {
   assert.match(sentTexts[0], /28\/07\/2026 al 28\/09\/2026/);
 }
 
-testAmbiguousClientContinuation()
+async function testBehaviorControlsToolsAndPause() {
+  const base = {tenantId:'TEST',phone:'1234567890',config:{manager_ai_enabled:true,manager_order_query_enabled:true,dsn:'test'},
+    execPowerShell:async()=>{throw Error('must not query ODBC');},sendText:async()=>{throw Error('must not send');}};
+  assert.equal((await handleManagerDocumentRequest({...base,text:'Agregame cuatro yogures al pedido',classifyIntent:async()=>({action:'none'})})).handled,false);
+  assert.equal((await handleManagerDocumentRequest({...base,text:'Qué tiene mi pedido',classifyIntent:async()=>({action:'paused'})})).reason,'operator_pause');
+  let receivedResult=false;
+  const sent=[];
+  const result=await handleManagerDocumentRequest({...base,text:'A qué hora llega',execPowerShell:async()=>JSON.stringify({orders:[{entrega:{horario_desde:'14:00'}}]}),
+    classifyIntent:async(text,context)=>{if(context?.toolResult){receivedResult=true;return {action:'reply',replyText:'Tu entrega comienza a las 14:00.'};}return {action:'orders',delivery:true};},
+    sendText:async text=>sent.push(text)});
+  assert.equal(result.reason,'orders_queried');assert.ok(receivedResult);assert.match(sent[0],/Tu entrega comienza/);assert.doesNotMatch(sent[0],/Productos:/);
+}
+testBehaviorControlsToolsAndPause()
+  .then(testAmbiguousClientContinuation)
   .then(testConfiguredGreeting)
   .then(testNumberedClientSelection)
   .then(testMissingPhoneKeepsDocumentRequest)

@@ -1,4 +1,7 @@
 ASISTO - AGENTE DE WHATSAPP
+v4.05.18 - 02/10/2026. Resultados de pedidos Manager vuelven a IA para responder
+             según comportamiento. Comprueba pausa antes de enviar documentos;
+             distingue ecos de envíos automáticos de mensajes manuales.
 v4.05.17 - 02/10/2026. api_mensajes_limite_unidad=clientes cuenta destinatarios
              distintos por emisor/día argentino. Repetidos siguen habilitados
              al alcanzar el cupo; consulta ventanas que cruzan medianoche.

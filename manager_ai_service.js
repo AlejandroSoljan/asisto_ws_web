@@ -244,6 +244,7 @@ async function handleManagerDocumentRequest(options) {
     }
   }
   const classifiedAction = String(classifiedIntent?.action || '').trim().toLowerCase();
+  if (classifiedAction === 'paused') return { handled: true, reason: 'operator_pause' };
   const orderIntent = classifiedAction === 'orders' ? {
     detail: bool(classifiedIntent.detail, false),
     delivery: bool(classifiedIntent.delivery, false),
@@ -258,7 +259,14 @@ async function handleManagerDocumentRequest(options) {
     const runPowerShell = typeof options.execPowerShell === 'function' ? options.execPowerShell : execPowerShell;
     const raw = await runPowerShell(queryScript, ['-Phone', String(options.phone), '-DsnName', dsn, '-Limit', '10'], 30000);
     const result = JSON.parse(raw || '{}');
-    await sendManagerText(formatManagerOrders(result, orderIntent));
+    if (typeof options.classifyIntent === 'function') {
+      const resolved = await options.classifyIntent(String(options.text || ''), { toolResult: result });
+      if (resolved?.action === 'paused') return { handled: true, reason: 'operator_pause' };
+      if (resolved?.action !== 'reply' || !String(resolved.replyText || '').trim()) throw new Error('manager_order_response_unavailable');
+      await options.sendText(String(resolved.replyText));
+    } else {
+      await sendManagerText(formatManagerOrders(result, orderIntent));
+    }
     return { handled: true, reason: 'orders_queried', count: Number(result.count || 0) };
   }
   let intent = classifiedAction === 'document' ? {

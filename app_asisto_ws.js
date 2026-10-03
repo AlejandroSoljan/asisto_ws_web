@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.05.17 02/10/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.17';
+/*version: 4.05.18 02/10/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.18';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -5990,6 +5990,8 @@ async function createClientIfNeeded(opts = {}) {
 /**
  * Envío robusto con reintentos ante errores de evaluación/recarga en WhatsApp Web
  */
+const automaticSendIds = new Map();
+const automaticSendsInFlight = new Set();
 async function safeSend(to, content, opts) {
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
@@ -6001,7 +6003,14 @@ async function safeSend(to, content, opts) {
       }
        const sendOpts = (opts && typeof opts === 'object') ? { ...opts } : {};
       if (typeof sendOpts.sendSeen === 'undefined') sendOpts.sendSeen = false;
-      const sent = await client.sendMessage(to, content, sendOpts);
+      const sending = client.sendMessage(to, content, sendOpts).then(sent => {
+        automaticSendIds.set(getOutgoingStatMessageId(sent), Date.now());
+        for (const [id, at] of automaticSendIds) if (Date.now() - at > 600000) automaticSendIds.delete(id);
+        return sent;
+      });
+      automaticSendsInFlight.add(sending);
+      let sent;
+      try { sent = await sending; } finally { automaticSendsInFlight.delete(sending); }
       if (isWwebJsEngine() && content?.mimetype && !getOutgoingStatMessageId(sent)) {
         throw new Error('wwebjs_media_send_unconfirmed_id');
       }
@@ -7333,8 +7342,10 @@ function getOutgoingConfirmacionTargetRaw(message) {
 async function notifyWwebOperatorOutgoingMessage(message) {
   try {
     if (!message || message.fromMe !== true) return false;
+    await Promise.allSettled([...automaticSendsInFlight]);
+    if (automaticSendIds.has(getOutgoingStatMessageId(message))) return false;
 
-    const body = getMessageBodyText(message);
+    const body = getMessageBodyText(message) || (message.hasMedia ? '[El operador envió un archivo]' : '');
     if (!body) return false;
 
     const ownPhone = onlyDigits(telefono_qr || numero || getClientInfoUser() || '');
@@ -11550,6 +11561,14 @@ EscribirLog(message.from +' '+message.to+' '+message.type+' '+message.body ,"eve
     }
 telefonoFrom = telefonoFromApi;
 
+    const assertManagerReplyAllowed = async () => {
+      const response = await axios.post('https://asistobot.com.ar/api/ext/wweb/manager/intent', {
+        TenantId: String(tenantId || '').trim(), Tel_Origen: telefonoFrom,
+        Tel_Destino: telefonoTo, Mensaje: '[verificar pausa]', PauseOnly: true
+      }, { timeout: 10000, maxRedirects: 0 });
+      if (response.data?.ok !== true) throw new Error('manager_pause_check_failed');
+      if (response.data?.intent?.action === 'paused') throw new Error('operator_pause');
+    };
     // Herramienta local de documentos Manager. Si reconoce un pedido, lo
     // resuelve por ODBC y no lo duplica enviándolo además al bot general.
     try {
@@ -11567,12 +11586,13 @@ telefonoFrom = telefonoFromApi;
           manager_order_query_enabled,
           dsn
         },
-        classifyIntent: async text => {
+        classifyIntent: async (text, context = {}) => {
           const intentResponse = await axios.post('https://asistobot.com.ar/api/ext/wweb/manager/intent', {
             TenantId: String(tenantId || '').trim(),
             Tel_Origen: String(telefonoFrom || '').replace(/\D/g, ''),
             Tel_Destino: String(telefonoTo || '').replace(/\D/g, ''),
-            Mensaje: String(text || '')
+            Mensaje: String(text || ''),
+            ToolResult: context.toolResult || null
           }, {
             timeout: 30000,
             maxRedirects: 0,
@@ -11610,8 +11630,8 @@ telefonoFrom = telefonoFromApi;
           const selection = intentResponse.data.intent || {};
           return String(selection.action || '').toLowerCase() === 'document' ? Number(selection.number || 0) : 0;
         },
-        sendText: text => safeSendMessage(message.from, text),
-        sendDocument: media => safeSend(message.from, new MessageMedia(media.mimetype, media.data, media.filename))
+        sendText: async text => { await assertManagerReplyAllowed(); return safeSendMessage(message.from, text); },
+        sendDocument: async media => { await assertManagerReplyAllowed(); return safeSend(message.from, new MessageMedia(media.mimetype, media.data, media.filename)); }
       });
       if (managerResult?.handled) {
         const managerLog = '[MANAGER_AI] procesado tenant=' + String(tenantId || '') +
@@ -11621,6 +11641,7 @@ telefonoFrom = telefonoFromApi;
         return;
       }
     } catch (managerError) {
+      if (['operator_pause', 'manager_pause_check_failed'].includes(managerError?.message)) return;
       const managerLog = '[MANAGER_AI] error tenant=' + String(tenantId || '') +
         ' from=' + String(telefonoFrom || '') + ' error=' + String(managerError?.message || managerError);
       try { console.log(managerLog); } catch {}
