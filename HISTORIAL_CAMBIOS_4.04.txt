@@ -1,4 +1,9 @@
 ASISTO - AGENTE DE WHATSAPP
+v4.05.21 - 03/10/2026. Diagnóstico de solicitud real Consulta_no_enviados para
+             PEV y PEV1-4: inmediatamente antes de fetch informa endpoint,
+             nro_tel_from y coincidencia exacta de key con la esperada mediante
+             hash. No imprime claves ni query completa. Una vez por minuto o
+             al cambiar parámetros. No modifica solicitudes ni otros dominios.
 v4.05.20 - 03/10/2026. Corrige cupo diario en Control API: projection va en las
              opciones de find, sin depender de cursor.project inexistente.
              Ante fallo de consulta se detienen envíos con cupo configurado;

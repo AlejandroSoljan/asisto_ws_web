@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.05.20 03/10/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.20';
+/*version: 4.05.21 03/10/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.21';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -9392,6 +9392,7 @@ async function ConsultaApiMensajes(){
       try {
         //console.log("Conectando a API " + url);
         //EscribirLog("Conectando a API " + url, "event");
+        require('./api_request_diagnostic').logRequestDiagnostic(tenantId, url, (message) => console.log(message));
         const resp = await fetch(url, {
           method: "GET",
           compress: false,
