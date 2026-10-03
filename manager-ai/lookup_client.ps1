@@ -134,7 +134,11 @@ try {
   # compararlo (la misma consulta directa funciona en ISQL de Manager).
   $phoneFilter = if ($ClientQuery) { '' } else {
     $phoneLiterals = @($wanted | ForEach-Object { "'$_'" }) -join ','
-    "WHERE REPLACE(REPLACE(REPLACE(REPLACE(TRIM(tel_celular), ' ', ''), '-', ''), '(', ''), ')', '') IN ($phoneLiterals)"
+    # Prefiltro amplio: conservar teléfonos con etiquetas como "(ale)".
+    # La comparación definitiva de dígitos se realiza abajo con Get-Variants.
+    $phoneExpression = "REPLACE(REPLACE(REPLACE(REPLACE(TRIM(tel_celular), ' ', ''), '-', ''), '(', ''), ')', '')"
+    $phoneContains = @($wanted | ForEach-Object { "$phoneExpression LIKE '%$_%'" }) -join ' OR '
+    "WHERE REPLACE(REPLACE(REPLACE(REPLACE(TRIM(tel_celular), ' ', ''), '-', ''), '(', ''), ')', '') IN ($phoneLiterals) OR ($phoneContains)"
   }
   $command = $connection.CreateCommand()
   $command.CommandTimeout = 8

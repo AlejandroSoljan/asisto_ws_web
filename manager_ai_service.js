@@ -219,7 +219,19 @@ async function handleManagerDocumentRequest(options) {
   managerConversationActivity.set(pendingKey, now);
   const configuredGreeting = String(cfg.manager_ai_greeting || '¡Hola! Soy Asisto, el asistente de Supermercado Digital.').trim();
   let introPending = isFirstConversationMessage;
-  const sendManagerText = async text => {
+  let documentReplyEnabled = false;
+  let requestText = String(options.text || '');
+  const sendManagerText = async (text, details = {}) => {
+    if (documentReplyEnabled && typeof options.classifyIntent === 'function') {
+      const reply = await options.classifyIntent(requestText, { toolResult: {
+        type: 'manager_document_result', status: 'information', ...details, factualText: text
+      } });
+      if (String(reply?.action || '').toLowerCase() === 'paused') throw new Error('operator_pause');
+      if (String(reply?.action || '').toLowerCase() === 'reply' && String(reply?.replyText || '').trim()) {
+        await options.sendText(String(reply.replyText).trim());
+        return;
+      }
+    }
     let outgoing = String(text || '').trim();
     if (introPending) {
       introPending = false;
@@ -232,6 +244,7 @@ async function handleManagerDocumentRequest(options) {
     pendingDocumentRequests.delete(pendingKey);
   }
   const activePending = pendingDocumentRequests.get(pendingKey);
+  if (activePending?.requestText) requestText = activePending.requestText;
   if (!activePending && configuredGreeting && isStandaloneGreeting(options.text)) {
     await sendManagerText(configuredGreeting);
     return { handled: true, reason: 'configured_greeting' };
@@ -308,6 +321,7 @@ async function handleManagerDocumentRequest(options) {
     }
   }
   if (!intent) return { handled: false, reason: 'not_document_intent' };
+  documentReplyEnabled = true;
   if (!clientQuery) pendingDocumentRequests.delete(pendingKey);
   if (!bool(cfg.manager_document_send_enabled ?? cfg.manager_envio_documentos_habilitado, false)) {
     await sendManagerText('Entendí que necesitás un documento, pero el envío automático todavía no está habilitado.');
@@ -337,16 +351,16 @@ async function handleManagerDocumentRequest(options) {
   const lookup = JSON.parse(rawLookup || '{}');
   if (!lookup.found) {
     if (clientQuery) {
-      pendingDocumentRequests.set(pendingKey, { intent, createdAt: now });
+      pendingDocumentRequests.set(pendingKey, { intent, requestText, createdAt: now });
       await sendManagerText('No encontré ese cliente. Podés responder con la razón social, CUIT o documento, y conservaré tu pedido pendiente.');
       return { handled: true, reason: 'client_selection_not_found' };
     }
-    pendingDocumentRequests.set(pendingKey, { stage: 'client_selection', intent, createdAt: now });
+    pendingDocumentRequests.set(pendingKey, { stage: 'client_selection', intent, requestText, createdAt: now });
     await sendManagerText('No encontré tu teléfono asociado a un cliente de Manager. Si querés, indicame tu razón social o CUIT para que lo revise una persona.');
     return { handled: true, reason: 'client_not_found' };
   }
   if (lookup.ambiguous) {
-    pendingDocumentRequests.set(pendingKey, { stage: 'client_selection', intent, candidates: lookup.candidates || [], createdAt: now });
+    pendingDocumentRequests.set(pendingKey, { stage: 'client_selection', intent, requestText, candidates: lookup.candidates || [], createdAt: now });
     const optionsList = Array.isArray(lookup.candidates) ? lookup.candidates
       .map((candidate, index) => `${index + 1}. ${candidate.razonSocial || candidate.codigo}${candidate.cuit ? ` · CUIT ${candidate.cuit}` : ''}`)
       .join('\n') : '';
@@ -364,7 +378,7 @@ async function handleManagerDocumentRequest(options) {
     return { handled: true, reason: 'document_not_found' };
   }
   if (matches.length > 1) {
-    pendingDocumentRequests.set(pendingKey, { stage: 'document_selection', intent, createdAt: now });
+    pendingDocumentRequests.set(pendingKey, { stage: 'document_selection', intent, requestText, createdAt: now });
     await sendManagerText(listMessage(intent.kind, matches));
     return { handled: true, reason: 'document_selection_required', count: matches.length };
   }
@@ -404,9 +418,9 @@ async function handleManagerDocumentRequest(options) {
     const statementPeriod = intent.kind === 'statement' && statementFrom
       ? ` Período: ${statementFrom.split('-').reverse().join('/')} al ${ymd(until).split('-').reverse().join('/')}.`
       : '';
-    await sendManagerText(`Te envío ${article} ${noun} ${intent.kind === 'sale' ? 'solicitada' : 'solicitado'}.${statementPeriod}`);
     const data = fs.readFileSync(output).toString('base64');
     const filenamePrefix = intent.kind === 'receipt' ? 'Recibo' : (intent.kind === 'statement' ? 'Resumen_Cuenta' : 'Factura');
+    await sendManagerText(`Te envío ${article} ${noun} ${intent.kind === 'sale' ? 'solicitada' : 'solicitado'}.${statementPeriod}`, { status: 'document_ready_to_send', documentKind: intent.kind, documentId: id });
     await options.sendDocument({ mimetype: 'application/pdf', data, filename: `${filenamePrefix}_${id}.pdf` });
   } finally {
     try { fs.unlinkSync(output); } catch {}

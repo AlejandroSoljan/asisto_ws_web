@@ -21,12 +21,17 @@ El comportamiento conversacional se administra con la configuración **Comportam
 
 Controles aplicados:
 
-- busca el cliente por el teléfono real de WhatsApp;
+- busca el cliente por el teléfono real de WhatsApp, admitiendo etiquetas como `(ale)` en `tel_celular`; el prefiltro SQL no sustituye la validación posterior de dígitos;
 - consulta Manager por ODBC en modo lectura;
 - si hay varios documentos, solicita el número antes de enviar;
-- si hay más de un cliente para el mismo teléfono, no envía nada automáticamente;
+- ante varios clientes, la búsqueda incluye su última compra para resolver la asociación; si sigue ambigua, solicita aclaración;
 - genera el PDF con los objetos de impresión configurados en Manager;
 - elimina el PDF temporal después de enviarlo;
 - nunca entrega credenciales ODBC al modelo de IA.
+
+Las respuestas de documentos se componen mediante IA con el comportamiento del
+dominio y el resultado real de la herramienta. Se conserva el mensaje original
+durante la selección de cliente/documento, para no perder solicitudes adicionales
+como el alias de transferencia. Un PDF preparado no se informa como ya enviado.
 
 Los archivos de soporte incluidos en `manager-ai/` forman parte del cliente de WhatsApp y no dependen del proyecto de la extensión.

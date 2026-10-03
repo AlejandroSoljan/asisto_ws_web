@@ -1,4 +1,10 @@
 ASISTO - AGENTE DE WHATSAPP
+v4.05.19 - 02/10/2026. Corrige prefiltro tel_celular de Manager: admite etiquetas
+             como '(ale)' sin excluir la ficha con compras y facturas. Validado
+             en SDG, cliente 506, factura 0001-00012944. Respuestas de documentos
+             vuelven a IA con solicitud original y resultado, conservando alias
+             u otras consultas del comportamiento durante aclaraciones. No cambia
+             claves, API de envíos ni configuración de otros dominios.
 v4.05.18 - 02/10/2026. Resultados de pedidos Manager vuelven a IA para responder
              según comportamiento. Comprueba pausa antes de enviar documentos;
              distingue ecos de envíos automáticos de mensajes manuales.

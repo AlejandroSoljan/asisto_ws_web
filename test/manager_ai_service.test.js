@@ -289,7 +289,45 @@ async function testBehaviorControlsToolsAndPause() {
     sendText:async text=>sent.push(text)});
   assert.equal(result.reason,'orders_queried');assert.ok(receivedResult);assert.match(sent[0],/Tu entrega comienza/);assert.doesNotMatch(sent[0],/Productos:/);
 }
-testBehaviorControlsToolsAndPause()
+async function testInvoiceAndAdditionalRequestStayConversational() {
+  pendingDocumentRequests.clear();
+  const texts = [], documents = [], aiRequests = [];
+  let lookups = 0;
+  const request = 'Y pasame la última factura y el alias para transferir';
+  const options = {
+    tenantId: 'SDG', phone: '5493462674128',
+    config: { manager_ai_enabled: true, manager_document_send_enabled: true, manager_folder: 'C:\\Manager\\Exe', dsn: 'msm_manager' },
+    classifyIntent: async (text, context) => {
+      if (!context?.toolResult) return { action: 'document', documentKind: 'sale', latest: true };
+      aiRequests.push({text, result: context.toolResult});
+      return { action: 'reply', replyText: context.toolResult.status === 'document_ready_to_send'
+        ? 'Te envío la factura. Alias: configurado en el comportamiento.' : 'Elegí un cliente. Alias: configurado en el comportamiento.' };
+    },
+    execPowerShell: async (script, args) => {
+      if (/lookup_client\.ps1$/.test(script)) {
+        if (++lookups === 1) return JSON.stringify({found:true,ambiguous:true,candidates:[{codigo:'2935'},{codigo:'506'}]});
+        assert.equal(args[args.indexOf('-ClientQuery')+1], '506');
+        return JSON.stringify({found:true,client:{codigo:'506',finanzas:{facturas:[{ptodeventa:'0001',nrotransaccion:'00012944'}]}}});
+      }
+      fs.writeFileSync(args[args.indexOf('-Output')+1], Buffer.from('%PDF test'));
+      return '';
+    },
+    sendText: async text => texts.push(text),
+    sendDocument: async doc => { assert.match(texts.at(-1), /Alias:/); documents.push(doc); }
+  };
+  await handleManagerDocumentRequest({...options,text:request});
+  const result = await handleManagerDocumentRequest({...options,text:'Del 2'});
+  assert.equal(result.reason,'document_sent');
+  assert.equal(documents[0].filename,'Factura_0001-00012944.pdf');
+  assert.ok(aiRequests.every(item=>item.text===request));
+  assert.equal(aiRequests.at(-1).result.status,'document_ready_to_send');
+  assert.ok(!lookupScriptSource.includes("LIKE '%ale%'"));
+  assert.match(lookupScriptSource, /\$phoneContains/);
+  require('../manager_ai_service').managerConversationActivity.clear();
+}
+
+testInvoiceAndAdditionalRequestStayConversational()
+  .then(testBehaviorControlsToolsAndPause)
   .then(testAmbiguousClientContinuation)
   .then(testConfiguredGreeting)
   .then(testNumberedClientSelection)
