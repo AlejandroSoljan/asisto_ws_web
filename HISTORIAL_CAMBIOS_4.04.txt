@@ -1,4 +1,8 @@
 ASISTO - AGENTE DE WHATSAPP
+v4.05.22 - 06/10/2026. Validación de destinatarios API con tres intentos.
+             Errores y respuestas negativas conservan el pendiente para reintento:
+             no se informa I, no se elimina el mensaje ni se excluye permanentemente
+             al teléfono por una consulta no confirmada. Despliegue dirigido a NEA.
 v4.05.21 - 03/10/2026. Diagnóstico de solicitud real Consulta_no_enviados para
              PEV y PEV1-4: inmediatamente antes de fetch informa endpoint,
              nro_tel_from y coincidencia exacta de key con la esperada mediante

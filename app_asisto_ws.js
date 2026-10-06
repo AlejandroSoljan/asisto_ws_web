@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.05.21 03/10/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.21';
+/*version: 4.05.22 06/10/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.22';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -9561,18 +9561,12 @@ async function ConsultaApiMensajes(){
              
             }
 
-            let registered = false;
-            try { registered = await client.isRegisteredUser(Nro_tel_format); } catch (e) {
-              EscribirLog('isRegisteredUser error ' + Nro_tel_format + ': ' + String(e?.message || e), "error");
-            }
-
-            if (!registered) {
-              EscribirLog('Mensaje: ' + Nro_tel_format + ': Número no Registrado', "event");
-              console.log("numero no registrado");
-              await io.emit('message', 'Mensaje: ' + Nro_tel_format + ': Número no Registrado');
-              const okInvalido = await actualizarEstadoUnidadApiMensajes(url_confirma_msg, 'I', null, dest);
-              if (okInvalido) await eliminarPendientePersistidoApiMensajes(Nro_tel, Id_msj_dest_local, Id_msj_renglon_local);
-              await registrarExclusionApiMensajes(Nro_tel, 'numero_no_registrado');
+            const registration = await require('./whatsapp_registration_check').checkRegistration(client, Nro_tel_format);
+            if (!registration.registered) {
+              const detail = '[API_MENSAJES] validación no confirmada; se conserva pendiente nro=' + Nro_tel + ' motivo=' + registration.reason;
+              console.log(detail);
+              EscribirLog(detail, 'event');
+              await io.emit('message', 'Mensaje: ' + Nro_tel_format + ': Validación pendiente; se reintentará');
               continue;
             }
 
