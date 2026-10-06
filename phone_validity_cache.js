@@ -17,7 +17,9 @@ async function validate({ collection, identity, client, jid, config, now = Date.
   try {
     const doc = await collection.findOne({ _id: identity._id });
     const cached = doc?.phoneValidation;
-    if (['valid', 'invalid'].includes(cached?.state) && new Date(cached.expiresAt).getTime() > now) return { ...cached, cached: true };
+    // Negative library lookups can be false negatives, even when repeated.
+    // Never trust the negative cache produced by previous versions.
+    if (cached?.state === 'valid' && new Date(cached.expiresAt).getTime() > now) return { ...cached, cached: true };
     let negatives = 0;
     for (let i = 0; i < 3; i++) {
       try {
@@ -27,8 +29,7 @@ async function validate({ collection, identity, client, jid, config, now = Date.
       } catch { /* An exception never proves a phone is invalid. */ }
       if (i < 2) await delay(1500);
     }
-    if (negatives === 3) return await save(collection, identity, 'invalid', config, now);
-    return { state: 'unknown', reason: 'lookup_inconclusive' };
+    return { state: 'unknown', reason: negatives === 3 ? 'lookup_negative_unconfirmed' : 'lookup_inconclusive' };
   } catch {
     return { state: 'unknown', reason: 'cache_error' };
   }
