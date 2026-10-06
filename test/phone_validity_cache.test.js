@@ -1,0 +1,28 @@
+const assert = require('assert');
+const { validate, save } = require('../phone_validity_cache');
+(async () => {
+  let doc = null, calls = 0;
+  const collection = { findOne: async () => doc, updateOne: async (q,u) => { doc = { ...doc, ...u.$set }; } };
+  const identity = { _id: 'T:F:123', tenantId:'T', numeroFrom:'F', nroTel:'123' };
+  const args = { collection, identity, jid:'123@c.us', now: 100000, delay:async()=>{}, client:{isRegisteredUser:async()=>{calls++;return true;}} };
+  assert.equal((await validate(args)).state,'valid');
+  assert.equal((await validate(args)).cached,true); assert.equal(calls,1);
+  args.now += 31*86400000;
+  await validate(args); assert.equal(calls,2);
+  doc = null; calls = 0;
+  args.client.isRegisteredUser = async()=>{calls++;return false;};
+  assert.equal((await validate(args)).state,'invalid'); assert.equal(calls,3);
+  assert.equal((await validate(args)).cached,true); assert.equal(calls,3);
+  args.now += 2*86400000;
+  args.client.isRegisteredUser = async()=>{throw Error('offline');};
+  assert.equal((await validate(args)).state,'unknown');
+  assert.equal(doc.phoneValidation.state,'invalid');
+  await save(collection,identity,'valid',{phone_validation_valid_days:2},args.now,true);
+  assert.equal(+doc.phoneValidation.expiresAt,args.now+2*86400000);
+  assert.equal(+doc.phoneLastSuccessfulSendAt,args.now);
+  doc=null;let n=0;
+  args.client.isRegisteredUser=async()=>{if(++n===1)throw Error();return false;};
+  assert.equal((await validate(args)).state,'unknown'); assert.equal(doc,null);
+  assert.equal((await validate({...args,collection:null})).state,'unknown');
+  console.log('Phone validity cache tests: ok');
+})().catch(e=>{console.error(e);process.exit(1)});

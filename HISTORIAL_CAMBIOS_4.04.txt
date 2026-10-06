@@ -1,4 +1,11 @@
 ASISTO - AGENTE DE WHATSAPP
+v4.05.23 - 06/10/2026. Caché de validación de teléfonos en Asisto, aislada por
+             dominio/emisor, sin migrar exclusiones antiguas. Campos phoneValidation
+             y phoneLastSuccessfulSendAt. Válidos 30 días, inválidos 1 día;
+             configura phone_validation_valid_days / phone_validation_invalid_days.
+             Tres respuestas negativas explícitas confirman inválido (API I);
+             errores o respuestas vacías no cancelan. Envío exitoso renueva vigencia.
+             No crea exclusiones permanentes por validación. Requiere esta versión.
 v4.05.22 - 06/10/2026. Validación de destinatarios API con tres intentos.
              Errores y respuestas negativas conservan el pendiente para reintento:
              no se informa I, no se elimina el mensaje ni se excluye permanentemente

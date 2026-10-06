@@ -16,7 +16,7 @@ const { checkRegistration } = require('../whatsapp_registration_check');
   assert.equal((await checkRegistration({ isRegisteredUser: async () => { throw Error('network'); } }, '123@c.us', opts)).reason, 'lookup_error');
   const fs = require('fs');
   const source = fs.readFileSync(require('path').join(__dirname, '../app_asisto_ws.js'), 'utf8');
-  const block = source.split('if (!registration.registered) {')[1].split('continue;')[0];
+  const block = source.split("if (registration.state !== 'valid') {")[1].split('continue;')[0];
   assert(!/actualizarEstadoUnidad|eliminarPendiente|registrarExclusion/.test(block));
   console.log('Registration checks: ok');
 })().catch(e => { console.error(e); process.exit(1); });

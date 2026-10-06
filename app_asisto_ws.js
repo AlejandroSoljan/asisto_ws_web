@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.05.22 06/10/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.22';
+/*version: 4.05.23 06/10/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.23';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -901,13 +901,13 @@ class BaileysCompatClient extends EventEmitter {
     const jid = baileysToJid(id);
     if (!jid || /@g\.us$/i.test(jid) || /@broadcast$/i.test(jid)) return false;
     if (/@lid$/i.test(jid)) return true;
-    if (!this._socket?.onWhatsApp) return true;
-    try {
+    if (!this._socket?.onWhatsApp) throw new Error('whatsapp_lookup_unavailable');
+    {
       const result = await this._socket.onWhatsApp(jid);
-      if (!Array.isArray(result) || !result.length) return false;
-      return result.some((row) => row?.exists !== false);
-    } catch {
-      return false;
+      if (!Array.isArray(result) || !result.length) throw new Error('whatsapp_lookup_empty');
+      if (result.some((row) => row?.exists === true)) return true;
+      if (result.every((row) => row?.exists === false)) return false;
+      throw new Error('whatsapp_lookup_inconclusive');
     }
   }
 
@@ -7255,6 +7255,10 @@ function apiMensajesConfirmacionId(nroTel) {
   return `${t}:${from}:${to}`;
 }
 
+function phoneValidationIdentity(nroTel) {
+  return { _id: apiMensajesConfirmacionId(nroTel), tenantId: apiMensajesConfirmacionTenantId(), numeroFrom: apiMensajesConfirmacionNumeroFrom(), nroTel: onlyDigits(nroTel) };
+}
+
 function apiMensajesConfirmacionTenantId() {
   return String(tenantId || '').trim().toUpperCase();
 }
@@ -7732,6 +7736,15 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
           EscribirLog(logDuplicado, 'event');
         }
 
+        if (!envioYaRegistrado && !item.envioClaimedAt) {
+          const validity = await require('./phone_validity_cache').validate({ collection: col, identity: phoneValidationIdentity(to), client, jid: nroTelFormat, config: tenantConfig });
+          if (validity.state === 'invalid') {
+            const marked = await actualizarEstadoUnidadApiMensajes(url_confirma_msg, 'I', null, { Id_msj_dest: idDest, Id_msj_renglon: idRenglon, __renglones: item.renglones });
+            if (marked) await eliminarPendientePersistidoApiMensajes(to, idDest, idRenglon);
+            continue;
+          }
+          if (validity.state !== 'valid') { detenidoPor = 'validacion_pendiente'; continue; }
+        }
         if (!envioYaRegistrado) {
           // Dos eventos de la misma respuesta pueden procesar el mismo documento
           // simultáneamente. Reservarlo en Mongo ANTES de safeSend evita dos envíos.
@@ -8169,6 +8182,7 @@ async function marcarPendienteEnviadoApiMensajes(nroTel, idDest, idRenglon, sent
     if (!await ensureMongo()) return false;
     const col = apiMensajesConfirmacionCollection();
     if (!col) return false;
+    try { await require('./phone_validity_cache').save(col, phoneValidationIdentity(nroTel), 'valid', tenantConfig, Date.now(), true); } catch {}
     const k = keyPendienteConfirmacionApiMensajes(idDest, idRenglon);
     const now = new Date();
     const wsId = getOutgoingStatMessageId(sentMessage) || '';
@@ -9561,8 +9575,15 @@ async function ConsultaApiMensajes(){
              
             }
 
-            const registration = await require('./whatsapp_registration_check').checkRegistration(client, Nro_tel_format);
-            if (!registration.registered) {
+            await ensureMongo();
+            const registration = await require('./phone_validity_cache').validate({ collection: apiMensajesConfirmacionCollection(), identity: phoneValidationIdentity(Nro_tel), client, jid: Nro_tel_format, config: tenantConfig });
+            if (registration.state === 'invalid') {
+              const marked = await actualizarEstadoUnidadApiMensajes(url_confirma_msg, 'I', null, dest);
+              if (marked) await eliminarPendientePersistidoApiMensajes(Nro_tel, Id_msj_dest_local, Id_msj_renglon_local);
+              EscribirLog('[PHONE_VALIDATION] inválido confirmado nro=' + Nro_tel + ' vence=' + registration.expiresAt, 'event');
+              continue;
+            }
+            if (registration.state !== 'valid') {
               const detail = '[API_MENSAJES] validación no confirmada; se conserva pendiente nro=' + Nro_tel + ' motivo=' + registration.reason;
               console.log(detail);
               EscribirLog(detail, 'event');
