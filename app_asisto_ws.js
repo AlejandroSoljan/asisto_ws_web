@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.05.28 07/10/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.28';
+/*version: 4.05.29 07/10/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.29';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -3885,13 +3885,7 @@ async function autoUpdateForceTargetTagOnBoot(reason = 'boot_target_tag_force') 
   const changedOut = await runCommand('git', ['diff', '--name-only', `${localHead}..${targetHead}`], { cwd: repoPath, timeout: 30_000 });
   const changedFiles = String(changedOut.stdout || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
 
-  // En arranque forzado ignoramos working tree local: reemplazamos sí o sí.
-  const localChanges = await runCommand('git', ['status', '--porcelain', '--untracked-files=normal'], { cwd: repoPath, timeout: 30_000 });
-  if (String(localChanges.stdout || '').trim()) {
-    autoUpdateLog(`[AUTO_UPDATE] skip (${reason}): hay cambios locales; no se reemplazan archivos del cliente`, 'error');
-    return false;
-  }
-  await runCommand('git', ['reset', '--hard', targetHead], { cwd: repoPath, timeout: 120_000 });
+  await require('./safe_agent_update').applyFastForward(runCommand, repoPath, targetHead);
 
   if (auto_update_run_npm_install) {
     const needsNpm = changedFiles.some((name) => /(^|\/)(package\.json|package-lock\.json)$/i.test(name));
@@ -3940,13 +3934,8 @@ async function autoUpdateCheckAndApply(reason = 'interval') {
     await runCommand('git', ['rev-parse', '--is-inside-work-tree'], { cwd: repoPath, timeout: 15_000 });
 
 
-    if (auto_update_require_clean) {
-      const statusOut = await runCommand('git', ['status', '--porcelain'], { cwd: repoPath, timeout: 20_000 });
-      if (String(statusOut.stdout || '').trim()) {
-        autoUpdateLog(`[AUTO_UPDATE] skip (${reason}): working tree con cambios locales`, 'event');
-        return;
-      }
-    }
+    // Local edits are protected by Git's fast-forward merge, regardless of
+    // require_clean. Unrelated configuration/backups do not block updates.
 
     const headOut = await runCommand('git', ['rev-parse', 'HEAD'], { cwd: repoPath, timeout: 15_000 });
     const localHead = String(headOut.stdout || '').trim();
@@ -3967,7 +3956,7 @@ async function autoUpdateCheckAndApply(reason = 'interval') {
 
     const changedFiles = String(changedOut.stdout || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
 
-    await runCommand('git', ['reset', '--hard', targetHead], { cwd: repoPath, timeout: 120_000 });
+    await require('./safe_agent_update').applyFastForward(runCommand, repoPath, targetHead);
 
     if (auto_update_run_npm_install) {
       const needsNpm = changedFiles.some((name) => /(^|\/)(package\.json|package-lock\.json)$/i.test(name));
@@ -4004,7 +3993,25 @@ function startAutoUpdateScheduler() {
   // En multi-sesión no modificamos Git/node_modules con workers activos.
   // El worker primario ya hace la verificación forzada antes de habilitar al resto.
   if (ASISTO_MULTI_WORKER) {
-    autoUpdateLog('[AUTO_UPDATE] scheduler periódico omitido en multi-sesión; update sólo al arranque del primario', 'event');
+    if (!ASISTO_MULTI_PRIMARY_WORKER || autoUpdateTimer) return;
+    // Only detect desired-tag changes here. Restart ALL workers through the
+    // supervisor; only the primary updates Git before secondaries can start.
+    // Baseline is the boot target, so a conflict never causes a restart loop.
+    const watch = require('./safe_agent_update').createMultiUpdateWatcher(auto_update_target_tag);
+    autoUpdateTimer = setInterval(async () => {
+      try {
+        await loadTenantConfigFromDbMinimal();
+        await watch({ enabled: auto_update_enabled, primary: true, target: auto_update_target_tag,
+          restart: async target => {
+            if (!sendMultiSupervisorMessage({ type: 'multi_global_restart_request',
+              reason: 'auto_update_target:' + target, key: ASISTO_MULTI_SESSION_KEY })) {
+              throw new Error('multi_supervisor_ipc_not_available');
+            }
+          }
+        });
+      } catch (e) { autoUpdateLog('[AUTO_UPDATE] multi target check: ' + String(e?.message || e), 'error'); }
+    }, Math.max(60000, Number(auto_update_check_every_ms) || 600000));
+    autoUpdateLog('[AUTO_UPDATE] primario multi: vigilancia de target activa; aplicación al reiniciar supervisor', 'event');
     return;
   }
 

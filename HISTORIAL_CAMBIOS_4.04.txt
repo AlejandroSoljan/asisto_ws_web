@@ -1,4 +1,11 @@
 ASISTO - AGENTE DE WHATSAPP
+v4.05.29 - 07/10/2026. Actualizador seguro: git merge --ff-only en arranque
+             y ejecución, sin reset --hard. Conserva cambios locales y backups;
+             Git detiene conflictos reales o divergencias, no cambios ajenos.
+             Primario multi-sesión vigila cambios de target y solicita reinicio
+             global; aplica antes de iniciar secundarios, sin bucle si falla.
+             Instalaciones anteriores bloqueadas requieren bootstrap de esta
+             versión: cambiar el target por sí solo no repara código ya instalado.
 v4.05.28 - 07/10/2026. RVL: los destinatarios sin chat/LID pasan a custodia
              durable en Asisto antes del acuse E al API (recepción por agente,
              no entrega WhatsApp), liberando lotes repetidos. Conserva documento,
