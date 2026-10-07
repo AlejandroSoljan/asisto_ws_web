@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.05.26 07/10/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.26';
+/*version: 4.05.27 07/10/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.27';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -9610,6 +9610,18 @@ async function ConsultaApiMensajes(){
               return;
             }
 
+
+            // Resolve before consent sends or document claims. One unresolved
+            // recipient must not abort the API batch and starve later rows.
+            if (isWwebJsEngine()) {
+              const recipient = await require('./wweb_chat_resolution').prepareRecipient(client, Nro_tel_format);
+              if (!recipient.ready) {
+                const detail = '[API_MENSAJES] destinatario diferido; continua lote nro=' + Nro_tel + ' motivo=' + recipient.reason;
+                console.log(detail);
+                EscribirLog(detail, 'event');
+                continue;
+              }
+            }
 
             const prioridadConfirmacion = dest.prioridad ?? msg.Prioridad;
             const permisoKey = Nro_tel + '|' + String(prioridadConfirmacion ?? '');

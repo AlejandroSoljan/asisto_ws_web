@@ -1,4 +1,9 @@
 ASISTO - AGENTE DE WHATSAPP
+v4.05.27 - 07/10/2026. Consulta API: un destinatario sin chat/LID se difiere
+             antes de solicitar consentimiento o reservar el documento y el lote
+             continúa con los siguientes. No marca I/C/E ni borra el pendiente.
+             Conserva circuitos de sesión/transporte, consentimiento y cupos.
+             Despliegue inicial RVL para verificar cola real.
 v4.05.26 - 07/10/2026. Recuperación acotada de getChat ante No LID for user:
              usa sólo asociación teléfono/LID explícita de WhatsApp para el
              mismo destinatario, antes del envío. No reintenta mensajes enviados,

@@ -52,4 +52,19 @@ async function diagnose(client, phone) {
   }, phone + '@c.us');
 }
 
-module.exports = { installInPage, install, diagnose };
+async function prepareRecipient(client, jid) {
+  if (!client?.pupPage || !/^\d+@c\.us$/.test(jid)) return { ready: true };
+  await install(client);
+  try {
+    const exists = await client.pupPage.evaluate(async id =>
+      !!(await window.WWebJS.getChat(id, { getAsModel: false })), jid);
+    return exists ? { ready: true } : { ready: false, reason: 'chat_unresolved' };
+  } catch (e) {
+    if (String(e?.message || e).includes('No LID for user')) {
+      return { ready: false, reason: 'lid_unresolved' };
+    }
+    throw e; // Session/transport failures keep their circuit-breaker behavior.
+  }
+}
+
+module.exports = { installInPage, install, diagnose, prepareRecipient };
