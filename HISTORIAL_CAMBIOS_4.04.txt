@@ -1,4 +1,10 @@
 ASISTO - AGENTE DE WHATSAPP
+v4.05.28 - 07/10/2026. RVL: los destinatarios sin chat/LID pasan a custodia
+             durable en Asisto antes del acuse E al API (recepción por agente,
+             no entrega WhatsApp), liberando lotes repetidos. Conserva documento,
+             IDs y consentimiento; reintenta por fecha cada 5 minutos, máximo
+             3 destinatarios por ciclo. No libera reservas inciertas ni marca I.
+             Despliegue inicial RVL y verificación de avance de cola.
 v4.05.27 - 07/10/2026. Consulta API: un destinatario sin chat/LID se difiere
              antes de solicitar consentimiento o reservar el documento y el lote
              continúa con los siguientes. No marca I/C/E ni borra el pendiente.

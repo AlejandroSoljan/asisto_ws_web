@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.05.27 07/10/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.27';
+/*version: 4.05.28 07/10/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.28';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -8116,7 +8116,7 @@ async function guardarLoteRecibidoApiMensajes(unidades) {
         }
         // Sólo se puede cerrar el registro del API si sabemos que la solicitud
         // de confirmación ya salió, o que el documento mismo ya fue enviado.
-        if (existente?.pedidoAt || existente?.estado === 'aceptado' || pendientesExistentes[k]?.envioCompletadoAt) {
+        if (existente?.pedidoAt || existente?.estado === 'aceptado' || pendientesExistentes[k]?.envioCompletadoAt || pendientesExistentes[k]?.apiEntregadoAt) {
           asumibles.add(k);
         }
         continue;
@@ -8247,6 +8247,43 @@ async function eliminarPendientePersistidoApiMensajes(nroTel, idDest, idRenglon)
     try { EscribirLog('[API_MENSAJES] error quitando pendiente persistido: ' + String(e?.message || e), 'error'); } catch {}
     return false;
   }
+}
+
+async function recuperarDiferidosApiMensajes() {
+  const col = apiMensajesConfirmacionCollection();
+  if (!col) return;
+  await require('./deferred_api_queue').recover({
+    collection: col,
+    baseQuery: { tenantId: apiMensajesConfirmacionTenantId(), numeroFrom: apiMensajesConfirmacionNumeroFrom() },
+    allowed: async () => String(localWsPanelState) === 'online' &&
+      !await isWwebMessagesBlockedSafe() && (await getConsultaMensajesScheduleStatus()).allowed,
+    process: async snapshot => {
+      const doc = await col.findOne({ _id: snapshot._id });
+      if (!doc) return true;
+      const items = pendientesConfirmacionApiMensajesArray(doc);
+      if (!items.length) return true;
+      if (items.some(i => i.envioClaimedAt && !i.envioCompletadoAt)) return false;
+      // Accepted documents use the existing idempotent delivery path.
+      if (doc.estado === 'aceptado') return false;
+      if (doc.estado === 'cancelado' || doc.exclusionPermanente === true) {
+        await procesarPendientesDocConfirmacionApiMensajes(doc, 'C', 'recuperacion_diferida_cancelada');
+        return true;
+      }
+      if (isWwebJsEngine() && !(await require('./wweb_chat_resolution').prepareRecipient(client, doc.nroTel + '@c.us')).ready) return false;
+      const item = items.find(i => requiereConfirmacionPrioridadApiMensajes(i.prioridad)) || items[0];
+      const permiso = await estadoConfirmacionApiMensajes(doc.nroTel, item.agente_id_desc_msj, item.prioridad);
+      if (permiso.autorizado) {
+        await procesarPendientesDocConfirmacionApiMensajes(await col.findOne({ _id: doc._id }), 'E', 'recuperacion_diferida');
+        const latest = await col.findOne({ _id: doc._id });
+        return !pendientesConfirmacionApiMensajesArray(latest).length;
+      }
+      return permiso.solicitudEnviada === true || permiso.motivo === 'pendiente';
+    },
+    onError: async (doc, error) => {
+      await col.updateOne({ _id: doc._id }, { $set: { 'deferredApi.lastError': String(error?.message || error).slice(0, 500) } });
+      EscribirLog('[API_MENSAJES] recuperacion diferida pendiente nro=' + doc.nroTel, 'error');
+    }
+  });
 }
 
 async function recuperarLotePersistidoApiMensajes() {
@@ -9394,6 +9431,8 @@ async function ConsultaApiMensajes(){
         continue;
       }
 
+      await recuperarDiferidosApiMensajes();
+
       const nroTelFrom = getApiMensajesNroTelFrom();
       if (!api2 || !api3 || !key || !nroTelFrom) {
         const detalle = `ConsultaApiMensajes sin configuración completa api2=${!!api2} api3=${!!api3} key=${!!key} nro_tel_from=${nroTelFrom || '(vacío)'}`;
@@ -9616,8 +9655,18 @@ async function ConsultaApiMensajes(){
             if (isWwebJsEngine()) {
               const recipient = await require('./wweb_chat_resolution').prepareRecipient(client, Nro_tel_format);
               if (!recipient.ready) {
+                const custody = await require('./deferred_api_queue').takeCustody({
+                  collection: apiMensajesConfirmacionCollection(),
+                  id: apiMensajesConfirmacionId(Nro_tel),
+                  key: keyPendienteConfirmacionApiMensajes(Id_msj_dest_local, Id_msj_renglon_local),
+                  reason: recipient.reason,
+                  acknowledge: item => actualizarEstadoUnidadApiMensajes(url_confirma_msg, 'E', null, {
+                    Id_msj_dest: item.id_msj_dest, Id_msj_renglon: item.id_msj_renglon, __renglones: item.renglones
+                  })
+                });
                 const detail = '[API_MENSAJES] destinatario diferido; continua lote nro=' + Nro_tel + ' motivo=' + recipient.reason;
                 console.log(detail);
+                console.log('[API_MENSAJES] custodia durable=' + custody + '; pendiente de envio WhatsApp nro=' + Nro_tel);
                 EscribirLog(detail, 'event');
                 continue;
               }

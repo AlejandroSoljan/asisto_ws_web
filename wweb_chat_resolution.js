@@ -39,6 +39,12 @@ async function diagnose(client, phone) {
   return client.pupPage.evaluate(async (jid) => {
     const result = { jid, status: 'unresolved' };
     try {
+      const wid = window.require('WAWebWidFactory').createWid(jid);
+      const query = await window.require('WAWebQueryExistsJob').queryWidExists(wid);
+      result.query = { present: !!query, keys: Object.keys(query || {}),
+        wid: query?.wid?._serialized || null };
+    } catch (e) { result.queryError = String(e?.message || e).slice(0, 300); }
+    try {
       const map = await window.WWebJS.enforceLidAndPnRetrieval(jid);
       result.phone = map?.phone?._serialized || null;
       result.lid = map?.lid?._serialized || null;
