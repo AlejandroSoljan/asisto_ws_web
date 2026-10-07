@@ -34,4 +34,8 @@ async function validate({ collection, identity, client, jid, config, now = Date.
     return { state: 'unknown', reason: 'cache_error' };
   }
 }
-module.exports = { validate, save, ttl };
+function canAttemptDelivery(result) {
+  return result?.state === 'valid' || (result?.state === 'unknown' &&
+    ['lookup_negative_unconfirmed', 'lookup_inconclusive'].includes(result.reason));
+}
+module.exports = { validate, save, ttl, canAttemptDelivery };

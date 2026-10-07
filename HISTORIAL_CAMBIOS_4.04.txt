@@ -1,4 +1,9 @@
 ASISTO - AGENTE DE WHATSAPP
+v4.05.25 - 07/10/2026. Corrige bloqueo de envíos introducido por validación previa:
+             lookup negativo/inconcluso permite el intento normal sin declarar
+             válido al número. Conserva consentimiento, cupos, pausa y reservas
+             antidupli. Error de caché/base sigue diferido. No libera envíos
+             inciertos ni exclusiones previas. Despliegue inicial RVL.
 v4.05.24 - 06/10/2026. Revierte confirmación negativa automática de v4.05.23:
              tres false de la librería no prueban invalidez. Se conserva pendiente
              y no devuelve estado invalid ni informa I por ese resultado.

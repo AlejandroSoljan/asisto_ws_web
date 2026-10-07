@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.05.24 06/10/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.24';
+/*version: 4.05.25 07/10/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.25';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -7743,7 +7743,7 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
             if (marked) await eliminarPendientePersistidoApiMensajes(to, idDest, idRenglon);
             continue;
           }
-          if (validity.state !== 'valid') { detenidoPor = 'validacion_pendiente'; continue; }
+          if (!require('./phone_validity_cache').canAttemptDelivery(validity)) { detenidoPor = 'validacion_pendiente'; continue; }
         }
         if (!envioYaRegistrado) {
           // Dos eventos de la misma respuesta pueden procesar el mismo documento
@@ -9584,11 +9584,10 @@ async function ConsultaApiMensajes(){
               continue;
             }
             if (registration.state !== 'valid') {
-              const detail = '[API_MENSAJES] validación no confirmada; se conserva pendiente nro=' + Nro_tel + ' motivo=' + registration.reason;
+              const detail = '[API_MENSAJES] validación no confirmada nro=' + Nro_tel + ' motivo=' + registration.reason + '; intento sujeto a consentimiento/cupo y sesión';
               console.log(detail);
               EscribirLog(detail, 'event');
-              await io.emit('message', 'Mensaje: ' + Nro_tel_format + ': Validación pendiente; se reintentará');
-              continue;
+              if (!require('./phone_validity_cache').canAttemptDelivery(registration)) continue;
             }
 
 

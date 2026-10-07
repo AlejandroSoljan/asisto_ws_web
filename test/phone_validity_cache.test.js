@@ -1,6 +1,12 @@
 const assert = require('assert');
-const { validate, save } = require('../phone_validity_cache');
+const { validate, save, canAttemptDelivery } = require('../phone_validity_cache');
 (async () => {
+  assert(canAttemptDelivery({state:'valid'}));
+  assert(canAttemptDelivery({state:'unknown',reason:'lookup_negative_unconfirmed'}));
+  assert(canAttemptDelivery({state:'unknown',reason:'lookup_inconclusive'}));
+  assert(!canAttemptDelivery({state:'unknown',reason:'cache_error'}));
+  assert(!canAttemptDelivery({state:'unknown',reason:'cache_unavailable'}));
+  assert(!canAttemptDelivery({state:'invalid'}));
   let doc = null, calls = 0;
   const collection = { findOne: async () => doc, updateOne: async (q,u) => { doc = { ...doc, ...u.$set }; } };
   const identity = { _id: 'T:F:123', tenantId:'T', numeroFrom:'F', nroTel:'123' };
