@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.05.25 07/10/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.25';
+/*version: 4.05.26 07/10/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.26';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -5993,6 +5993,7 @@ async function createClientIfNeeded(opts = {}) {
 const automaticSendIds = new Map();
 const automaticSendsInFlight = new Set();
 async function safeSend(to, content, opts) {
+  if (isWwebJsEngine()) await require('./wweb_chat_resolution').install(client);
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       // Estado del cliente (CONNECTED/OPENING/etc.). Si falla, seguimos intentando.
@@ -6733,6 +6734,11 @@ async function handleActionDoc(doc) {
       } finally {
         try { if (inspectionConnection?.close) await inspectionConnection.close(); } catch {}
       }
+    }
+
+    if (action === 'diagnose_wweb_chat_resolution') {
+      if (tenantId !== 'RVL') return { status: 'unavailable' };
+      return require('./wweb_chat_resolution').diagnose(client, String(doc?.to || ''));
     }
 
     if (action === 'diagnose_wweb_media_runtime') {
