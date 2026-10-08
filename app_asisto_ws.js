@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.05.29 07/10/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.29';
+/*version: 4.05.30 08/10/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.30';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -7713,8 +7713,8 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
         // El cupo limita el inicio de solicitudes nuevas. Una vez que el cliente
         // respondió y el documento quedó aceptado, hay que completar ese envío:
         // bloquearlo aquí deja un OK válido retenido indefinidamente.
-        if (doc?.estado !== 'aceptado') {
-          const cupo = await estadoLimiteDiarioApiMensajes(to);
+        {
+          const cupo = await estadoLimiteDiarioApiMensajes(to, doc?.estado === 'aceptado');
           if (!cupo.permitido) {
             logLimiteDiarioApiMensajes(cupo);
             detenidoPor = 'limite_diario';
@@ -7852,7 +7852,7 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
             caption: msj,
             linkPreview: false,
             sendMediaAsDocument: mimeType === 'application/pdf'
-          }));
+          }), { idDest, idRenglon });
           apiMensajesFallosConsecutivos = 0;
           await recordApiMensajesBillingWindow(to, {
             sentMessage: sentApiMensaje,
@@ -7871,7 +7871,7 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
           EscribirLog(logEnvioApi, 'event');
         } else {
           await io.emit('message', 'Mensaje: ' + nroTelFormat + ': ' + msj);
-          sentApiMensaje = await enviarApiMensajesConPausa(to, () => safeSend(nroTelFormat, msj));
+          sentApiMensaje = await enviarApiMensajesConPausa(to, () => safeSend(nroTelFormat, msj), { idDest, idRenglon });
           apiMensajesFallosConsecutivos = 0;
           await recordApiMensajesBillingWindow(to, {
             sentMessage: sentApiMensaje,
@@ -7914,6 +7914,7 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
         }
       }
     } catch (e) {
+      if (e?.code === 'DAILY_MESSAGE_LIMIT') { detenidoPor = 'limite_diario'; break; }
       const errorDetalle = String(e?.message || e);
       errores.push({ key: pendingKey, error: errorDetalle.slice(0, 1000) });
       try {
@@ -8505,11 +8506,12 @@ function esTextoSolicitudConfirmacionApiMensajes(body) {
     .some(texto => b === normalizarRespuestaConfirmacionApiMensajes(texto));
 }
 
-async function estadoLimiteDiarioApiMensajes(destinatario = '') {
+async function estadoLimiteDiarioApiMensajes(destinatario = '', soloMensajes = false) {
   const limite = Math.max(0, Math.floor(Number(api_mensajes_limite_diario) || 0));
+  const limiteMensajes = Math.max(0, Math.floor(Number(tenantConfig?.api_mensajes_limite_mensajes_diario) || 0));
   const porClientes = tenantConfig?.api_mensajes_limite_unidad === 'clientes';
   try {
-    if (limite <= 0) return { permitido: true, limite: 0, enviados: 0, restantes: null };
+    if (limite <= 0 && limiteMensajes <= 0) return { permitido: true, limite: 0, enviados: 0, restantes: null };
     if (!await ensureMongo()) return { permitido: false, limite, enviados: null, restantes: null, degradado: true, motivo: 'mongo_no_disponible' };
     const dayKey = arDatePartsForStats(new Date()).dayKey;
     // El cupo corresponde a la campaña/API de Asisto. wa_wweb_message_log también
@@ -8528,22 +8530,27 @@ async function estadoLimiteDiarioApiMensajes(destinatario = '') {
     }, { projection: { contact: 1, messages: 1, windowStartedAt: 1 } }).toArray();
     if (!Array.isArray(docs)) throw new Error('contador_respuesta_invalida');
     const reales = new Set();
+    const mensajes = new Set();
     for (const doc of (Array.isArray(docs) ? docs : [])) {
       const entries = Array.isArray(doc?.messages) ? doc.messages : [];
       for (let index = 0; index < entries.length; index++) {
         const entry = entries[index] || {};
         const atMs = new Date(entry.at || doc.windowStartedAt || 0).getTime();
         if (!Number.isFinite(atMs) || atMs < desde.getTime() || atMs >= hasta.getTime()) continue;
+        mensajes.add(String(entry.waMessageId || [doc._id, index, atMs].join(':')));
         if (porClientes) {
           const contact = onlyDigits(doc.contact || '');
           if (contact) reales.add(contact);
-          break;
+          continue;
         }
         reales.add(String(entry.waMessageId || [doc._id, index, atMs].join(':')));
       }
     }
     const enviados = reales.size;
-    return { permitido: enviados < limite || (porClientes && reales.has(onlyDigits(destinatario))), limite, enviados, restantes: Math.max(0, limite - enviados), dayKey, unidad: porClientes ? 'clientes' : 'mensajes' };
+    const ledger = limiteMensajes > 0 ? await colVentanas.findOne({ _id: `daily-quota:${tenantId}:${String(getApiMensajesNroTelFrom() || numero || '')}:${dayKey}` }) : null;
+    const usados = Math.max(mensajes.size, Number(ledger?.used) || 0);
+    if (limiteMensajes > 0 && usados >= limiteMensajes) return { permitido: false, limite: limiteMensajes, enviados: usados, restantes: 0, dayKey, unidad: 'mensajes', mensajesEnviados: mensajes.size };
+    return { permitido: soloMensajes || limite <= 0 || enviados < limite || (porClientes && reales.has(onlyDigits(destinatario))), limite, enviados, restantes: Math.max(0, limite - enviados), dayKey, unidad: porClientes ? 'clientes' : 'mensajes', mensajesEnviados: mensajes.size };
   } catch (e) {
     return { permitido: false, limite, enviados: null, restantes: null, degradado: true, motivo: String(e?.message || e) };
   }
@@ -9275,7 +9282,7 @@ function calcularDelayConsultaMensajesMs(nroTelAnterior, nroTelActual) {
 let apiMensajesEnvioTail = Promise.resolve();
 let apiMensajesUltimoNroEnviado = '';
 
-async function enviarApiMensajesConPausa(nroTel, enviar) {
+async function enviarApiMensajesConPausa(nroTel, enviar, pendiente = null) {
   const actual = onlyDigits(nroTel || '');
   let liberar;
   const turnoAnterior = apiMensajesEnvioTail;
@@ -9286,6 +9293,33 @@ async function enviarApiMensajesConPausa(nroTel, enviar) {
     if (apiMensajesUltimoNroEnviado) {
       const delay = calcularDelayConsultaMensajesMs(apiMensajesUltimoNroEnviado, actual);
       if (delay > 0) await sleep(delay);
+    }
+    // Runs inside the send queue and reserves durably before any WhatsApp call.
+    const limiteMensajes = Math.max(0, Math.floor(Number(tenantConfig?.api_mensajes_limite_mensajes_diario) || 0));
+    if (limiteMensajes > 0) {
+      let reservado = false;
+      try {
+        const cupo = await estadoLimiteDiarioApiMensajes(actual, true);
+        reservado = cupo.permitido && await require('./daily_message_quota').reserve(getDataCollection('wa_api_message_windows'), {
+          tenantId: String(tenantId || ''), numeroFrom: String(getApiMensajesNroTelFrom() || numero || ''),
+          dayKey: cupo.dayKey, limit: limiteMensajes, sent: cupo.mensajesEnviados
+        });
+      } catch (e) {
+        console.log('[API_MENSAJES] no se pudo reservar cupo diario: ' + String(e?.message || e));
+      }
+      if (!reservado) {
+        // The caller claimed this item, but no transport call occurred. Leave it
+        // available for tomorrow without treating it as an uncertain delivery.
+        if (pendiente) {
+          const k = keyPendienteConfirmacionApiMensajes(pendiente.idDest, pendiente.idRenglon);
+          await apiMensajesConfirmacionCollection().updateOne({
+            _id: apiMensajesConfirmacionId(actual), [`pendientes.${k}.envioCompletadoAt`]: { $exists: false }
+          }, { $unset: { [`pendientes.${k}.envioClaimedAt`]: '' } });
+        }
+        const error = new Error('limite_diario_mensajes: envío diferido, no enviado');
+        error.code = 'DAILY_MESSAGE_LIMIT';
+        throw error;
+      }
     }
     const resultado = await enviar();
     apiMensajesUltimoNroEnviado = actual;
@@ -9772,7 +9806,7 @@ async function ConsultaApiMensajes(){
                 caption: Msj,
                 linkPreview: false,
                 sendMediaAsDocument: mimeType === 'application/pdf'
-              }));
+              }), { idDest: Id_msj_dest_local, idRenglon: Id_msj_renglon_local });
               apiMensajesFallosConsecutivos = 0;
               await recordApiMensajesBillingWindow(Nro_tel, {
                 sentMessage: sentApiMensaje,
@@ -9805,7 +9839,7 @@ async function ConsultaApiMensajes(){
                 EscribirLog(logReserva, 'error');
                 continue;
               }
-              sentApiMensaje = await enviarApiMensajesConPausa(Nro_tel, () => safeSend(Nro_tel_format, Msj));
+              sentApiMensaje = await enviarApiMensajesConPausa(Nro_tel, () => safeSend(Nro_tel_format, Msj), { idDest: Id_msj_dest_local, idRenglon: Id_msj_renglon_local });
               apiMensajesFallosConsecutivos = 0;
               await recordApiMensajesBillingWindow(Nro_tel, {
                 sentMessage: sentApiMensaje,
@@ -9857,6 +9891,7 @@ async function ConsultaApiMensajes(){
           
         }
       } catch (err) {
+        if (err?.code === 'DAILY_MESSAGE_LIMIT') return;
         const errorConsulta = 'ConsultaApiMensajes error: ' + String(err?.message || err);
         console.log(errorConsulta);
         EscribirLog(errorConsulta, "error");
@@ -9949,6 +9984,7 @@ function getRuntimeConfigSnapshot() {
     api_mensajes_confirmacion_validez_ms: Number(api_mensajes_confirmacion_validez_ms) || 0,
     api_mensajes_confirmacion_prioridades: api_mensajes_confirmacion_prioridades,
     api_mensajes_limite_diario: Number(api_mensajes_limite_diario) || 0,
+    api_mensajes_limite_mensajes_diario: Number(tenantConfig?.api_mensajes_limite_mensajes_diario) || 0,
     api_mensajes_limite_no_contactos: Number(api_mensajes_limite_no_contactos) || 0,
     api_mensajes_requerir_contacto_o_historial: api_mensajes_requerir_contacto_o_historial === true,
     api_mensajes_historial_whatsapp_limite: Number(api_mensajes_historial_whatsapp_limite) || 100,

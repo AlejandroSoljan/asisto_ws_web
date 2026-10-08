@@ -1,4 +1,11 @@
 ASISTO - AGENTE DE WHATSAPP
+v4.05.30 - 08/10/2026. Tope diario independiente de mensajes API, incluyendo
+             solicitudes, textos y adjuntos, aun con consentimiento aceptado.
+             Reserva atómica persistida antes del envío: reinicios y concurrencia
+             no reinician el cupo; intentos inciertos consumen cupo por seguridad.
+             Pendientes detenidos por cupo conservan contenido y quedan reintentables.
+             Configuración solicitada: 50 clientes/120 mensajes por dominio emisor;
+             CHIAROTTO, FLEMING*, PROVEMIX y GPN sin estos dos límites.
 v4.05.29 - 07/10/2026. Actualizador seguro: git merge --ff-only en arranque
              y ejecución, sin reset --hard. Conserva cambios locales y backups;
              Git detiene conflictos reales o divergencias, no cambios ajenos.
