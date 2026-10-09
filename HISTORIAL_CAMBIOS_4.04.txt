@@ -1,4 +1,9 @@
 ASISTO - AGENTE DE WHATSAPP
+v4.05.31 - 09/10/2026. No cancela por exclusiones técnicas históricas
+             numero_no_registrado sin respuesta de baja, en consentimiento y
+             recuperación diferida. No vuelve a crear exclusiones por ese motivo.
+             Conserva bajas voluntarias y no presume consentimiento ni reenvía
+             documentos ya cancelados en Manager. Corrección inicial NEA/NEA2.
 v4.05.30 - 08/10/2026. Tope diario independiente de mensajes API, incluyendo
              solicitudes, textos y adjuntos, aun con consentimiento aceptado.
              Reserva atómica persistida antes del envío: reinicios y concurrencia

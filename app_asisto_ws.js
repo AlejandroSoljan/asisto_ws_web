@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.05.30 08/10/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.30';
+/*version: 4.05.31 09/10/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.31';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -8266,7 +8266,7 @@ async function recuperarDiferidosApiMensajes() {
     allowed: async () => String(localWsPanelState) === 'online' &&
       !await isWwebMessagesBlockedSafe() && (await getConsultaMensajesScheduleStatus()).allowed,
     process: async snapshot => {
-      const doc = await col.findOne({ _id: snapshot._id });
+      const doc = require('./technical_exclusion').effectiveDocument(await col.findOne({ _id: snapshot._id }));
       if (!doc) return true;
       const items = pendientesConfirmacionApiMensajesArray(doc);
       if (!items.length) return true;
@@ -8634,6 +8634,7 @@ async function estadoLimiteNoContactosApiMensajes() {
 }
 
 async function registrarExclusionApiMensajes(nroTel, motivo, respuesta = '') {
+  if (motivo === 'numero_no_registrado') return false;
   try {
     if (!await ensureMongo()) return false;
     const col = apiMensajesConfirmacionCollection();
@@ -8871,7 +8872,7 @@ async function estadoConfirmacionApiMensajes(nroTel, descripcion = '', prioridad
   const now = new Date();
   const _id = apiMensajesConfirmacionId(to);
   const reenviarMs = Math.max(0, Number(api_mensajes_confirmacion_reenviar_ms) || 0);
-  let doc = await col.findOne({ _id });
+  let doc = require('./technical_exclusion').effectiveDocument(await col.findOne({ _id }));
   const solicitudVigente = apiMensajesConfirmacionSolicitudVigente(doc);
 
   if (doc?.exclusionPermanente === true) {
