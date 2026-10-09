@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.05.31 09/10/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.31';
+/*version: 4.05.32 09/10/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.32';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -7990,14 +7990,15 @@ async function procesarTimeoutsPendientesConfirmacionApiMensajes() {
     for (const doc of docs) {
       const now = new Date();
       await col.updateOne(
-        { _id: doc._id },
-        { $set: buildSetCanceladoConfirmacionApiMensajes(now, doc.nroTel, '', 'sin_respuesta_timeout') }
+        { _id: doc._id, estado: 'pendiente', pedidoAt: doc.pedidoAt,
+          exclusionPermanente: { $ne: true }, 'deferredApi.active': { $ne: true } },
+        { $set: { 'deferredApi.active': true, 'deferredApi.nextAt': now,
+          'deferredApi.reason': 'solicitud_sin_respuesta_reintentar', 'deferredApi.updatedAt': now } }
       );
-      const logTimeout = '[API_MENSAJES_CONFIRMACION] timeout con pendientes guardados; se actualiza a C nro=' + String(doc.nroTel || '') +
+      const logTimeout = '[API_MENSAJES_CONFIRMACION] solicitud vencida; conserva pendientes y programa reintento nro=' + String(doc.nroTel || '') +
         ' ventana_ms=' + String(reenviarMs);
       console.log(logTimeout);
       EscribirLog(logTimeout, 'event');
-      await procesarPendientesDocConfirmacionApiMensajes({ ...doc, estado: 'cancelado' }, 'C', 'sin_respuesta_timeout');
     }
   } catch (e) {
     try { EscribirLog('[API_MENSAJES_CONFIRMACION] error procesando timeouts: ' + String(e?.message || e), 'error'); } catch {}
@@ -8956,24 +8957,9 @@ async function estadoConfirmacionApiMensajes(nroTel, descripcion = '', prioridad
  const ultimoPedidoMs = doc?.pedidoAt ? new Date(doc.pedidoAt).getTime() : 0;
    const expiroVentana = !!doc && doc.estado === 'pendiente' && solicitudVigente && Number.isFinite(ultimoPedidoMs) && ultimoPedidoMs > 0 && reenviarMs > 0 && (Date.now() - ultimoPedidoMs) >= reenviarMs;
 
-  if (expiroVentana) {
-    const setCancelado = buildSetCanceladoConfirmacionApiMensajes(now, to, '', 'sin_respuesta_timeout');
-    await col.updateOne(
-      { _id },
-      {
-        $setOnInsert: { createdAt: now },
-        $set: setCancelado
-      },
-      { upsert: true }
-    );
-    const logTimeout = '[API_MENSAJES_CONFIRMACION] confirmacion cancelada por timeout a ' + to +
-      ' ventana_ms=' + String(reenviarMs);
-    console.log(logTimeout);
-    EscribirLog(logTimeout, 'event');
-    return { autorizado: false, motivo: 'sin_respuesta_timeout', solicitudEnviada: false, cancelarMensaje: true, doc: { ...(doc || {}), ...setCancelado } };
-  }
-
-  const debePedir = !doc || !Number.isFinite(ultimoPedidoMs) || ultimoPedidoMs <= 0 || !solicitudVigente;
+  // Silence never means opt-out. Retry only the consent request, under the
+  // existing schedule, daily quotas and risk circuit; do not authorize the file.
+  const debePedir = expiroVentana || !doc || !Number.isFinite(ultimoPedidoMs) || ultimoPedidoMs <= 0 || !solicitudVigente;
  
 
   if (debePedir) {

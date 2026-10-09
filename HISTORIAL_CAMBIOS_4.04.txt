@@ -1,4 +1,10 @@
 ASISTO - AGENTE DE WHATSAPP
+v4.05.32 - 09/10/2026. Falta de respuesta conserva documentos pendientes y
+             programa reintento de solicitud, sin C ni consentimiento implícito.
+             Respeta intervalo, horarios, cupos y circuitos de riesgo. Ignora
+             cancelaciones históricas por timeout sin baja explícita. No recupera
+             documentos ya borrados o cancelados en Manager automáticamente.
+             Despliegue solicitado para todos los agentes, preservando límites.
 v4.05.31 - 09/10/2026. No cancela por exclusiones técnicas históricas
              numero_no_registrado sin respuesta de baja, en consentimiento y
              recuperación diferida. No vuelve a crear exclusiones por ese motivo.
