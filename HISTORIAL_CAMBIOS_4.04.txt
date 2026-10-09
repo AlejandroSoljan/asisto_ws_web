@@ -1,4 +1,9 @@
 ASISTO - AGENTE DE WHATSAPP
+v4.05.33 - 09/10/2026. Evita avisos repetidos de solicitudes vencidas:
+             excluye pendientes vacíos, bajas y reintentos ya programados antes
+             del límite de consulta. Emite aviso sólo al modificar la programación,
+             con control de concurrencia para conservar cambios del destinatario.
+             No altera consentimiento, límites ni mensajes de Manager.
 v4.05.32 - 09/10/2026. Falta de respuesta conserva documentos pendientes y
              programa reintento de solicitud, sin C ni consentimiento implícito.
              Respeta intervalo, horarios, cupos y circuitos de riesgo. Ignora

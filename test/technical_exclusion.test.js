@@ -11,10 +11,10 @@ test('timeout scheduler only queues a retry with race and opt-out guards', async
   const source = require('node:fs').readFileSync(require.resolve('../app_asisto_ws'), 'utf8');
   const vm = require('node:vm');
   const writes = [];
-  const doc = { _id: 'test', nroTel: '123', pedidoAt: new Date(0) };
+  const doc = { _id: 'test', nroTel: '123', pedidoAt: new Date(0), pendientes: { '1_2': { msj: 'test' } } };
   const ctx = { api_mensajes_confirmacion_habilitada: true, api_mensajes_confirmacion_reenviar_ms: 1000,
     ensureMongo: async () => true, apiMensajesConfirmacionTenantId: () => 'NEA', apiMensajesConfirmacionNumeroFrom: () => '456',
-    apiMensajesConfirmacionCollection: () => ({ find: () => ({ limit: () => ({ toArray: async () => [doc] }) }), updateOne: async (q,u) => writes.push({q,u}) }),
+    apiMensajesConfirmacionCollection: () => ({ find: () => ({ limit: () => ({ toArray: async () => [doc] }) }), updateOne: async (q,u) => { writes.push({q,u}); return { modifiedCount: 1 }; } }),
     console: { log() {} }, EscribirLog() {},
     procesarPendientesDocConfirmacionApiMensajes: () => assert.fail('must not cancel/send') };
   vm.createContext(ctx);

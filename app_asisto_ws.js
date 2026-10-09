@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.05.32 09/10/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.32';
+/*version: 4.05.33 09/10/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.33';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -7984,17 +7984,23 @@ async function procesarTimeoutsPendientesConfirmacionApiMensajes() {
       numeroFrom: apiMensajesConfirmacionNumeroFrom(),
       estado: 'pendiente',
       pedidoAt: { $lte: cutoff },
-      pendientes: { $exists: true }
+      pendientes: { $exists: true, $nin: [null, {}] },
+      exclusionPermanente: { $ne: true },
+      'deferredApi.active': { $ne: true }
     }).limit(50).toArray();
 
     for (const doc of docs) {
+      if (!doc.pendientes || typeof doc.pendientes !== 'object' || !Object.keys(doc.pendientes).length ||
+          doc.exclusionPermanente === true || doc.deferredApi?.active === true) continue;
       const now = new Date();
-      await col.updateOne(
+      const scheduled = await col.updateOne(
         { _id: doc._id, estado: 'pendiente', pedidoAt: doc.pedidoAt,
+          pendientes: doc.pendientes,
           exclusionPermanente: { $ne: true }, 'deferredApi.active': { $ne: true } },
         { $set: { 'deferredApi.active': true, 'deferredApi.nextAt': now,
           'deferredApi.reason': 'solicitud_sin_respuesta_reintentar', 'deferredApi.updatedAt': now } }
       );
+      if (Number(scheduled?.modifiedCount) !== 1) continue;
       const logTimeout = '[API_MENSAJES_CONFIRMACION] solicitud vencida; conserva pendientes y programa reintento nro=' + String(doc.nroTel || '') +
         ' ventana_ms=' + String(reenviarMs);
       console.log(logTimeout);
