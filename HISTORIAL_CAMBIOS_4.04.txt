@@ -1,4 +1,8 @@
 ASISTO - AGENTE DE WHATSAPP
+v4.05.34 - 13/10/2026. Suspensión configurable de solicitudes por prioridad:
+             RVL prioridad 2 sin solicitudes nuevas ni recordatorios. Conserva
+             documentos pendientes y entrega con confirmación aceptada; no
+             interpreta la suspensión como autorización ni afecta prioridad 1.
 v4.05.33 - 09/10/2026. Evita avisos repetidos de solicitudes vencidas:
              excluye pendientes vacíos, bajas y reintentos ya programados antes
              del límite de consulta. Emite aviso sólo al modificar la programación,

@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.05.33 09/10/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.33';
+/*version: 4.05.34 13/10/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.34';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -8859,13 +8859,18 @@ async function detectarNoValidaConfirmacionApiMensajesEnChat(nroTel, doc) {
   return false;
 }
 
+function solicitudPrioridadBloqueada(prioridad) {
+  const blocked = tenantConfig?.api_mensajes_solicitudes_prioridades_bloqueadas;
+  return Array.isArray(blocked) && prioridad != null && blocked.some(p => Number(p) === Number(prioridad));
+}
+
 async function estadoConfirmacionApiMensajes(nroTel, descripcion = '', prioridad = null) {
   const to = onlyDigits(nroTel || '');
   if (!to) return { autorizado: false, motivo: 'sin_numero' };
-  if (api_mensajes_confirmacion_habilitada === true && !requiereConfirmacionPrioridadApiMensajes(prioridad)) {
+  if (!solicitudPrioridadBloqueada(prioridad) && api_mensajes_confirmacion_habilitada === true && !requiereConfirmacionPrioridadApiMensajes(prioridad)) {
     return { autorizado: true, motivo: 'prioridad_sin_confirmacion', prioridad };
   }
-  if (api_mensajes_confirmacion_habilitada !== true) {
+  if (!solicitudPrioridadBloqueada(prioridad) && api_mensajes_confirmacion_habilitada !== true) {
     if (api_mensajes_requerir_contacto_o_historial !== true) return { autorizado: true, motivo: 'disabled' };
     const señales = await señalesContactoApiMensajes(to);
     return señales.contactoConocido
@@ -8966,6 +8971,9 @@ async function estadoConfirmacionApiMensajes(nroTel, descripcion = '', prioridad
   // Silence never means opt-out. Retry only the consent request, under the
   // existing schedule, daily quotas and risk circuit; do not authorize the file.
   const debePedir = expiroVentana || !doc || !Number.isFinite(ultimoPedidoMs) || ultimoPedidoMs <= 0 || !solicitudVigente;
+  if (solicitudPrioridadBloqueada(prioridad)) {
+    return { autorizado: false, motivo: 'solicitudes_prioridad_suspendidas', solicitudEnviada: false, doc };
+  }
  
 
   if (debePedir) {
@@ -8987,7 +8995,12 @@ async function estadoConfirmacionApiMensajes(nroTel, descripcion = '', prioridad
       }
     }
     const texto = textoSolicitudConfirmacionApiMensajes(to, descripcion);
-    const sentConfirmacion = await enviarApiMensajesConPausa(to, () => safeSend(to + '@c.us', texto));
+    const sentConfirmacion = await enviarApiMensajesConPausa(to, () => {
+      if (solicitudPrioridadBloqueada(prioridad)) {
+        throw Object.assign(new Error('solicitudes_prioridad_suspendidas'), { code: 'DAILY_MESSAGE_LIMIT' });
+      }
+      return safeSend(to + '@c.us', texto);
+    });
     await recordApiMensajesBillingWindow(to, {
       sentMessage: sentConfirmacion,
       messageType: 'confirmation',
