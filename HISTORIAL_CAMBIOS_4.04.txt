@@ -1,4 +1,10 @@
 ASISTO - AGENTE DE WHATSAPP
+v4.05.35 - 20/10/2026. Auth failure limpia automaticamente la autenticacion
+             de la sesion afectada y solicita QR nuevo, en Baileys y wwebjs.
+             Reemplaza la espera manual de Baileys loggedOut y el reinicio con
+             credenciales invalidas. Un intento por conexion evita borrados en
+             bucle; se rearma solamente despues de ready. Aplica a todos los
+             dominios que instalen esta version, sin enviar mensajes al vincular.
 v4.05.34 - 13/10/2026. Suspensión configurable de solicitudes por prioridad:
              RVL prioridad 2 sin solicitudes nuevas ni recordatorios. Conserva
              documentos pendientes y entrega con confirmación aceptada; no

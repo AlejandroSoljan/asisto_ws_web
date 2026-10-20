@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.05.34 13/10/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.34';
+/*version: 4.05.35 20/10/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.35';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -1026,6 +1026,7 @@ class BaileysCompatClient extends EventEmitter {
 let lockAcquiredAt = null;
 // --- LocalAuth backup/restore removido ---
 let authFailureHandling = false;
+const authFailureRecovery = require('./auth_failure_recovery').createAuthFailureRecovery();
 const AR_TZ = 'America/Argentina/Cordoba';
 
 // ============================================================================
@@ -12096,6 +12097,7 @@ client.on('message', async message => {
 
 
 client.on('ready', async () => {
+  authFailureRecovery.reset();
   clearAuthReadyWatchdog('ready');
   restartInFlight = false;
   console.log("listo ready....");
@@ -12169,37 +12171,29 @@ client.on('auth_failure', async function(session) {
   io.emit('message', 'Auth failure');
  
   const authFailureReason = String(session || '');
-  EscribirLog('Error 04 - Chatbot error Auth failure', authFailureReason, "error");
+  EscribirLog('Error 04 - Chatbot error Auth failure: ' + authFailureReason, 'error');
   updateLockStateSafe('auth_failure').catch(()=>{});
   clearAuthReadyWatchdog('auth_failure');
 
-  // Baileys 401/loggedOut significa que WhatsApp invalidó la credencial local.
-  // Reiniciar con la misma carpeta auth solo repite 401 indefinidamente. Dejamos
-  // la sesión en auth_failure para que "Borrar autenticación" limpie ESA sesión
-  // y genere un QR nuevo desde el panel.
-  const baileysLoggedOut = isBaileysEngine() && /^baileys_logged_out:/i.test(authFailureReason);
-  if (baileysLoggedOut) {
-    clientStarted = false;
-    authFailureHandling = false;
-    const msg = '[AUTH_FAILURE] Baileys loggedOut; se detiene auto-restart y se espera Borrar autenticación desde el panel';
-    try { console.log(msg); } catch {}
-    try { EscribirLog(msg, 'error'); } catch {}
-    return;
-  }
- 
-
-    // Para otros auth_failure mantenemos el comportamiento histórico.
-  if (isLocalAuthMode() && isOwner && !authFailureHandling) {
-    authFailureHandling = true;
-    setTimeout(async () => {
+  if (!isOwner || clearAuthInFlight || fullProcessRestartInFlight) return;
+  try {
+    const result = await authFailureRecovery.run(async () => {
+      authFailureHandling = true;
       try {
-        await restartClientSession('auth_failure', 7000);
-      } catch (e) {
-        EscribirLog('auth_failure recovery error: ' + String(e?.message || e), 'error');
-      } finally {
-        authFailureHandling = false;
-      }
-    }, 2500);
+        const msg = '[AUTH_FAILURE] limpiando autenticacion de esta sesion para solicitar QR nuevo';
+        console.log(msg);
+        EscribirLog(msg, 'event');
+        return await clearAuthenticationAndRequestQr('auth_failure_auto_qr');
+      } finally { authFailureHandling = false; }
+    });
+    if (result.skipped) {
+      EscribirLog('[AUTH_FAILURE] recuperacion automatica ya intentada; no se repite el borrado', 'error');
+    } else if (!result.ok) {
+      await updateLockStateSafe('auth_failure');
+      EscribirLog('[AUTH_FAILURE] no se pudo generar QR; requiere revisar el error de CLEAR_AUTH', 'error');
+    }
+  } catch (e) {
+    EscribirLog('auth_failure recovery error: ' + String(e?.message || e), 'error');
   }
 });
 
