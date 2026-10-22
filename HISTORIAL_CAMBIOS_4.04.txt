@@ -1,4 +1,10 @@
 ASISTO - AGENTE DE WHATSAPP
+v4.05.36 - 22/10/2026. Recuperacion automatica de Chromium ante detached Frame,
+             Runtime.callFunctionOn timeout y perdida del transporte. Watchdog
+             verifica el navegador sin enviar mensajes y solicita reinicio al
+             supervisor/runner conservando autenticacion y reservas persistidas.
+             safeSend no repite un envio ya despachado con resultado incierto.
+             Despliegue inicial NEA y NEA2; no libera reservas ni cancela documentos.
 v4.05.35 - 20/10/2026. Auth failure limpia automaticamente la autenticacion
              de la sesion afectada y solicita QR nuevo, en Baileys y wwebjs.
              Reemplaza la espera manual de Baileys loggedOut y el reinicio con

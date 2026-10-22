@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.05.35 20/10/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.35';
+/*version: 4.05.36 22/10/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.36';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -6000,18 +6000,60 @@ async function createClientIfNeeded(opts = {}) {
  */
 const automaticSendIds = new Map();
 const automaticSendsInFlight = new Set();
+const browserTransportRecovery = require('./browser_transport_recovery');
+const recoverBrowserTransport = browserTransportRecovery.createBrowserRecovery();
+let browserRecoveryScheduled = false;
+function requestBrowserRecovery(error) {
+  if (!isWwebJsEngine() || !isOwner || clearAuthInFlight || browserRecoveryScheduled ||
+      restartInFlight || fullProcessRestartInFlight || !browserTransportRecovery.isBrowserTransportError(error)) return false;
+  browserRecoveryScheduled = true;
+  // Stop new dispatches immediately. Existing send claims remain in Mongo.
+  localWsPanelState = 'restarting';
+  updateLockStateSafe('restarting').catch(() => {});
+  setTimeout(async () => {
+    try {
+      await recoverBrowserTransport(error, async () => {
+        EscribirLog('[BROWSER_RECOVERY] reinicio automatico; conserva autenticacion y reservas de envios', 'error');
+        return await restartScriptFromPanel('browser_transport_failure');
+      });
+    } catch (e) {
+      EscribirLog('[BROWSER_RECOVERY] error: ' + String(e?.message || e), 'error');
+    } finally { browserRecoveryScheduled = false; }
+  }, 3000);
+  return true;
+}
+
+let browserHealthChecking = false;
+setInterval(async () => {
+  if (browserHealthChecking || !isOwner || !isWwebJsEngine() || !client ||
+      localWsPanelState !== 'online' || restartInFlight || clearAuthInFlight || fullProcessRestartInFlight) return;
+  browserHealthChecking = true;
+  let timeout;
+  try {
+    await Promise.race([
+      client.getState(),
+      new Promise((_, reject) => { timeout = setTimeout(() => reject(Error('Runtime.callFunctionOn timed out (health watchdog)')), 25000); })
+    ]);
+  } catch (e) { requestBrowserRecovery(e); }
+  finally { clearTimeout(timeout); browserHealthChecking = false; }
+}, 30000).unref();
 async function safeSend(to, content, opts) {
   if (isWwebJsEngine()) await require('./wweb_chat_resolution').install(client);
   for (let attempt = 1; attempt <= 3; attempt++) {
+    let dispatchStarted = false;
     try {
       // Estado del cliente (CONNECTED/OPENING/etc.). Si falla, seguimos intentando.
       let state = null;
-      try { state = await client.getState(); } catch (e) { /* ignore */ }
+      try { state = await client.getState(); } catch (e) {
+        if (browserTransportRecovery.isBrowserTransportError(e)) throw e;
+      }
       if (state !== 'CONNECTED') {
         await sleep(700 * attempt);
       }
        const sendOpts = (opts && typeof opts === 'object') ? { ...opts } : {};
       if (typeof sendOpts.sendSeen === 'undefined') sendOpts.sendSeen = false;
+      if (browserRecoveryScheduled || restartInFlight || clearAuthInFlight) throw Error('browser recovery in progress');
+      dispatchStarted = true;
       const sending = client.sendMessage(to, content, sendOpts).then(sent => {
         automaticSendIds.set(getOutgoingStatMessageId(sent), Date.now());
         for (const [id, at] of automaticSendIds) if (Date.now() - at > 600000) automaticSendIds.delete(id);
@@ -6032,6 +6074,8 @@ async function safeSend(to, content, opts) {
       } catch {}
       return sent;
     } catch (e) {
+      requestBrowserRecovery(e);
+      if (!browserTransportRecovery.canReplaySend(dispatchStarted)) throw e;
       const msg = String(e && e.message ? e.message : e);
       const transient = msg.includes('Evaluation failed') ||
                         msg.includes('Execution context was destroyed') ||
@@ -7766,7 +7810,8 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
           // el resultado es incierto y requiere revisión, no un reenvío automático.
           if (item.envioClaimedAt) {
             const errorAnterior = String(item.lastError || '');
-            const recuperablePorGetter = errorAnterior.includes('Data passed to getter must include an id property');
+            const recuperablePorGetter = errorAnterior.includes('Data passed to getter must include an id property') ||
+              browserTransportRecovery.isBrowserTransportError(errorAnterior);
             if (recuperablePorGetter) {
               const auditoria = await auditarDocumentoSalienteApiMensajes(to, item);
               if (auditoria?.status === 'found' && auditoria.match?.id) {
@@ -7780,24 +7825,9 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
                   ' ws_id=' + auditoria.match.id;
                 console.log(logEncontrado);
                 EscribirLog(logEncontrado, 'event');
-              } else if (auditoria?.status === 'not_found_in_loaded_history') {
-                // Este error ocurre antes de obtener una confirmación válida del
-                // mensaje. Si tampoco existe el archivo en el historial, liberamos
-                // exclusivamente esta reserva para efectuar un único reintento.
-                await col.updateOne(
-                  { _id: doc._id, [`pendientes.${pendingKey}.envioCompletadoAt`]: { $exists: false } },
-                  { $unset: {
-                    [`pendientes.${pendingKey}.envioClaimedAt`]: '',
-                    [`pendientes.${pendingKey}.lastError`]: '',
-                    [`pendientes.${pendingKey}.lastAttemptAt`]: ''
-                  }, $set: { pendientesUpdatedAt: new Date(), updatedAt: new Date() } }
-                );
-                item.envioClaimedAt = null;
-                const logLiberado = '[API_MENSAJES] envio incierto no encontrado; reserva liberada para reintento unico nro=' + to +
-                  ' id_msj_dest=' + String(idDest) + ' id_msj_renglon=' + String(idRenglon);
-                console.log(logLiberado);
-                EscribirLog(logLiberado, 'event');
               }
+              // Partial chat history is not proof of non-delivery. Keep the
+              // reservation unless the exact outgoing document was found.
             }
           }
           if (!envioYaRegistrado && item.envioClaimedAt) {
@@ -7967,6 +7997,7 @@ async function procesarPendientesConfirmacionApiMensajes(phoneCandidates, accion
     return { total, ok };
   } catch (e) {
     try { EscribirLog('[API_MENSAJES_CONFIRMACION] error procesando pendientes: ' + String(e?.message || e), 'error'); } catch {}
+    requestBrowserRecovery(e);
     return { total: 0, ok: 0 };
   }
 }
@@ -9899,6 +9930,7 @@ async function ConsultaApiMensajes(){
         }
       } catch (err) {
         if (err?.code === 'DAILY_MESSAGE_LIMIT') return;
+        if (requestBrowserRecovery(err) || browserRecoveryScheduled) return;
         const errorConsulta = 'ConsultaApiMensajes error: ' + String(err?.message || err);
         console.log(errorConsulta);
         EscribirLog(errorConsulta, "error");
