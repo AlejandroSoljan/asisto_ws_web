@@ -1,4 +1,9 @@
 ASISTO - AGENTE DE WHATSAPP
+v4.05.37 - 22/10/2026. Permite desactivar explicitamente el freno por falta
+             de respuestas mediante api_mensajes_circuit_habilitado=false.
+             RVL lo desactiva por pedido del usuario y conserva 100 cupos API,
+             las prioridades suspendidas y las reservas de envios inciertos.
+             Los otros dominios mantienen el freno habilitado por defecto.
 v4.05.36 - 22/10/2026. Recuperacion automatica de Chromium ante detached Frame,
              Runtime.callFunctionOn timeout y perdida del transporte. Watchdog
              verifica el navegador sin enviar mensajes y solicita reinicio al

@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.05.36 22/10/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.36';
+/*version: 4.05.37 22/10/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.37';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -8721,6 +8721,9 @@ async function registrarMetricaApiMensajes(tipo) {
 }
 
 async function estadoCircuitBreakerApiMensajes() {
+  if (tenantConfig?.api_mensajes_circuit_habilitado === false) {
+    return { abierto: false, deshabilitado: true };
+  }
   try {
     if (!await ensureMongo()) return { abierto: true, motivo: 'mongo_no_disponible' };
     const col = apiMensajesConfirmacionCollection();
