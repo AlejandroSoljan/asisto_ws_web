@@ -1,4 +1,8 @@
 ASISTO - AGENTE DE WHATSAPP
+v4.05.38 - 23/10/2026. Aumenta a 5 minutos el protocolTimeout CDP de Puppeteer
+             para restaurar sesiones wwebjs lentas. Si Runtime.callFunctionOn
+             expira durante initialize, solicita un reinicio automático único;
+             preserva autenticación y reservas, y no repite en bucle.
 v4.05.37 - 22/10/2026. Permite desactivar explicitamente el freno por falta
              de respuestas mediante api_mensajes_circuit_habilitado=false.
              RVL lo desactiva por pedido del usuario y conserva 100 cupos API,

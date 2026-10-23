@@ -10,6 +10,10 @@ function canReplaySend(dispatchStarted) {
   return dispatchStarted !== true;
 }
 
+function canAttemptStartupRecovery(alreadyAttempted) {
+  return alreadyAttempted !== true;
+}
+
 function createBrowserRecovery({ now = Date.now, cooldownMs = 120000 } = {}) {
   let running = false;
   let lastAttempt = -Infinity;
@@ -22,4 +26,4 @@ function createBrowserRecovery({ now = Date.now, cooldownMs = 120000 } = {}) {
   };
 }
 
-module.exports = { isBrowserTransportError, canReplaySend, createBrowserRecovery };
+module.exports = { isBrowserTransportError, canReplaySend, canAttemptStartupRecovery, createBrowserRecovery };

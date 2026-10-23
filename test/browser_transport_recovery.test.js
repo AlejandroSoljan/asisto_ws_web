@@ -1,7 +1,7 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { isBrowserTransportError, canReplaySend, createBrowserRecovery } = require('../browser_transport_recovery');
+const { isBrowserTransportError, canReplaySend, canAttemptStartupRecovery, createBrowserRecovery } = require('../browser_transport_recovery');
 
 test('recognizes NEA browser failures without treating auth or API errors as browser failures', () => {
   for (const message of ['Runtime.callFunctionOn timed out. Increase protocolTimeout', 'Attempted to use detached Frame 123', 'Protocol error (Runtime.callFunctionOn): Target closed', 'Execution context was destroyed']) {
@@ -13,6 +13,11 @@ test('recognizes NEA browser failures without treating auth or API errors as bro
 test('does not replay a dispatched send even when the remote acknowledgement is missing', () => {
   assert.equal(canReplaySend(true), false);
   assert.equal(canReplaySend(false), true);
+});
+
+test('startup browser recovery is allowed once and then requires diagnostics', () => {
+  assert.equal(canAttemptStartupRecovery(false), true);
+  assert.equal(canAttemptStartupRecovery(true), false);
 });
 
 test('coalesces concurrent failures and enforces cooldown across recovery failures', async () => {

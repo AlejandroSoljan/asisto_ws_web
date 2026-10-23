@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.05.37 22/10/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.37';
+/*version: 4.05.38 23/10/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.38';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -5963,6 +5963,9 @@ async function createClientIfNeeded(opts = {}) {
       restartOnAuthFail: useRemoteAuth,
       puppeteer: {
         headless: headless,
+        // Existing WhatsApp sessions can take longer than Puppeteer's 180s
+        // CDP default while restoring. Keep the call bounded, with 5 minutes.
+        protocolTimeout: 300_000,
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
@@ -5987,7 +5990,7 @@ async function createClientIfNeeded(opts = {}) {
           })
     });
     try { client.__transport = 'wwebjs'; } catch {}
-    try { EscribirLog(`[WWEB_ENGINE] usando whatsapp-web.js clientId=${clientId} auth_mode=${useRemoteAuth ? 'remote' : 'local'}`, 'event'); } catch {}
+    try { EscribirLog(`[WWEB_ENGINE] usando whatsapp-web.js clientId=${clientId} auth_mode=${useRemoteAuth ? 'remote' : 'local'} protocolTimeout=300000`, 'event'); } catch {}
   }
 
   attachClientHandlers();
@@ -6002,6 +6005,7 @@ const automaticSendIds = new Map();
 const automaticSendsInFlight = new Set();
 const browserTransportRecovery = require('./browser_transport_recovery');
 const recoverBrowserTransport = browserTransportRecovery.createBrowserRecovery();
+let startupBrowserRecoveryUsed = process.env.ASISTO_STARTUP_BROWSER_RECOVERY_ATTEMPT === '1';
 let browserRecoveryScheduled = false;
 function requestBrowserRecovery(error) {
   if (!isWwebJsEngine() || !isOwner || clearAuthInFlight || browserRecoveryScheduled ||
@@ -6515,6 +6519,25 @@ async function startClientInitialize(options = {}) {
       clientStarted = false;
       console.log("Error al inicializar WhatsApp:", e?.message || e);
       EscribirLog("Error al inicializar WhatsApp: " + String(e?.message || e), "error");
+
+      // The health watchdog runs only once online. Cover the same CDP failure
+      // during initialize, but persist a one-restart marker across the process
+      // replacement to avoid an endless restart loop. Never clear LocalAuth.
+      if (isWwebJsEngine() && browserTransportRecovery.isBrowserTransportError(e)) {
+        if (browserTransportRecovery.canAttemptStartupRecovery(startupBrowserRecoveryUsed)) {
+          startupBrowserRecoveryUsed = true;
+          process.env.ASISTO_STARTUP_BROWSER_RECOVERY_ATTEMPT = '1';
+          if (requestBrowserRecovery(e)) {
+            try { EscribirLog('[INIT_RECOVERY] browser transport failure; one automatic process restart scheduled; authentication preserved', 'error'); } catch {}
+            return;
+          }
+        } else {
+          localWsPanelState = 'disconnected';
+          try { await updateLockStateSafe('disconnected'); } catch {}
+          try { await pushHistory('initialize_browser_recovery_exhausted', { reason: String(e?.message || e), pid: process.pid }); } catch {}
+          try { EscribirLog('[INIT_RECOVERY] startup browser recovery already used; leaving disconnected for diagnostics', 'error'); } catch {}
+        }
+      }
 
       // Este error aparece cuando el poll intenta inicializar 2 veces y el Chrome anterior sigue vivo
       const msg = String(e?.message || e || "");
@@ -12133,6 +12156,8 @@ client.on('message', async message => {
 
 client.on('ready', async () => {
   authFailureRecovery.reset();
+  startupBrowserRecoveryUsed = false;
+  try { delete process.env.ASISTO_STARTUP_BROWSER_RECOVERY_ATTEMPT; } catch {}
   clearAuthReadyWatchdog('ready');
   restartInFlight = false;
   console.log("listo ready....");
