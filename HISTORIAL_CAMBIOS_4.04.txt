@@ -1,4 +1,6 @@
 ASISTO - AGENTE DE WHATSAPP
+v4.05.42 - 03/11/2026. Recuperacion de perfil examina solo navegador raiz;
+             ignora procesos renderer para no confundirlos con otro agente.
 v4.05.41 - 03/11/2026. Recuperacion Linux de Chromium huerfano por perfil
              exacto, una vez, sin borrar autenticacion ni cerrar navegador de
              otro agente vivo. Error de Git no aborta arranque; fallo de init

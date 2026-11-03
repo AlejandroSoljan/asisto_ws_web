@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.05.41 03/11/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.41';
+/*version: 4.05.42 03/11/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.42';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}

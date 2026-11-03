@@ -3,3 +3,5 @@ function fixture(owner=1){let alive=true;const killed=[];const io={readdirSync:(
 test('closes only orphan browser for exact profile; preserves other sessions and files',async()=>{const f=fixture();const r=await recover('/auth/target',f);assert.equal(r.recovered,true);assert.deepEqual(f.killed,[[91,'SIGTERM']])});
 test('never closes another live agent browser',async()=>{const f=fixture(60);assert.equal((await recover('/auth/target',f)).reason,'other_live_owner');assert.equal(f.killed.length,0)});
 test('non Linux and relative path cannot terminate anything',async()=>{const f=fixture();assert.equal((await recover('target',f)).recovered,false);assert.equal((await recover('/auth/target',{...f,platform:'win32'})).recovered,false);assert.equal(f.killed.length,0)});
+
+test('renderers using same profile are not treated as another live root owner',async()=>{const f=fixture();const original=f.io.readFileSync;f.io.readFileSync=p=>p.includes('/92/')?'/usr/bin/chromium\0--type=renderer\0--user-data-dir=/auth/target\0':original(p);assert.equal((await recover('/auth/target',f)).recovered,true);assert.deepEqual(f.killed,[[91,'SIGTERM']])});

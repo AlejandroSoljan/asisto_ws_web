@@ -9,6 +9,7 @@ async function recover(profile, { platform = process.platform, io = fs, signal =
       try {
         const args=io.readFileSync('/proc/'+n+'/cmdline','utf8').split('\0');
         if (!/^(chrome|chromium|chromium-browser|google-chrome)(-|$)/.test(path.basename(args[0]||''))) return [];
+        if (args.some(a=>a.startsWith('--type='))) return [];
         const i=args.indexOf('--user-data-dir');
         const raw=args.find(a=>a.startsWith('--user-data-dir='))?.slice(16) || (i>=0?args[i+1]:'');
         if (!raw || path.resolve(raw)!==wanted) return [];
