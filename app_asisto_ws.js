@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.05.40 03/11/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.40';
+/*version: 4.05.41 03/11/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.41';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -6485,9 +6485,7 @@ async function startClientInitialize(options = {}) {
         try {
           EscribirLog('[AUTO_UPDATE] el chequeo de versión falló; se continúa iniciando WhatsApp con la versión instalada.', 'event');
         } catch {}
-        // Un fallo de Git/auto-update NO debe dejar la sesión clavada en "starting".
-        // Continuamos con createClientIfNeeded()/initializeWithRetry usando el código instalado.
-        return;
+        // Continue with the installed version on update failure; do not strand starting.
       }
     
     }
@@ -6556,6 +6554,8 @@ async function startClientInitialize(options = {}) {
       try { await destroyClientHard(client); } catch {}
       try { client = null; } catch {}
       clearAuthReadyWatchdog('initialize_error');
+      await updateLockStateSafe('disconnected');
+      await pushHistory('initialize_failed', { reason: String(e?.message || e).slice(0,600), authPreserved: true });
     }
 
   } finally {
@@ -12734,6 +12734,12 @@ async function initializeWithRetry(clientInstance, maxRetries = 5) {
       await c.initialize();
       return true;
     } catch (e) {
+      if (i === 1 && isWwebJsEngine() && String(e?.message || e).includes('browser is already running')) {
+        const profile = getLocalAuthSessionDir(getWwebClientId());
+        const cleanup = await require('./orphan_chromium').recover(profile);
+        EscribirLog('[INIT_PROFILE_RECOVERY] ' + JSON.stringify(cleanup), 'event');
+        if (cleanup.recovered) { c = await recreateClientForRetry('orphan_profile_browser'); continue; }
+      }
        const detached = isDetachedFrameError(e);
       const ctx = isExecutionContextError(e);
       if (!detached && !ctx) throw e;
