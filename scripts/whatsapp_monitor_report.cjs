@@ -30,7 +30,7 @@ const { getDb, closeDb } = require('./db');
     const tenant = String(c._id);
     const doc = hoursDocs.find(d => String(d._id) === 'store_hours:' + tenant) || hoursDocs.find(d => d.tenantId === tenant);
     const validHours = doc?.hours && Object.values(doc.hours).some(r => Array.isArray(r) && r.length);
-    if (!validHours) { scheduleCoverage.push({ tenantId: tenant, reason: 'schedule_unavailable' }); continue; }
+    if (!validHours) { if (c.consulta_mensajes_respetar_horarios === true) scheduleCoverage.push({ tenantId: tenant, reason: 'schedule_unavailable' }); continue; }
     const bad = outRows.filter(r => r.tenantId === tenant && (!doc.updatedAt || +new Date(r.at) >= +new Date(doc.updatedAt)) && !sendHours.evaluate(doc.hours, new Date(r.at)).allowed);
     const unique = new Map(bad.map(r => [r.messageId || String(r._id), r]));
     if (unique.size) {
