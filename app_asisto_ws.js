@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.05.39 03/11/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.39';
+/*version: 4.05.40 03/11/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.40';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -7232,7 +7232,7 @@ async function loadConsultaMensajesHoursFromDb(force = false) {
     if (!force && consultaMensajesHoursCache.expiresAt > now) return consultaMensajesHoursCache.hours;
 
     if (!tenantId || !await ensureMongo() || !dataBackendReady()) {
-      consultaMensajesHoursCache = { expiresAt: now + 30000, hours: null, updatedAt: null };
+      consultaMensajesHoursCache = { expiresAt: now + 30000, hours: null, updatedAt: null, lookupComplete: false };
       return null;
     }
 
@@ -7245,10 +7245,12 @@ async function loadConsultaMensajesHoursFromDb(force = false) {
     consultaMensajesHoursCache = {
       expiresAt: now + 30000,
       hours: _consultaMensajesHasAnyHours(hours) ? hours : null,
+      lookupComplete: true,
       updatedAt: doc?.updatedAt || null
     };
     return consultaMensajesHoursCache.hours;
   } catch (e) {
+    consultaMensajesHoursCache = { expiresAt: 0, hours: null, updatedAt: null, lookupComplete: false };
     try { EscribirLog('loadConsultaMensajesHoursFromDb error: ' + String(e?.message || e), 'error'); } catch {}
     return null;
   }
@@ -7282,6 +7284,15 @@ async function getConsultaMensajesScheduleStatus() {
   }
 
   const hours = await loadConsultaMensajesHoursFromDb();
+  // No configured schedule is unrestricted unless the tenant explicitly asked
+  // for a restriction. Preserve legacy domains such as GPN (no hours/flag).
+  const explicit = tenantConfig?.consulta_mensajes_respetar_horarios ??
+    tenantConfig?.consultaMensajesRespetarHorarios ?? tenantConfig?.consulta_api_mensajes_respetar_horarios ??
+    tenantConfig?.respetar_horarios_consulta_mensajes;
+  if (!_consultaMensajesHasAnyHours(hours) && consultaMensajesHoursCache.lookupComplete === true && explicit === undefined &&
+      !process.env.CONSULTA_MENSAJES_RESPETAR_HORARIOS && !process.env.CONSULTA_API_MENSAJES_RESPETAR_HORARIOS) {
+    return { allowed: true, reason: 'no_schedule_restriction_configured' };
+  }
   return require('./send_hours').evaluate(hours);
 }
 

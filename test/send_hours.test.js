@@ -18,3 +18,12 @@ test('accepted pending sends check hours before claiming; queue checks after del
  assert.ok(queue.indexOf('await sleep(delay)')<queue.indexOf('await waitForSendHours()'));assert.ok(queue.indexOf('await waitForSendHours()')<queue.indexOf("require('./daily_message_quota').reserve"));
  assert.equal((source.match(/client\.sendMessage\(/g)||[]).length,1);
 });
+
+test('GPN without explicit restriction is unrestricted; RVL and explicit missing hours stay protected',async()=>{
+ const fn=source.slice(source.indexOf('async function getConsultaMensajesScheduleStatus('),source.indexOf('function logConsultaMensajesScheduleStatus('));
+ async function check(config,h){const ctx={consultaMensajesHoursCache:{lookupComplete:true},tenantConfig:config,consulta_mensajes_respetar_horarios:true,loadConsultaMensajesHoursFromDb:async()=>h,_consultaMensajesHasAnyHours:x=>!!x&&Object.values(x).some(a=>a.length),process:{env:{}},require:()=>({evaluate:x=>evaluate(x,new Date('2026-11-03T06:00:00Z'))})};vm.createContext(ctx);vm.runInContext(fn,ctx);return (await ctx.getConsultaMensajesScheduleStatus()).allowed;}
+ assert.equal(await check({},null),true);
+ assert.equal(await check({consulta_mensajes_respetar_horarios:true},null),false);
+ assert.equal(await check({consulta_mensajes_respetar_horarios:true},hours),false);
+ assert.equal(await check({},hours),false);
+});

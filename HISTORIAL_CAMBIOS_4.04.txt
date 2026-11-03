@@ -1,4 +1,8 @@
 ASISTO - AGENTE DE WHATSAPP
+v4.05.40 - 03/11/2026. Corrige regresion v4.05.39: clientes sin franjas
+             ni restriccion explicita (GPN) conservan operacion sin horario.
+             Clientes con franjas configuradas siguen controlando cada envio;
+             restriccion explicita sin franjas continua retenida.
 v4.05.39 - 03/11/2026. Corrige bypass de horarios en pendientes aceptados.
              Todos los envios automaticos validan hora argentina justo antes
              del transporte, incluidos reintentos, confirmaciones y compras.
