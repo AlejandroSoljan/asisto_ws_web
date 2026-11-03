@@ -1,4 +1,10 @@
 ASISTO - AGENTE DE WHATSAPP
+v4.05.39 - 03/11/2026. Corrige bypass de horarios en pendientes aceptados.
+             Todos los envios automaticos validan hora argentina justo antes
+             del transporte, incluidos reintentos, confirmaciones y compras.
+             Sin horarios disponibles y restriccion activa, espera sin enviar.
+             Conserva pendientes, consentimiento, limites y reservas inciertas.
+             Impacta RVL y demas dominios con restriccion horaria habilitada.
 v4.05.38 - 23/10/2026. Aumenta a 5 minutos el protocolTimeout CDP de Puppeteer
              para restaurar sesiones wwebjs lentas. Si Runtime.callFunctionOn
              expira durante initialize, solicita un reinicio automático único;

@@ -51,7 +51,7 @@ test('counts every attachment, deduplicates IDs, accepted still blocked by 120',
 test('quota denial releases unsent claim and never calls WhatsApp', async () => {
   let released = false;
   const context = {
-    tenantConfig: { api_mensajes_limite_mensajes_diario: 120 }, onlyDigits: s => s,
+    waitForSendHours: async () => {}, tenantConfig: { api_mensajes_limite_mensajes_diario: 120 }, onlyDigits: s => s,
     estadoLimiteDiarioApiMensajes: async () => ({ permitido: false }),
     keyPendienteConfirmacionApiMensajes: () => '1_2', apiMensajesConfirmacionId: () => 'RVL:123:456',
     apiMensajesConfirmacionCollection: () => ({ updateOne: async (q, u) => { released = !!u.$unset['pendientes.1_2.envioClaimedAt'] || Object.hasOwn(u.$unset, 'pendientes.1_2.envioClaimedAt'); } })

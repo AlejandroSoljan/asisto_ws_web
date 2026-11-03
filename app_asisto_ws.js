@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.05.38 23/10/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.38';
+/*version: 4.05.39 03/11/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.39';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -6041,6 +6041,10 @@ setInterval(async () => {
   } catch (e) { requestBrowserRecovery(e); }
   finally { clearTimeout(timeout); browserHealthChecking = false; }
 }, 30000).unref();
+async function waitForSendHours() {
+  return require('./send_hours').waitUntilAllowed(getConsultaMensajesScheduleStatus, sleep, logConsultaMensajesScheduleStatus);
+}
+
 async function safeSend(to, content, opts) {
   if (isWwebJsEngine()) await require('./wweb_chat_resolution').install(client);
   for (let attempt = 1; attempt <= 3; attempt++) {
@@ -6057,6 +6061,8 @@ async function safeSend(to, content, opts) {
        const sendOpts = (opts && typeof opts === 'object') ? { ...opts } : {};
       if (typeof sendOpts.sendSeen === 'undefined') sendOpts.sendSeen = false;
       if (browserRecoveryScheduled || restartInFlight || clearAuthInFlight) throw Error('browser recovery in progress');
+      await waitForSendHours();
+      if (browserRecoveryScheduled || restartInFlight || clearAuthInFlight || await isWwebMessagesBlockedSafe()) throw Error('send blocked after schedule wait');
       dispatchStarted = true;
       const sending = client.sendMessage(to, content, sendOpts).then(sent => {
         automaticSendIds.set(getOutgoingStatMessageId(sent), Date.now());
@@ -7276,26 +7282,7 @@ async function getConsultaMensajesScheduleStatus() {
   }
 
   const hours = await loadConsultaMensajesHoursFromDb();
-  if (!_consultaMensajesHasAnyHours(hours)) {
-    return { allowed: true, reason: 'no_hours_configured' };
-  }
-
-  const now = getConsultaMensajesNowArgentinaParts();
-  const ranges = Array.isArray(hours[now.dayKey]) ? hours[now.dayKey] : [];
-  const slots = ranges.map((r) => `${r.from}-${r.to}`).join(', ');
-
-  if (!ranges.length) {
-    return { allowed: false, reason: 'day_closed', dayKey: now.dayKey, hhmm: now.hhmm, slots: '' };
-  }
-
-  const inside = ranges.some((r) => now.minutes >= r.fromM && now.minutes <= r.toM);
-  return {
-    allowed: inside,
-    reason: inside ? 'inside_range' : 'outside_range',
-    dayKey: now.dayKey,
-    hhmm: now.hhmm,
-    slots
-  };
+  return require('./send_hours').evaluate(hours);
 }
 
 function logConsultaMensajesScheduleStatus(status) {
@@ -7778,6 +7765,7 @@ async function procesarPendientesDocConfirmacionApiMensajes(doc, accion, motivo)
       }
 
       if (accion === 'E') {
+        if (!(await getConsultaMensajesScheduleStatus()).allowed) { detenidoPor = 'fuera_horario'; break; }
         // El cupo limita el inicio de solicitudes nuevas. Una vez que el cliente
         // respondió y el documento quedó aceptado, hay que completar ese envío:
         // bloquearlo aquí deja un OK válido retenido indefinidamente.
@@ -9358,6 +9346,7 @@ async function enviarApiMensajesConPausa(nroTel, enviar, pendiente = null) {
       const delay = calcularDelayConsultaMensajesMs(apiMensajesUltimoNroEnviado, actual);
       if (delay > 0) await sleep(delay);
     }
+    await waitForSendHours();
     // Runs inside the send queue and reserves durably before any WhatsApp call.
     const limiteMensajes = Math.max(0, Math.floor(Number(tenantConfig?.api_mensajes_limite_mensajes_diario) || 0));
     if (limiteMensajes > 0) {
@@ -9515,7 +9504,6 @@ async function ConsultaApiMensajes(){
       }
 
       await procesarTimeoutsPendientesConfirmacionApiMensajes();
-      await recuperarLotePersistidoApiMensajes();
 
       const horarioConsulta = await getConsultaMensajesScheduleStatus();
       logConsultaMensajesScheduleStatus(horarioConsulta);
@@ -9537,6 +9525,8 @@ async function ConsultaApiMensajes(){
       }
 
       await recuperarDiferidosApiMensajes();
+
+      await recuperarLotePersistidoApiMensajes();
 
       const nroTelFrom = getApiMensajesNroTelFrom();
       if (!api2 || !api3 || !key || !nroTelFrom) {
@@ -10687,9 +10677,9 @@ async function enviar_mensajes_compra() {
           identificacion1: 'COMPRA_ADMIN_2'
         });
       } else {
-        await client.sendMessage(jid, msgCompraCliente, { sendSeen: false });
-        await client.sendMessage('5493462674128@c.us', msgCompraAdmin, { sendSeen: false });
-        await client.sendMessage('5493462541989@c.us', msgCompraAdmin, { sendSeen: false });
+        await safeSend(jid, msgCompraCliente, { sendSeen: false });
+        await safeSend('5493462674128@c.us', msgCompraAdmin, { sendSeen: false });
+        await safeSend('5493462541989@c.us', msgCompraAdmin, { sendSeen: false });
       }
 
       await compraEntregaConnection.query("update es_datos_entregas set observaciones = '*'");
