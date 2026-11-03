@@ -1,4 +1,7 @@
 ASISTO - AGENTE DE WHATSAPP
+v4.05.43 - 03/11/2026. FLEMING_SASTRE: esperar modulo de autenticacion
+             WAWebSocketModel antes de inject y evitar HTML Web antiguo en cache.
+             No toca LocalAuth; fallos iniciales incluyen stack en historial.
 v4.05.42 - 03/11/2026. Recuperacion de perfil examina solo navegador raiz;
              ignora procesos renderer para no confundirlos con otro agente.
 v4.05.41 - 03/11/2026. Recuperacion Linux de Chromium huerfano por perfil

@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.05.42 03/11/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.42';
+/*version: 4.05.43 03/11/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.43';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -5961,6 +5961,7 @@ async function createClientIfNeeded(opts = {}) {
       // Con LocalAuth no queremos que whatsapp-web.js borre la carpeta de sesión en auth_failure.
       // Con RemoteAuth sí conviene reiniciar.
       restartOnAuthFail: useRemoteAuth,
+      webVersionCache: { type: 'none' },
       puppeteer: {
         headless: headless,
         // Existing WhatsApp sessions can take longer than Puppeteer's 180s
@@ -5989,6 +5990,7 @@ async function createClientIfNeeded(opts = {}) {
             dataPath: getAuthBasePath()
           })
     });
+    require('./wweb_auth_readiness').install(client);
     try { client.__transport = 'wwebjs'; } catch {}
     try { EscribirLog(`[WWEB_ENGINE] usando whatsapp-web.js clientId=${clientId} auth_mode=${useRemoteAuth ? 'remote' : 'local'} protocolTimeout=300000`, 'event'); } catch {}
   }
@@ -6555,7 +6557,7 @@ async function startClientInitialize(options = {}) {
       try { client = null; } catch {}
       clearAuthReadyWatchdog('initialize_error');
       await updateLockStateSafe('disconnected');
-      await pushHistory('initialize_failed', { reason: String(e?.message || e).slice(0,600), authPreserved: true });
+      await pushHistory('initialize_failed', { reason: String(e?.message || e).slice(0,600), stack: String(e?.stack || '').slice(0,1800), authPreserved: true });
     }
 
   } finally {
