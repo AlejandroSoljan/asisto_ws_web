@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.05.43 03/11/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.43';
+/*version: 4.05.44 06/11/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.44';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -1146,11 +1146,12 @@ function createControlApiClient(options = {}) {
   });
 
   function configure(next = {}) {
+    const previous = JSON.stringify([baseUrl, token, tenantId, numero]);
     if (next.baseUrl !== undefined) baseUrl = normalizeBaseUrl(next.baseUrl);
     if (next.token !== undefined) token = String(next.token || '').trim();
     if (next.tenantId !== undefined) tenantId = String(next.tenantId || '').trim().toUpperCase();
     if (next.numero !== undefined) numero = String(next.numero || '').replace(/\D/g, '');
-    readyUntil = 0;
+    if (previous !== JSON.stringify([baseUrl, token, tenantId, numero])) readyUntil = 0;
   }
 
   function isConfigured() {

@@ -1,4 +1,5 @@
 ASISTO - AGENTE DE WHATSAPP
+v4.05.44 - 06/11/2026. Control API conserva cache ping 30 segundos si configure recibe la misma URL, token, tenant y numero. Invalidacion inmediata al cambiar datos. Evita ping por cada ensureMongo; no cambia envios, limites ni consentimiento. Prueba control_api_ping_cache. Requiere actualizacion instalada, tag no implica instalacion.
 v4.05.43 - 03/11/2026. FLEMING_SASTRE: esperar modulo de autenticacion
              WAWebSocketModel antes de inject y evitar HTML Web antiguo en cache.
              No toca LocalAuth; fallos iniciales incluyen stack en historial.
