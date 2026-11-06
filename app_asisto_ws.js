@@ -1,6 +1,6 @@
 /*script:app_asisto*/
-/*version: 4.05.44 06/11/2026   */
-const ASISTO_SCRIPT_VERSION = '4.05.44';
+/*version: 4.05.45 06/11/2026   */
+const ASISTO_SCRIPT_VERSION = '4.05.45';
 try {
   console.log(`[BOOT] app_asisto version=${ASISTO_SCRIPT_VERSION} file=${__filename} pid=${process.pid}`);
 } catch {}
@@ -4891,7 +4891,7 @@ async function getPolicySafe() {
    // La pausa del panel puede estar guardada como paused/messagesBlocked/etc.
     if (dataBackendReady() && or.length) {
       const p0 = await getDataCollection('wa_wweb_policies').findOne({ $or: or });
-      if (p0) return p0;
+      if (p0 || isControlApiConfigured()) return p0;
     }
 
     if (!PolicyModel) return null;
@@ -8689,7 +8689,7 @@ async function estadoLimiteNoContactosApiMensajes() {
       numeroFrom: getApiMensajesNroTelFrom(),
       solicitudDayKey: dayKey,
       contactoConocido: false
-    }).limit(limite).toArray();
+    }, { projection: { _id: 1 } }).limit(limite).toArray();
     const enviados = Array.isArray(docs) ? docs.length : 0;
     return { permitido: enviados < limite, limite, enviados, restantes: Math.max(0, limite - enviados), dayKey };
   } catch (e) {
@@ -8761,7 +8761,7 @@ async function estadoCircuitBreakerApiMensajes() {
       solicitudDayKey: dayKey,
       tipoDocumento: { $ne: 'metrica' },
       pedidoAt: { $lte: cutoff }
-    }).limit(500).toArray();
+    }, { projection: { estado: 1, motivoCancelacion: 1 } }).limit(500).toArray();
     const muestra = Array.isArray(docs) ? docs.length : 0;
     const sinRespuesta = (docs || []).filter(d => d?.estado === 'pendiente' || d?.motivoCancelacion === 'sin_respuesta_timeout').length;
     const ratio = muestra > 0 ? sinRespuesta / muestra : 0;
